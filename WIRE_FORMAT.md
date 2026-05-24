@@ -263,3 +263,137 @@ All v0.1 + v0.2 fields remain unchanged. The following are added:
   `tests/test_worked_examples.py` (Examples 1–4 from
   `plans/003_outline.md`). Any divergence in the partition numbers is
   a schema-breaking change.
+
+## Schema v0.4
+
+Released with Feature 6 (Coding-without-a-plan anti-pattern). Adds six
+per-session fields summarizing plan-signal detection and edit
+footprint. All values are integers, booleans, or fixed categorical
+signal-name tokens — no raw paths, prompt fragments, or tool input
+text. The privacy invariant test
+(`tests/test_extractor_integration.py`) pins this contract.
+
+### Top-level object
+
+Unchanged shape from v0.3 — only `device.schema_version` and the
+per-session field set change. `schema_version` MUST be `"0.4"`.
+
+### `sessions[]` — PerSession (v0.4 additions)
+
+All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
+
+| Field                          | Type             | Nullable | Notes                                                                                                                                |
+|--------------------------------|------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
+| `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`. |
+| `is_planned`                   | boolean          | no       | True iff `len(strong_plan_signals) >= 1` OR `len(weak_plan_signals) >= 2`. Per outline § "planned". |
+| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding `.claude/`, `.git/`, and basename `CLAUDE.md`. Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
+| `total_lines_edited`           | integer          | no       | Outline approximation: `sum over Edit/Write/MultiEdit of max(line_count(new_string), line_count(old_string))`. For Write this collapses to `line_count(content)`. For MultiEdit the per-edit max is summed across the `edits` array. Excluded-path edits contribute 0. |
+| `is_significant_edit_session`  | boolean          | no       | True iff `files_modified > 5` OR `total_lines_edited > 200`. Per outline § "significant edits"; gates the Coding-without-a-plan denominator. |
+
+### Signal detection rules (mirrors outline § "Common definitions")
+
+**Strong signals** (any 1 fires `is_planned = true`):
+
+| Signal name           | Trigger                                                                                                |
+|-----------------------|--------------------------------------------------------------------------------------------------------|
+| `EnterPlanMode`       | `tool_use` block with `name == "EnterPlanMode"` anywhere in the session.                               |
+| `/writing-plans skill`| `tool_use` block with `name == "Skill"` and `input.skill` (or `input.name`) ∈ {`writing-plans`, `superpowers:writing-plans`}. |
+| `/brainstorming skill`| Same as above with `input.skill` ∈ {`brainstorming`, `superpowers:brainstorming`}.                     |
+| `TodoWrite>=3`        | `tool_use` block with `name == "TodoWrite"` and `len(input.todos) >= 3`, occurring within the first 10 tool calls of the session. |
+| `plan_file_write`     | `tool_use` block with `name ∈ {Edit, Write, MultiEdit}` writing to a path that ends in `.md` and matches the *plan-shaped path* pattern. |
+
+**Weak signals** (need ≥2 together to fire `is_planned = true`):
+
+| Signal name              | Trigger                                                                                                |
+|--------------------------|--------------------------------------------------------------------------------------------------------|
+| `structured_first_prompt`| The session's FIRST `user` message has `>200` approximate tokens AND (≥2 markdown list lines matching `^[-*]\s` or `^\d+\.\s` OR ≥2 distinct sequence words from `{step, phase, first, then, next, finally}`). |
+| `plan_md_read_early`     | A `tool_use` block with `name == "Read"` reading a plan-shaped `.md` file within the first 5 tool calls of the session. |
+| `prior_24h_plan_artifact`| ANOTHER session in the SAME project (matched on un-hashed `project_root` locally, then hashed) produced a plan artifact within the 24h preceding this session's `started_at_ms`. Self-matches are excluded. |
+
+### Plan-shaped path pattern
+
+A path is *plan-shaped* iff it does NOT lie under an excluded prefix
+(`node_modules/`, `vendor/`, `.git/`, `dist/`, `build/`, `target/`)
+AND either:
+
+- it includes a plan-shaped directory segment (`plans/`, `specs/`,
+  `docs/{design,architecture,rfc,proposals}/`), OR
+- its basename is a `.md` or `.txt` file (excluding the standard repo
+  files `README.md`, `CHANGELOG.md`, `CHANGES.md`, `LICENSE.md`,
+  `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `AUTHORS.md`)
+  whose basename contains `plan`, `spec`, `design`, or `rfc`.
+
+### Significance threshold
+
+`is_significant_edit_session = (files_modified > 5) OR (total_lines_edited > 200)`.
+The strict greater-than is intentional — per outline, 5 files +
+199 lines must NOT trip significance; 6 files OR 201 lines does. The
+boundary is pinned by `tests/test_edit_counter.py`.
+
+### Excluded edit paths
+
+Edits to the following are NEVER counted toward `files_modified` or
+`total_lines_edited` (they're tracked by other metrics or are noise):
+
+- any path containing `.claude/`,
+- any path containing `.git/`,
+- any path whose basename is `CLAUDE.md`.
+
+### Example
+
+```json
+{
+  "config": {
+    "custom_commands": 2,
+    "global_claude_md_lines": 0,
+    "hooks": 3,
+    "mcp_servers": 4,
+    "project_claude_md_lines_avg": 0
+  },
+  "device": {
+    "client_version": "0.4.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1735689600000,
+    "schema_version": "0.4",
+    "window_days": 30
+  },
+  "sessions": [
+    {
+      "afk_intervals": [],
+      "afk_max_streak_minutes": 0,
+      "afk_minutes": 0,
+      "afk_parallel_minutes_foreground": 0,
+      "cron_parallel_minutes": 0,
+      "distinct_builtin_tools": ["EnterPlanMode", "Write"],
+      "distinct_mcp_tools": [],
+      "distinct_skills": [],
+      "ended_at_ms": 1735691400000,
+      "files_modified": 7,
+      "hitl_minutes": 2,
+      "idle_minutes": 0,
+      "is_planned": true,
+      "is_significant_edit_session": true,
+      "project_hash": "fedcba9876543210",
+      "session_hash": "0123456789abcdef",
+      "started_at_ms": 1735689900000,
+      "strong_plan_signals": ["EnterPlanMode"],
+      "total_lines_edited": 312,
+      "weak_plan_signals": []
+    }
+  ]
+}
+```
+
+### Compatibility
+
+- Top-level key ordering remains alphabetical: `config`, `device`, `sessions`.
+- The server SHOULD accept `schema_version` of `"0.1"`, `"0.2"`, `"0.3"`, or `"0.4"` during the deprecation window.
+- All new integer fields default to `0` and boolean fields to `false`
+  when no relevant events are observed. The server MUST treat absence
+  and the default-value equivalent identically.
+- `strong_plan_signals` and `weak_plan_signals` default to `[]`. The
+  server MUST treat absence and `[]` identically.
+- Signal-name strings are a CLOSED enum — the server SHOULD reject
+  payloads containing unknown signal-name strings, since this would
+  indicate a schema drift the server hasn't acknowledged yet.
