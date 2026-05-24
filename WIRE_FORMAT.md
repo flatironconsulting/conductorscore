@@ -562,3 +562,124 @@ only counts / booleans / hashed grouping keys:
 - The frustration regex is intentionally not part of the wire contract
   — only the resulting `rage_quit_event` boolean is. Clients may
   tune the regex without bumping the schema version.
+
+## Schema v0.6
+
+Released with Feature 8 (fluency + informational signals). This is
+the **final Wave 1 shape**. Adds three per-session fields covering
+the fluency repetition metric (slash-command + HITL-window MCP
+counts) and the model variety / freshness informational metrics
+(per-model assistant message counts using raw model IDs). The
+privacy invariant test (`tests/test_extractor_integration.py`) pins
+this contract.
+
+### Top-level object
+
+Unchanged shape from v0.5 — only `device.schema_version` and the
+per-session field set change. `schema_version` MUST be `"0.6"`.
+
+### `sessions[]` — PerSession (v0.6 additions)
+
+All v0.1 + v0.2 + v0.3 + v0.4 + v0.5 fields remain unchanged. The
+following are added:
+
+| Field                       | Type                | Nullable | Notes                                                                                                                                                                                                                                                                                                |
+|-----------------------------|---------------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `assistant_msgs_by_model`   | object<string,int>  | no       | `{ "<raw_model_id>": message_count }`. Counts assistant transcript messages (deduplicated on `(timestamp_ms, model)` so one line that fans out into text + tool_use + thinking blocks is one message). Keys are RAW Anthropic model IDs (e.g. `"claude-sonnet-4-6"`); the server applies its own tier classifier so the wire format stays stable across new model releases. Messages with no `model` field are omitted entirely. Defaults to `{}`. |
+| `user_skill_invocations`    | integer             | no       | Total count of slash-command invocations in USER messages, matching the same `(?:^|\s)/[a-z][a-z0-9_-]+\b` pattern as `distinct_skills` but **counting every occurrence** (a user message with `"/plan and /plan again"` contributes 2). Numerator of the fluency repetition metric. Defaults to `0`. |
+| `hitl_mcp_invocations`      | integer             | no       | Count of `ASSISTANT_TOOL` events whose tool name starts with `mcp__` AND whose minute (`floor(timestamp_ms / 60_000)`) is in the session's HITL minute set (per minute classifier). MCP calls inside AFK / Idle / Cron minutes are excluded by design — the fluency metric is HITL-time-only. Defaults to `0`. |
+
+### Privacy posture for v0.6 fields
+
+- **assistant_msgs_by_model** — raw Anthropic model IDs are
+  categoricals (a small, public namespace published by Anthropic);
+  the dict carries integer counts only.
+- **user_skill_invocations** — the slash-command regex is applied
+  in-process to user text; only the integer escapes. Slash-command
+  arguments and surrounding prose are dropped, identical to the
+  `distinct_skills` extractor.
+- **hitl_mcp_invocations** — derived from existing in-memory
+  `Event` objects + the precomputed HITL minute set; no raw text is
+  read.
+
+### Example
+
+```json
+{
+  "config": {
+    "custom_commands": 2,
+    "global_claude_md_lines": 142,
+    "hooks": 3,
+    "mcp_servers": 4,
+    "project_claude_md_lines_avg": 87
+  },
+  "device": {
+    "client_version": "0.6.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1735689600000,
+    "schema_version": "0.6",
+    "window_days": 30
+  },
+  "sessions": [
+    {
+      "afk_intervals": [],
+      "afk_max_streak_minutes": 0,
+      "afk_minutes": 0,
+      "afk_parallel_minutes_foreground": 0,
+      "assistant_msgs_by_model": {
+        "claude-haiku-4-5": 5,
+        "claude-opus-4-7": 15,
+        "claude-sonnet-4-6": 80
+      },
+      "auto_compaction_events": 1,
+      "cron_parallel_minutes": 0,
+      "distinct_builtin_tools": ["Bash", "Edit", "Read"],
+      "distinct_mcp_tools": ["mcp__github__add_comment"],
+      "distinct_skills": ["plan"],
+      "ended_at_ms": 1735691400000,
+      "files_modified": 7,
+      "hitl_mcp_invocations": 4,
+      "hitl_minutes": 12,
+      "idle_minutes": 0,
+      "is_planned": true,
+      "is_significant_edit_session": true,
+      "project_hash": "fedcba9876543210",
+      "qualifying_pairs": 3,
+      "rage_quit_event": false,
+      "redundant_approvals_per_signature": {
+        "Bash::git": 4,
+        "Edit::3b49c75f": 2
+      },
+      "repetitive_pairs": 1,
+      "revert_count": 2,
+      "session_hash": "0123456789abcdef",
+      "started_at_ms": 1735689900000,
+      "strong_plan_signals": ["EnterPlanMode"],
+      "tool_error_count": 5,
+      "total_input_tokens": 187420,
+      "total_lines_edited": 312,
+      "total_output_tokens": 41280,
+      "user_skill_invocations": 6,
+      "weak_plan_signals": []
+    }
+  ]
+}
+```
+
+### Compatibility
+
+- Top-level key ordering remains alphabetical: `config`, `device`, `sessions`.
+- The server SHOULD accept `schema_version` of `"0.1"`, `"0.2"`,
+  `"0.3"`, `"0.4"`, `"0.5"`, or `"0.6"` during the deprecation
+  window.
+- All new integer fields default to `0` and `assistant_msgs_by_model`
+  defaults to `{}`. The server MUST treat absence and the
+  default-value equivalent identically.
+- `assistant_msgs_by_model` keys are unvalidated raw model IDs —
+  the server is responsible for tier classification (Opus / Sonnet
+  / Haiku / Unknown) and unknown IDs MUST NOT cause an upload to
+  fail validation. New model releases ship without a schema bump.
+- The HITL minute set used by `hitl_mcp_invocations` derives from
+  the minute classifier (USER message at minute `m` makes minutes
+  `m` and `m+1` HITL). Changes to the classifier behave like a
+  silent recount and do not bump the schema version.
