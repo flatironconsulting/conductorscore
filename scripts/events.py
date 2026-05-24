@@ -13,6 +13,7 @@ class SessionMeta:
     project_root: str  # original "/" path, derived from dir name
     first_ts_ms: int
     last_ts_ms: int
+    jsonl_path: Path | None = None
 
 
 def _parse_ts_ms(line: str) -> int | None:
@@ -88,6 +89,7 @@ def find_sessions() -> list[SessionMeta]:
                     project_root=project_root,
                     first_ts_ms=first,
                     last_ts_ms=last,
+                    jsonl_path=jsonl,
                 )
             )
     return out

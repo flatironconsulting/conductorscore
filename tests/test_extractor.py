@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.1"
+    assert out.device.schema_version == "0.2"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -116,3 +116,96 @@ def test_extract_default_now_ms_uses_time(isolated_claude_home, monkeypatch):
     monkeypatch.setattr(extractor_mod.time, "time", lambda: 1700000000.0)
     out = extract(device_id="dev-1", client_version="0.1.0")
     assert out.device.extracted_at_ms == 1700000000000
+
+
+def test_extract_includes_config_block_with_zero_counts_when_empty(isolated_claude_home):
+    out = extract(device_id="dev-1", client_version="0.1.0", now_ms=1_000_000_000_000)
+    assert out.config.mcp_servers == 0
+    assert out.config.hooks == 0
+    assert out.config.custom_commands == 0
+
+
+def test_extract_populates_config_from_fake_home(isolated_claude_home, tmp_path):
+    # isolated_claude_home is tmp_path/.claude. The scanner looks for
+    # tmp_path/.claude.json and tmp_path/.claude/.mcp.json etc.
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"a": {}, "b": {}}})
+    )
+    (isolated_claude_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {"type": "command", "command": "x"},
+                                {"type": "command", "command": "y"},
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    cmds = isolated_claude_home / "commands"
+    cmds.mkdir()
+    (cmds / "plan.md").write_text("p")
+    (cmds / "review.md").write_text("r")
+    (cmds / "ship.md").write_text("s")
+
+    out = extract(device_id="dev-1", client_version="0.1.0", now_ms=1_000_000_000_000)
+    assert out.config.mcp_servers == 2
+    assert out.config.hooks == 2
+    assert out.config.custom_commands == 3
+
+
+def test_extract_populates_distinct_tool_fields_per_session(isolated_claude_home):
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "/plan it out"}],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Read"},
+                        {"type": "tool_use", "name": "Edit"},
+                        {"type": "tool_use", "name": "mcp__github__add_comment"},
+                    ],
+                },
+            },
+            {"timestamp": "2026-01-01T00:01:00Z"},
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.distinct_skills == ("plan",)
+    assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
+    assert s.distinct_builtin_tools == ("Edit", "Read")
+
+
+def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
+    out = extract(device_id="dev-1", client_version="0.1.0", now_ms=1_000_000_000_000)
+    parsed = json.loads(out.to_json())
+    assert set(parsed.keys()) == {"device", "config", "sessions"}
+    assert set(parsed["config"].keys()) == {
+        "mcp_servers",
+        "hooks",
+        "custom_commands",
+        "global_claude_md_lines",
+        "project_claude_md_lines_avg",
+    }
