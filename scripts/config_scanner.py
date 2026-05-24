@@ -5,7 +5,24 @@ from pathlib import Path
 
 from scripts.output_schema import ConfigCounts
 
-__all__ = ["ConfigCounts", "scan_config"]
+__all__ = [
+    "ConfigCounts",
+    "count_claude_md_lines",
+    "scan_config",
+]
+
+
+def count_claude_md_lines(path: Path) -> int:
+    """Return the number of lines in a CLAUDE.md file (0 if missing /
+    unreadable). Uses ``read_text().splitlines()`` so trailing newlines
+    are NOT counted as a phantom extra line.
+    """
+    if not path.is_file():
+        return 0
+    try:
+        return len(path.read_text().splitlines())
+    except OSError:
+        return 0
 
 
 def _count_mcp_servers(home: Path) -> int:
@@ -64,17 +81,36 @@ def _count_custom_commands(home: Path) -> int:
     return len(list(cmds_dir.glob("*.md")))
 
 
-def scan_config(home: Path) -> ConfigCounts:
-    """Scan the user's Claude Code config under ``home`` for v0.2 counts.
+def scan_config(
+    home: Path,
+    project_roots: list[str] | None = None,
+) -> ConfigCounts:
+    """Scan the user's Claude Code config under ``home``.
 
     ``home`` is the directory that contains ``.claude.json`` and ``.claude/``
     (typically ``$HOME``). Pass ``Path.home()`` in production.
 
-    ``global_claude_md_lines`` and ``project_claude_md_lines_avg`` are
-    placeholders until Feature 7.
+    v0.5 wires up the two previously-placeholder fields:
+      * ``global_claude_md_lines`` — line count of ``<home>/.claude/CLAUDE.md``.
+      * ``project_claude_md_lines_avg`` — average line count of
+        ``<root>/CLAUDE.md`` across the supplied ``project_roots``
+        (existing files only; ``int`` floor of the mean). ``0`` if none
+        of the roots have a CLAUDE.md.
     """
+    global_md = count_claude_md_lines(home / ".claude" / "CLAUDE.md")
+    project_avg = 0
+    if project_roots:
+        counts = [
+            count_claude_md_lines(Path(root) / "CLAUDE.md")
+            for root in project_roots
+        ]
+        existing = [c for c in counts if c > 0]
+        if existing:
+            project_avg = sum(existing) // len(existing)
     return ConfigCounts(
         mcp_servers=_count_mcp_servers(home),
         hooks=_count_hooks(home),
         custom_commands=_count_custom_commands(home),
+        global_claude_md_lines=global_md,
+        project_claude_md_lines_avg=project_avg,
     )

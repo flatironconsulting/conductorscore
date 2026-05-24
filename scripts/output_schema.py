@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.4"
+SCHEMA_VERSION = "0.5"
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,18 @@ class PerSession:
     files_modified: int = 0
     total_lines_edited: int = 0
     is_significant_edit_session: bool = False
+    # v0.5 — anti-pattern cluster (Feature 7)
+    revert_count: int = 0
+    qualifying_pairs: int = 0
+    repetitive_pairs: int = 0
+    rage_quit_event: bool = False
+    tool_error_count: int = 0
+    auto_compaction_events: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    redundant_approvals_per_signature: dict[str, int] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -104,6 +116,17 @@ class ExtractorOutput:
                     "files_modified": s.files_modified,
                     "total_lines_edited": s.total_lines_edited,
                     "is_significant_edit_session": s.is_significant_edit_session,
+                    "revert_count": s.revert_count,
+                    "qualifying_pairs": s.qualifying_pairs,
+                    "repetitive_pairs": s.repetitive_pairs,
+                    "rage_quit_event": s.rage_quit_event,
+                    "tool_error_count": s.tool_error_count,
+                    "auto_compaction_events": s.auto_compaction_events,
+                    "total_input_tokens": s.total_input_tokens,
+                    "total_output_tokens": s.total_output_tokens,
+                    "redundant_approvals_per_signature": dict(
+                        s.redundant_approvals_per_signature
+                    ),
                 }
                 for s in self.sessions
             ],

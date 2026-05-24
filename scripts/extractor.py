@@ -3,9 +3,16 @@ from __future__ import annotations
 import hashlib
 import time
 
+from scripts.approval_counter import count_redundant_approvals
 from scripts.config_scanner import scan_config
 from scripts.edit_counter import count_edits
-from scripts.events import claude_home, find_sessions, read_events
+from scripts.events import (
+    EventKind,
+    claude_home,
+    find_sessions,
+    read_events_and_text,
+)
+from scripts.frustration_detector import detect_rage_quit
 from scripts.minute_classifier import (
     MinuteBucket,
     afk_intervals,
@@ -26,8 +33,10 @@ from scripts.plan_signals import (
     detect_plan_signals,
     session_produced_plan_artifact,
 )
+from scripts.prompt_similarity import jaccard_repetitive_rate
+from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
-from scripts.tool_counter import count_tools
+from scripts.tool_counter import count_compaction_and_tokens, count_tools
 
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
@@ -77,34 +86,41 @@ def extract(
     # .claude dir; the config scanner expects the *parent* of .claude.
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
-    config = scan_config(home)
 
     # Pass 1 — load every session in the lookback window once. We keep
-    # the parsed Events around so Pass 2 doesn't re-read the JSONL.
+    # the parsed Events + in-memory text map around so Pass 2 doesn't
+    # re-read the JSONL.
     #
     # While we're here, build a per-project list of (session_id, ts_ms)
     # for sessions that produced a plan artifact, so the weak
     # "prior-24h plan artifact in same project" signal can be answered
     # without re-parsing.
-    loaded: list[tuple] = []  # (SessionMeta, events, tool_counts)
+    loaded: list[tuple] = []  # (SessionMeta, events, text_map, tool_counts)
     artifact_times_by_project: dict[str, list[tuple[str, int]]] = {}
+    project_roots: set[str] = set()
     for s in find_sessions():
         if s.last_ts_ms < cutoff:
             continue
         if s.jsonl_path is not None:
             tc = count_tools(s.jsonl_path)
-            events = read_events(s.jsonl_path)
+            events, text_map = read_events_and_text(s.jsonl_path)
         else:
             tc = None
             events = []
-        loaded.append((s, events, tc))
+            text_map = {}
+        loaded.append((s, events, text_map, tc))
+        project_roots.add(s.project_root)
         if events and session_produced_plan_artifact(events):
             artifact_times_by_project.setdefault(s.project_root, []).append(
                 (s.session_id, s.first_ts_ms)
             )
 
+    # v0.5 — scan global + project CLAUDE.md line counts. project_roots
+    # are the un-hashed local paths; counts cross the wire as integers.
+    config = scan_config(home, project_roots=sorted(project_roots))
+
     sessions: list[PerSession] = []
-    for s, events, tc in loaded:
+    for s, events, text_map, tc in loaded:
         if tc is not None:
             distinct_skills = tuple(tc.distinct_skills)
             distinct_mcp_tools = tuple(tc.distinct_mcp_tools)
@@ -166,6 +182,27 @@ def extract(
         )
         edits = count_edits(events)
 
+        # v0.5 — anti-pattern cluster (Feature 7).
+        revert_count = count_reverts(events)
+        # Build the list of user texts in event order for the Jaccard
+        # similarity detector. The map is keyed by id(); look up each
+        # USER event in order.
+        user_texts = [
+            text_map.get(id(e), "")
+            for e in events
+            if e.kind == EventKind.USER
+        ]
+        rep = jaccard_repetitive_rate(user_texts)
+        rage = detect_rage_quit(events, text_map)
+        # tool_error_count: number of events with is_error=True (covers
+        # TOOL_RESULT errored blocks). The reader populates is_error on
+        # TOOL_RESULT events.
+        tool_error_count = sum(
+            1 for e in events if getattr(e, "is_error", False)
+        )
+        compaction = count_compaction_and_tokens(events)
+        approvals = count_redundant_approvals(events)
+
         sessions.append(
             PerSession(
                 session_hash=_sha16(s.session_id),
@@ -188,6 +225,15 @@ def extract(
                 files_modified=edits.files_modified,
                 total_lines_edited=edits.total_lines_edited,
                 is_significant_edit_session=edits.is_significant,
+                revert_count=revert_count,
+                qualifying_pairs=rep.qualifying_pairs,
+                repetitive_pairs=rep.repetitive_pairs,
+                rage_quit_event=rage.rage_quit_event,
+                tool_error_count=tool_error_count,
+                auto_compaction_events=compaction.auto_compaction_events,
+                total_input_tokens=compaction.total_input_tokens,
+                total_output_tokens=compaction.total_output_tokens,
+                redundant_approvals_per_signature=approvals,
             )
         )
     return ExtractorOutput(

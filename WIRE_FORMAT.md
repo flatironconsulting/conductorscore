@@ -397,3 +397,168 @@ Edits to the following are NEVER counted toward `files_modified` or
 - Signal-name strings are a CLOSED enum — the server SHOULD reject
   payloads containing unknown signal-name strings, since this would
   indicate a schema drift the server hasn't acknowledged yet.
+
+## Schema v0.5
+
+Released with Feature 7 (anti-pattern cluster). Adds nine per-session
+fields covering five anti-pattern detectors plus per-session token
+totals, and wires the previously-placeholder `config.global_claude_md_lines`
+and `config.project_claude_md_lines_avg` to live values. All counts
+are derived locally; raw command strings, raw user text, and full file
+paths are consumed in-memory only. The privacy invariant test
+(`tests/test_extractor_integration.py`) pins this contract — including
+v0.5-specific assertions for every new detector.
+
+### Top-level object
+
+Unchanged shape from v0.4 — only `device.schema_version`, the
+`config.{global_claude_md_lines, project_claude_md_lines_avg}` values,
+and the per-session field set change. `schema_version` MUST be `"0.5"`.
+
+### `config` — ConfigCounts (v0.5 wire-up)
+
+The two CLAUDE.md fields, previously frozen at `0` in v0.2–v0.4, are
+now populated:
+
+| Field                          | Type    | Nullable | Notes                                                                                  |
+|--------------------------------|---------|----------|----------------------------------------------------------------------------------------|
+| `global_claude_md_lines`       | integer | no       | Number of newline-separated lines in `<home>/.claude/CLAUDE.md`. `0` if file missing/unreadable. Trailing newlines are NOT counted as a phantom extra line. |
+| `project_claude_md_lines_avg`  | integer | no       | Integer floor of the average line count of `<root>/CLAUDE.md` across distinct `project_root`s observed in the current 30-day session window. Roots without a `CLAUDE.md` are excluded from both numerator and denominator. `0` if no roots have a `CLAUDE.md`. |
+
+### `sessions[]` — PerSession (v0.5 additions)
+
+All v0.1 + v0.2 + v0.3 + v0.4 fields remain unchanged. The following
+are added:
+
+| Field                                | Type                | Nullable | Notes                                                                                                                                |
+|--------------------------------------|---------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `revert_count`                       | integer             | no       | Count of destructive Bash "undo" commands. Each chained segment (`&&` or `;`) is checked independently. Matchers: `git checkout --`, `git checkout HEAD`, `git restore`, `git reset --hard`, `git reset --merge`, `git revert`, `git stash drop`, `git clean -f`. Branch switches (`git checkout main`) and soft/mixed resets are NOT counted. |
+| `qualifying_pairs`                   | integer             | no       | Number of `(i, j)` user-message pairs where both messages have ≥50 distinct alphabetic nonstop tokens. Pairs with i < j are counted once. |
+| `repetitive_pairs`                   | integer             | no       | Subset of qualifying pairs whose Jaccard similarity is ≥0.6. Tunable via Task 11.1; the wire value is the count, not the threshold. |
+| `rage_quit_event`                    | boolean             | no       | True iff at least one user message matches the frustration regex AND there is no further user activity within 30 min AND ≥1 tool error in the preceding 10 min. Capped at one event per session — the boolean carries the entire signal. |
+| `tool_error_count`                   | integer             | no       | Number of events with `is_error == true` (covers TOOL_RESULT errored blocks observed inside user-role messages). |
+| `auto_compaction_events`             | integer             | no       | Number of auto-compaction markers in the session: SYSTEM events whose payload signals compaction (`subtype: "compact"`, `compactType: "auto"`, or `type: "auto_compact"`) PLUS USER events whose flattened text contains the Claude Code "session continued from a previous conversation that ran out of context" banner. |
+| `total_input_tokens`                 | integer             | no       | Sum of `usage.input_tokens` across all assistant message events in the session. `0` if no usage was reported. |
+| `total_output_tokens`                | integer             | no       | Sum of `usage.output_tokens` across all assistant message events in the session. `0` if no usage was reported. |
+| `redundant_approvals_per_signature`  | object<string,int>  | no       | `{ "<Tool>::<arg>": overflow_count }` for each approval signature whose use count is `> 5`. Signatures at or under the threshold are omitted entirely; absence is equivalent to overflow `0`. |
+
+### Approval signatures
+
+A signature groups tool calls that the user would reasonably re-approve
+in one batch:
+
+- **Bash**: `("Bash", <first whitespace-separated token of the command>)`.
+  The first token (e.g. `"ls"`, `"git"`, `"echo"`) is categorical and
+  emitted raw.
+- **Edit / Write / MultiEdit**: `("Edit", <sha256(top_level_dir)[:8]>)`.
+  The top-level path component is HASHED so directory names never
+  cross the wire while still allowing grouped counting of repeated
+  edits to the same area. Empty / absolute-root paths produce an
+  empty arg.
+
+The dict key on the wire is `"<Tool>::<arg>"` (e.g. `"Bash::git"`,
+`"Edit::3b49c75f"`).
+
+**Destructive Bash exemptions** — these patterns NEVER contribute a
+signature, since a fresh approval is genuinely warranted every time:
+
+- `rm -rf` / `rm -r`
+- `git reset --hard`
+- `git push --force` / `git push -f`
+- `git clean -f`
+- `DROP TABLE` / `DROP DATABASE` (case-insensitive)
+
+### Privacy posture for v0.5 detectors
+
+Every Feature 7 detector consumes its raw input in-memory and emits
+only counts / booleans / hashed grouping keys:
+
+- **revert_detector** — reads `raw_input.command` (in-memory only),
+  emits `revert_count: int`.
+- **prompt_similarity** — reads user text from a memory-only
+  `event_text_map` keyed by `id(event)`, emits
+  `(qualifying_pairs: int, repetitive_pairs: int)`. The actual Jaccard
+  floats are never returned or stored.
+- **frustration_detector** — reads matching user text in-memory,
+  emits `rage_quit_event: bool` (capped at one per session). Matched
+  text is never persisted.
+- **count_compaction_and_tokens** — reads the precomputed
+  `is_auto_compaction_marker` flag and per-event `input_tokens`/
+  `output_tokens`. Emits three integers.
+- **approval_counter** — reads `raw_input` in-memory, emits a dict
+  whose KEYS are hashed (`Edit::<sha256[:8]>`) or categorical
+  (`Bash::<token>`).
+
+### Example
+
+```json
+{
+  "config": {
+    "custom_commands": 2,
+    "global_claude_md_lines": 142,
+    "hooks": 3,
+    "mcp_servers": 4,
+    "project_claude_md_lines_avg": 87
+  },
+  "device": {
+    "client_version": "0.5.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1735689600000,
+    "schema_version": "0.5",
+    "window_days": 30
+  },
+  "sessions": [
+    {
+      "afk_intervals": [],
+      "afk_max_streak_minutes": 0,
+      "afk_minutes": 0,
+      "afk_parallel_minutes_foreground": 0,
+      "auto_compaction_events": 1,
+      "cron_parallel_minutes": 0,
+      "distinct_builtin_tools": ["Bash", "Edit", "Read"],
+      "distinct_mcp_tools": [],
+      "distinct_skills": [],
+      "ended_at_ms": 1735691400000,
+      "files_modified": 7,
+      "hitl_minutes": 12,
+      "idle_minutes": 0,
+      "is_planned": true,
+      "is_significant_edit_session": true,
+      "project_hash": "fedcba9876543210",
+      "qualifying_pairs": 3,
+      "rage_quit_event": false,
+      "redundant_approvals_per_signature": {
+        "Bash::git": 4,
+        "Edit::3b49c75f": 2
+      },
+      "repetitive_pairs": 1,
+      "revert_count": 2,
+      "session_hash": "0123456789abcdef",
+      "started_at_ms": 1735689900000,
+      "strong_plan_signals": ["EnterPlanMode"],
+      "tool_error_count": 5,
+      "total_input_tokens": 187420,
+      "total_lines_edited": 312,
+      "total_output_tokens": 41280,
+      "weak_plan_signals": []
+    }
+  ]
+}
+```
+
+### Compatibility
+
+- Top-level key ordering remains alphabetical: `config`, `device`, `sessions`.
+- The server SHOULD accept `schema_version` of `"0.1"`, `"0.2"`,
+  `"0.3"`, `"0.4"`, or `"0.5"` during the deprecation window.
+- All new integer fields default to `0`, `rage_quit_event` defaults
+  to `false`, and `redundant_approvals_per_signature` defaults to
+  `{}`. The server MUST treat absence and the default-value equivalent
+  identically.
+- Approval-signature dict keys MUST match the pattern
+  `^(Bash|Edit)::[A-Za-z0-9_.-]*$`. The Bash arg is a categorical
+  first-token string; the Edit arg is an 8-char lowercase hex sha256
+  prefix (or empty).
+- The frustration regex is intentionally not part of the wire contract
+  — only the resulting `rage_quit_event` boolean is. Clients may
+  tune the regex without bumping the schema version.

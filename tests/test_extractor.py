@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.4"
+    assert out.device.schema_version == "0.5"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -724,3 +724,389 @@ def test_extract_v0_4_prior_artifact_lookup_respects_24h_window(
     )
     today = next(s for s in out.sessions if s.started_at_ms == base_ms)
     assert "prior_24h_plan_artifact" not in today.weak_plan_signals
+
+
+# ---------------------------------------------------------------------------
+# v0.5 — Feature 7 wire-up (anti-pattern cluster).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_v0_5_json_includes_new_session_keys(isolated_claude_home):
+    """Every v0.5 PerSession key is present on the wire payload."""
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+            {"timestamp": "2026-01-01T00:01:00Z"},
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    parsed = json.loads(out.to_json())
+    s = parsed["sessions"][0]
+    for key in (
+        "revert_count",
+        "qualifying_pairs",
+        "repetitive_pairs",
+        "rage_quit_event",
+        "tool_error_count",
+        "auto_compaction_events",
+        "total_input_tokens",
+        "total_output_tokens",
+        "redundant_approvals_per_signature",
+    ):
+        assert key in s, f"v0.5 field {key!r} missing from wire payload"
+    # Defaults
+    assert s["revert_count"] == 0
+    assert s["qualifying_pairs"] == 0
+    assert s["repetitive_pairs"] == 0
+    assert s["rage_quit_event"] is False
+    assert s["tool_error_count"] == 0
+    assert s["auto_compaction_events"] == 0
+    assert s["total_input_tokens"] == 0
+    assert s["total_output_tokens"] == 0
+    assert s["redundant_approvals_per_signature"] == {}
+
+
+def test_extract_v0_5_revert_count_populated(isolated_claude_home):
+    """A session with two destructive Bash commands surfaces revert_count=2."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "rev.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "undo"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "git restore foo.py"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 120_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "git reset --hard HEAD"},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.revert_count == 2
+
+
+def test_extract_v0_5_redundant_approvals_populated(isolated_claude_home):
+    """6 ls calls → 1 overflow entry. Edits to /repo dir also tracked."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "go"},
+        },
+    ]
+    # 6 ls bash calls (threshold is 5)
+    for i in range(6):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (1 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "ls -la"},
+                        }
+                    ],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "appr.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.redundant_approvals_per_signature == {"Bash::ls": 1}
+
+
+def test_extract_v0_5_redundant_approvals_edit_signature_is_hashed(
+    isolated_claude_home,
+):
+    """The Edit/Write signature's second component is hashed so the
+    top-level directory name never crosses the wire."""
+    import hashlib
+
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "go"},
+        },
+    ]
+    for i in range(6):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (1 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": f"/secrettopdir/file_{i}.py",
+                                "content": "x=1\n",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "appedit.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    expected_hash = hashlib.sha256(b"secrettopdir").hexdigest()[:8]
+    assert s.redundant_approvals_per_signature == {
+        f"Edit::{expected_hash}": 1
+    }
+    js = out.to_json()
+    assert "secrettopdir" not in js, "top-level dir name leaked into payload"
+
+
+def test_extract_v0_5_token_totals_populated(isolated_claude_home):
+    """Assistant usage tokens sum into total_input/output_tokens."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "tok.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "hi"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 120_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok2"}],
+                    "usage": {"input_tokens": 200, "output_tokens": 75},
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.total_input_tokens == 300
+    assert s.total_output_tokens == 125
+
+
+def test_extract_v0_5_global_claude_md_lines_populated(
+    isolated_claude_home, tmp_path
+):
+    """global_claude_md_lines counts lines in <home>/.claude/CLAUDE.md."""
+    (isolated_claude_home / "CLAUDE.md").write_text(
+        "line1\nline2\nline3\n"
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1_000_000_000_000
+    )
+    assert out.config.global_claude_md_lines == 3
+
+
+def test_extract_v0_5_project_claude_md_lines_avg_populated(
+    isolated_claude_home,
+):
+    """project_claude_md_lines_avg averages CLAUDE.md line counts across
+    discovered project roots (existing files only).
+
+    The project_root path reconstruction is lossy on ``-`` <-> ``/``;
+    this test uses dir names with no hyphens so the round-trip is
+    identity, and creates the real project dirs under that path so the
+    CLAUDE.md files can be located.
+    """
+    from pathlib import Path
+
+    # Pick dir names that contain no '-' so dir_name <-> project_root
+    # round-trips cleanly.
+    proj_a_path = Path("/tmp/csprojalpha")
+    proj_b_path = Path("/tmp/csprojbeta")
+    proj_a_path.mkdir(exist_ok=True)
+    proj_b_path.mkdir(exist_ok=True)
+    (proj_a_path / "CLAUDE.md").write_text("a1\na2\na3\na4\n")  # 4 lines
+    (proj_b_path / "CLAUDE.md").write_text("b1\nb2\n")  # 2 lines
+
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    proj_a_dir_name = "-tmp-csprojalpha"
+    proj_b_dir_name = "-tmp-csprojbeta"
+    try:
+        _write_jsonl(
+            isolated_claude_home / "projects" / proj_a_dir_name / "a.jsonl",
+            [
+                {
+                    "type": "user",
+                    "timestamp": _iso(base_ms),
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {"timestamp": _iso(base_ms + 60_000)},
+            ],
+        )
+        _write_jsonl(
+            isolated_claude_home / "projects" / proj_b_dir_name / "b.jsonl",
+            [
+                {
+                    "type": "user",
+                    "timestamp": _iso(base_ms),
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {"timestamp": _iso(base_ms + 60_000)},
+            ],
+        )
+        out = extract(
+            device_id="dev-1",
+            client_version="0.1.0",
+            now_ms=base_ms + 60 * 60_000,
+        )
+        # Average of [4, 2] = 3
+        assert out.config.project_claude_md_lines_avg == 3
+    finally:
+        # Cleanup so reruns are deterministic.
+        for p in (proj_a_path, proj_b_path):
+            for f in p.glob("*"):
+                f.unlink()
+            p.rmdir()
+
+
+def test_extract_v0_5_privacy_invariant_revert_command_text_not_leaked(
+    isolated_claude_home,
+):
+    """Revert detector: the raw Bash command text must NOT appear in the
+    wire payload — only the revert_count integer."""
+    secret_cmd = (
+        "git restore SECRET_REVERT_FILE_PATH_44 && "
+        "git reset --hard SECRET_REF_55"
+    )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "rev.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "undo it"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": secret_cmd},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    js = out.to_json()
+    assert "SECRET_REVERT_FILE_PATH_44" not in js
+    assert "SECRET_REF_55" not in js
+    s = out.sessions[0]
+    assert s.revert_count == 2
+
+
+def test_extract_v0_5_privacy_invariant_frustration_text_not_leaked(
+    isolated_claude_home,
+):
+    """Rage-quit detector: the matched user text must NOT appear in
+    the wire payload — only the boolean."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    secret_msg = "this is broken SECRET_RAGE_TEXT_66 i give up"
+
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "rage.jsonl",
+        [
+            # tool error
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": True,
+                            "tool_use_name": "Bash",
+                        }
+                    ],
+                },
+            },
+            # frustration user message ~ 2 min later
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms + 2 * 60_000),
+                "message": {"role": "user", "content": secret_msg},
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    js = out.to_json()
+    assert "SECRET_RAGE_TEXT_66" not in js
+    s = out.sessions[0]
+    assert s.rage_quit_event is True

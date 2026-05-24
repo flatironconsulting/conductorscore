@@ -95,6 +95,15 @@ class Event:
     edit_file_path_hash: str | None = None
     edit_line_count: int = 0
     is_excluded_edit_path: bool = False
+    # v0.5 — Feature 7 (anti-pattern cluster). All optional, default-safe.
+    # NOTE: ``raw_input`` carries the small subset of tool ``input`` needed
+    # by in-memory detectors (Bash ``command``, Edit/Write/MultiEdit
+    # ``file_path``). It is intentionally NOT serialized — the
+    # ``ExtractorOutput.to_dict`` builder never calls ``asdict(event)``
+    # so this attribute stays in-process. The privacy invariant test
+    # pins this contract.
+    raw_input: dict | None = None
+    is_auto_compaction_marker: bool = False
 
 
 def _parse_ts_ms(line) -> int | None:
@@ -255,6 +264,69 @@ def _read_lines(jsonl_path: Path) -> list[str]:
 
 
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+
+# v0.5 — tools whose raw input must be exposed (in-memory only) to the
+# Feature 7 detectors:
+#   - Bash: revert_detector + approval_counter need the command string.
+#   - Edit/Write/MultiEdit: approval_counter needs the file_path.
+_RAW_INPUT_TOOLS: frozenset[str] = frozenset({"Bash"}) | _EDIT_TOOL_NAMES
+
+# v0.5 — auto-compaction banner that Claude Code prepends to the first
+# user message of a continued session. Matched on USER events at read
+# time so the raw banner never leaves the reader.
+_AUTO_COMPACT_BANNER = (
+    "This session is being continued from a previous conversation that "
+    "ran out of context"
+)
+
+
+def _select_raw_input(tool_name: str | None, inp: dict) -> dict | None:
+    """Return the minimal in-memory ``raw_input`` dict for the detectors,
+    or None if the tool is not one of the Feature 7 carriers.
+
+    Only the specific keys the detectors need are surfaced:
+      - Bash: ``command``.
+      - Edit/Write/MultiEdit: ``file_path``.
+
+    All other fields are dropped so the in-memory Event remains small.
+    """
+    if not isinstance(inp, dict) or tool_name not in _RAW_INPUT_TOOLS:
+        return None
+    if tool_name == "Bash":
+        cmd = inp.get("command")
+        if isinstance(cmd, str) and cmd:
+            return {"command": cmd}
+        return None
+    # Edit / Write / MultiEdit.
+    path = inp.get("file_path")
+    if isinstance(path, str) and path:
+        return {"file_path": path}
+    return None
+
+
+def _is_system_auto_compaction(d: dict) -> bool:
+    """Return True iff a SYSTEM-typed JSONL line is an auto-compaction
+    marker. Accepts a few historical shapes Claude Code has used:
+      - ``{"subtype": "compact"}``
+      - ``{"compactType": "auto"}``
+      - ``{"type": "auto_compact"}``  (rare; system event nested form)
+    """
+    if not isinstance(d, dict):
+        return False
+    if d.get("subtype") == "compact":
+        return True
+    if d.get("compactType") == "auto":
+        return True
+    if d.get("type") == "auto_compact":
+        return True
+    # Some transcripts nest under ``message`` for system events.
+    msg = d.get("message")
+    if isinstance(msg, dict):
+        if msg.get("subtype") == "compact":
+            return True
+        if msg.get("compactType") == "auto":
+            return True
+    return False
 
 # Paths that the Coding-without-a-plan metric must NOT count as a code
 # edit. ``.claude/`` and ``.git/`` are infrastructure; ``CLAUDE.md`` is a
@@ -417,6 +489,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
                 if text
                 else False
             )
+            # v0.5 — auto-compaction banner detection. Banner is a fixed
+            # known prefix; the raw text never leaves this block.
+            is_auto_compaction = bool(text) and (_AUTO_COMPACT_BANNER in text)
             events.append(
                 Event(
                     kind=EventKind.USER,
@@ -427,6 +502,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     user_text_hash=_sha16(text) if text else None,
                     user_text_token_count=token_count,
                     is_structured_prompt=structured,
+                    is_auto_compaction_marker=is_auto_compaction,
                 )
             )
             # Tool result blocks may also appear inside a user-role message
@@ -526,6 +602,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     edit_file_path_hash_val: str | None = None
                     edit_line_count_val = 0
                     is_excluded_edit_path_val = False
+                    # v0.5 — minimal in-memory raw_input for the Feature 7
+                    # detectors (revert + approval). Never serialized.
+                    raw_input_val = _select_raw_input(name, inp)
                     if name == "Skill":
                         skill_name_val = _extract_skill_name(inp)
                     elif name == "TodoWrite":
@@ -567,6 +646,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             edit_file_path_hash=edit_file_path_hash_val,
                             edit_line_count=edit_line_count_val,
                             is_excluded_edit_path=is_excluded_edit_path_val,
+                            raw_input=raw_input_val,
                         )
                     )
             elif isinstance(content, str):
@@ -593,10 +673,66 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     timestamp_ms=ts_ms,
                     is_sidechain=is_sidechain,
                     subagent_id=subagent_id,
+                    is_auto_compaction_marker=_is_system_auto_compaction(d),
                 )
             )
 
     return events
+
+
+def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]:
+    """Like ``read_events`` but also returns an in-memory map of
+    ``id(user_event) -> raw_user_text`` for the Feature 7 detectors that
+    need the raw text (frustration / prompt similarity).
+
+    The map is keyed on Python ``id()`` so callers can pair it with the
+    returned event list. The map MUST be discarded as soon as the
+    detectors finish — it is the only place raw user text exists in
+    memory and it is never serialized.
+
+    Privacy: the returned ``text_map`` is a side-channel for in-process
+    detectors only. The wire format never carries any value from this
+    map (the extractor passes it to the detectors which emit counts /
+    booleans only).
+    """
+    # Late import (cycle).
+    from scripts.plan_signals import (
+        is_structured_prompt as _plan_signals_is_structured_prompt,
+    )
+
+    events = read_events(jsonl_path)
+    text_map: dict[int, str] = {}
+
+    # Walk the JSONL again to recover user text and match it to the
+    # USER events we just built. We pair them in order: the Nth user
+    # message in the JSONL corresponds to the Nth USER Event.
+    user_events = [e for e in events if e.kind == EventKind.USER]
+    user_idx = 0
+    for raw in _read_lines(jsonl_path):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if _parse_ts_ms(d) is None:
+            continue
+        message = d.get("message") if isinstance(d.get("message"), dict) else None
+        kind_field = d.get("type")
+        if kind_field == "user" or (message and message.get("role") == "user"):
+            if user_idx >= len(user_events):
+                break
+            content = message.get("content") if message else d.get("content")
+            text = _flatten_text(content)
+            text_map[id(user_events[user_idx])] = text
+            user_idx += 1
+    # Suppress unused-import warning — keep the late import for parity
+    # with read_events so the modules stay in lockstep.
+    _ = _plan_signals_is_structured_prompt
+    return events, text_map
 
 
 __all__ = [
@@ -606,4 +742,5 @@ __all__ = [
     "claude_home",
     "find_sessions",
     "read_events",
+    "read_events_and_text",
 ]

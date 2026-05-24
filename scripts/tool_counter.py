@@ -7,12 +7,56 @@ from pathlib import Path
 
 SLASH_CMD_RE = re.compile(r"(?:^|\s)/([a-z][a-z0-9_-]+)\b", re.IGNORECASE)
 
+# Marker that Claude Code prepends to a user message when the previous
+# session ran out of context and was auto-compacted. Public so the event
+# reader and the tests both reference the same constant.
+AUTO_COMPACT_BANNER = (
+    "This session is being continued from a previous conversation that "
+    "ran out of context"
+)
+
 
 @dataclass(frozen=True)
 class ToolCounts:
     distinct_skills: list[str]
     distinct_mcp_tools: list[str]
     distinct_builtin_tools: list[str]
+
+
+@dataclass(frozen=True)
+class CompactionAndTokens:
+    """Auto-compaction event count + per-session token totals (v0.5)."""
+
+    auto_compaction_events: int
+    total_input_tokens: int
+    total_output_tokens: int
+
+
+def count_compaction_and_tokens(events) -> CompactionAndTokens:
+    """Aggregate auto-compaction markers and token totals from Events.
+
+    Auto-compaction markers are precomputed by the event reader on SYSTEM
+    events (subtype/type signal) and on USER events (banner substring).
+    The detector here just counts events whose
+    ``is_auto_compaction_marker`` flag is True.
+
+    Token totals sum ``input_tokens`` and ``output_tokens`` across all
+    Events that carry them (Assistant text/tool events). Events without
+    the attribute contribute 0.
+    """
+    compactions = 0
+    in_tokens = 0
+    out_tokens = 0
+    for e in events:
+        in_tokens += int(getattr(e, "input_tokens", 0) or 0)
+        out_tokens += int(getattr(e, "output_tokens", 0) or 0)
+        if getattr(e, "is_auto_compaction_marker", False):
+            compactions += 1
+    return CompactionAndTokens(
+        auto_compaction_events=compactions,
+        total_input_tokens=in_tokens,
+        total_output_tokens=out_tokens,
+    )
 
 
 def _is_user(d: dict, msg: dict) -> bool:
