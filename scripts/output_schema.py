@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.5"
+SCHEMA_VERSION = "0.6"
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,10 @@ class PerSession:
     redundant_approvals_per_signature: dict[str, int] = field(
         default_factory=dict
     )
+    # v0.6 — fluency + informational (Feature 8)
+    assistant_msgs_by_model: dict[str, int] = field(default_factory=dict)
+    user_skill_invocations: int = 0
+    hitl_mcp_invocations: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,9 @@ class ExtractorOutput:
                     "redundant_approvals_per_signature": dict(
                         s.redundant_approvals_per_signature
                     ),
+                    "assistant_msgs_by_model": dict(s.assistant_msgs_by_model),
+                    "user_skill_invocations": s.user_skill_invocations,
+                    "hitl_mcp_invocations": s.hitl_mcp_invocations,
                 }
                 for s in self.sessions
             ],
