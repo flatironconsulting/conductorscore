@@ -19,6 +19,20 @@ pytest -v
 
 See `WIRE_FORMAT.md` for the schema the client emits.
 
+## Develop against a local server
+
+The client uploads to `https://conductorscore.com` by default. To point it at a
+local Next.js dev server (`http://localhost:3000` with a local Supabase stack —
+see the `csserver` README for setup), override the base URL:
+
+```bash
+CONDUCTORSCORE_BASE_URL=http://localhost:3000 python -m conductorscore.run
+```
+
+The `APP_ENV` switch in `~/conductorscore/.env` only affects the server-side
+Next.js app (which Supabase it talks to). The Python client respects
+`CONDUCTORSCORE_BASE_URL` explicitly and is unaffected by `APP_ENV`.
+
 ## License
 
 Apache License 2.0 — see `LICENSE`.
