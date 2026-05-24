@@ -132,7 +132,7 @@ def test_do_upload_success(isolated_env, stub_server_factory, monkeypatch, capsy
     body = json.loads(req["body"])
     assert body["device"]["device_id"] == state.client_device_id
     assert body["device"]["client_version"] == CLIENT_VERSION
-    assert body["device"]["schema_version"] == "0.2"
+    assert body["device"]["schema_version"] == "0.3"
     assert len(body["sessions"]) == 1
 
     # last_upload_ms persisted

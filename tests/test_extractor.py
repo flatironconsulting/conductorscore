@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.2"
+    assert out.device.schema_version == "0.3"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):

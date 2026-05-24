@@ -4,6 +4,7 @@ import json
 
 from scripts.output_schema import (
     SCHEMA_VERSION,
+    AfkInterval,
     ConfigCounts,
     DeviceMeta,
     ExtractorOutput,
@@ -11,8 +12,8 @@ from scripts.output_schema import (
 )
 
 
-def test_schema_version_is_0_2():
-    assert SCHEMA_VERSION == "0.2"
+def test_schema_version_is_0_3():
+    assert SCHEMA_VERSION == "0.3"
 
 
 def test_device_meta_defaults():
@@ -22,7 +23,7 @@ def test_device_meta_defaults():
         extracted_at_ms=1234567890000,
     )
     assert dm.window_days == 30
-    assert dm.schema_version == "0.2"
+    assert dm.schema_version == "0.3"
 
 
 def test_config_counts_defaults():
@@ -48,7 +49,7 @@ def test_to_dict_shape_matches_spec_no_sessions():
     assert d["device"] == {
         "device_id": "dev-1",
         "client_version": "0.1.0",
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "extracted_at_ms": 1234567890000,
         "window_days": 30,
     }
@@ -89,6 +90,13 @@ def test_to_dict_shape_with_sessions():
             "distinct_skills": ["plan", "ultrareview"],
             "distinct_mcp_tools": ["mcp__github__add_comment"],
             "distinct_builtin_tools": ["Read", "Edit", "Bash"],
+            "hitl_minutes": 0,
+            "afk_minutes": 0,
+            "idle_minutes": 0,
+            "afk_parallel_minutes_foreground": 0,
+            "cron_parallel_minutes": 0,
+            "afk_max_streak_minutes": 0,
+            "afk_intervals": [],
         }
     ]
 
@@ -120,6 +128,56 @@ def test_per_session_default_distinct_fields_are_empty():
     assert s.distinct_skills == ()
     assert s.distinct_mcp_tools == ()
     assert s.distinct_builtin_tools == ()
+
+
+def test_per_session_default_v0_3_fields_are_zero():
+    s = PerSession(
+        session_hash="a" * 16,
+        project_hash="b" * 16,
+        started_at_ms=1,
+        ended_at_ms=2,
+    )
+    assert s.hitl_minutes == 0
+    assert s.afk_minutes == 0
+    assert s.idle_minutes == 0
+    assert s.afk_parallel_minutes_foreground == 0
+    assert s.cron_parallel_minutes == 0
+    assert s.afk_max_streak_minutes == 0
+    assert s.afk_intervals == ()
+
+
+def test_afk_interval_round_trips_through_to_dict():
+    ivl = AfkInterval(start_minute=423547, end_minute_exclusive=423570, is_cron=False)
+    s = PerSession(
+        session_hash="a" * 16,
+        project_hash="b" * 16,
+        started_at_ms=1,
+        ended_at_ms=2,
+        hitl_minutes=2,
+        afk_minutes=23,
+        idle_minutes=0,
+        afk_parallel_minutes_foreground=92,
+        cron_parallel_minutes=0,
+        afk_max_streak_minutes=23,
+        afk_intervals=(ivl,),
+    )
+    out = ExtractorOutput(
+        device=DeviceMeta(
+            device_id="dev-1",
+            client_version="0.1.0",
+            extracted_at_ms=1234567890000,
+        ),
+        sessions=(s,),
+    )
+    d = out.to_dict()
+    s_d = d["sessions"][0]
+    assert s_d["hitl_minutes"] == 2
+    assert s_d["afk_minutes"] == 23
+    assert s_d["afk_parallel_minutes_foreground"] == 92
+    assert s_d["afk_max_streak_minutes"] == 23
+    assert s_d["afk_intervals"] == [
+        {"start_minute": 423547, "end_minute_exclusive": 423570, "is_cron": False}
+    ]
 
 
 def test_to_json_is_deterministic_sorted_compact():
@@ -158,14 +216,32 @@ def test_roundtrip_through_json_preserves_fields():
                 distinct_skills=("plan",),
                 distinct_mcp_tools=("mcp__github__add_comment",),
                 distinct_builtin_tools=("Read",),
+                hitl_minutes=2,
+                afk_minutes=23,
+                idle_minutes=0,
+                afk_parallel_minutes_foreground=92,
+                cron_parallel_minutes=0,
+                afk_max_streak_minutes=23,
+                afk_intervals=(
+                    AfkInterval(
+                        start_minute=10, end_minute_exclusive=33, is_cron=False
+                    ),
+                ),
             ),
         ),
     )
     j = out.to_json()
     parsed = json.loads(j)
-    assert parsed["device"]["schema_version"] == "0.2"
+    assert parsed["device"]["schema_version"] == "0.3"
     assert parsed["sessions"][0]["session_hash"] == "0123456789abcdef"
     assert parsed["sessions"][0]["distinct_skills"] == ["plan"]
     assert parsed["sessions"][0]["distinct_mcp_tools"] == ["mcp__github__add_comment"]
     assert parsed["sessions"][0]["distinct_builtin_tools"] == ["Read"]
+    assert parsed["sessions"][0]["hitl_minutes"] == 2
+    assert parsed["sessions"][0]["afk_minutes"] == 23
+    assert parsed["sessions"][0]["afk_parallel_minutes_foreground"] == 92
+    assert parsed["sessions"][0]["afk_max_streak_minutes"] == 23
+    assert parsed["sessions"][0]["afk_intervals"] == [
+        {"start_minute": 10, "end_minute_exclusive": 33, "is_cron": False}
+    ]
     assert parsed["config"]["mcp_servers"] == 1
