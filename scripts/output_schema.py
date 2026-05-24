@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.2"
+SCHEMA_VERSION = "0.3"
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,21 @@ class ConfigCounts:
 
 
 @dataclass(frozen=True)
+class AfkInterval:
+    """A single contiguous AFK run within a session.
+
+    ``start_minute`` and ``end_minute_exclusive`` are absolute minute units
+    (``floor(epoch_ms / 60_000)``). ``is_cron`` distinguishes foreground
+    AFK runs (subagent activity while the user is AFK) from Cron-driven
+    activity that does not extend the foreground session window.
+    """
+
+    start_minute: int
+    end_minute_exclusive: int
+    is_cron: bool
+
+
+@dataclass(frozen=True)
 class PerSession:
     session_hash: str
     project_hash: str
@@ -33,6 +48,14 @@ class PerSession:
     distinct_skills: tuple[str, ...] = ()
     distinct_mcp_tools: tuple[str, ...] = ()
     distinct_builtin_tools: tuple[str, ...] = ()
+    # v0.3 — time partition + AFK leverage
+    hitl_minutes: int = 0
+    afk_minutes: int = 0
+    idle_minutes: int = 0
+    afk_parallel_minutes_foreground: int = 0
+    cron_parallel_minutes: int = 0
+    afk_max_streak_minutes: int = 0
+    afk_intervals: tuple[AfkInterval, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -54,6 +77,20 @@ class ExtractorOutput:
                     "distinct_skills": list(s.distinct_skills),
                     "distinct_mcp_tools": list(s.distinct_mcp_tools),
                     "distinct_builtin_tools": list(s.distinct_builtin_tools),
+                    "hitl_minutes": s.hitl_minutes,
+                    "afk_minutes": s.afk_minutes,
+                    "idle_minutes": s.idle_minutes,
+                    "afk_parallel_minutes_foreground": s.afk_parallel_minutes_foreground,
+                    "cron_parallel_minutes": s.cron_parallel_minutes,
+                    "afk_max_streak_minutes": s.afk_max_streak_minutes,
+                    "afk_intervals": [
+                        {
+                            "start_minute": ivl.start_minute,
+                            "end_minute_exclusive": ivl.end_minute_exclusive,
+                            "is_cron": ivl.is_cron,
+                        }
+                        for ivl in s.afk_intervals
+                    ],
                 }
                 for s in self.sessions
             ],

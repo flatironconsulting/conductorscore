@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from scripts.events import claude_home, find_sessions
+from scripts.events import (
+    Event,
+    EventKind,
+    claude_home,
+    find_sessions,
+    read_events,
+)
 
 
 @pytest.fixture
@@ -132,3 +140,329 @@ def test_find_sessions_ignores_non_jsonl_files(isolated_claude_home):
     proj_dir.mkdir(parents=True)
     (proj_dir / "notes.txt").write_text("hello")
     assert find_sessions() == []
+
+
+# ---------------------------------------------------------------------------
+# read_events() — full event reader (Feature 5).
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_jsonl(path: Path, lines: list[dict]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+def test_read_events_user_message_hashes_text_and_omits_raw(tmp_path):
+    secret = "PROMPT_DO_NOT_LEAK_42"
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": secret},
+            }
+        ],
+    )
+    events = read_events(p)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.kind == EventKind.USER
+    assert ev.user_text_hash == hashlib.sha256(secret.encode()).hexdigest()[:16]
+    assert ev.user_text_token_count >= 1
+    # Privacy: raw text must never appear on the dataclass.
+    for f in dataclasses.fields(Event):
+        val = getattr(ev, f.name)
+        if isinstance(val, str):
+            assert secret not in val, f"raw user text leaked into Event.{f.name}"
+
+
+def test_read_events_assistant_tool_use_emits_assistant_tool(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "id": "tu_1"},
+                        {"type": "tool_use", "name": "Bash", "id": "tu_2"},
+                    ],
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                },
+            }
+        ],
+    )
+    events = read_events(p)
+    tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
+    assert [e.tool_name for e in tools] == ["Read", "Bash"]
+    assert all(e.model == "claude-opus-4-7" for e in tools)
+
+
+def test_read_events_assistant_text_carries_usage_tokens(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 5, "output_tokens": 7},
+                },
+            }
+        ],
+    )
+    events = read_events(p)
+    text = [e for e in events if e.kind == EventKind.ASSISTANT_TEXT]
+    assert len(text) == 1
+    assert text[0].input_tokens == 5
+    assert text[0].output_tokens == 7
+
+
+def test_read_events_assistant_thinking_estimates_tokens(tmp_path):
+    long_thought = "x" * 4000  # ~1000 token estimate
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": long_thought}],
+                },
+            }
+        ],
+    )
+    events = read_events(p)
+    thinks = [e for e in events if e.kind == EventKind.ASSISTANT_THINKING]
+    assert len(thinks) == 1
+    assert thinks[0].thinking_tokens >= 500
+
+
+def test_read_events_tool_result_inside_user_message(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:03Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "is_error": True,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    events = read_events(p)
+    kinds = [e.kind for e in events]
+    # User event with no text + tool_result event
+    assert EventKind.USER in kinds
+    assert EventKind.TOOL_RESULT in kinds
+    tr = [e for e in events if e.kind == EventKind.TOOL_RESULT][0]
+    assert tr.is_error is True
+
+
+def test_read_events_system_event(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {"type": "system", "timestamp": "2026-01-01T00:00:04Z", "content": "x"},
+        ],
+    )
+    events = read_events(p)
+    assert [e.kind for e in events] == [EventKind.SYSTEM]
+
+
+def test_read_events_skips_malformed_lines(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    p.write_text(
+        "not json at all\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + "{also not json\n"
+    )
+    events = read_events(p)
+    assert len(events) == 1
+    assert events[0].kind == EventKind.USER
+
+
+def test_read_events_skips_lines_without_timestamp(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {"type": "user", "message": {"role": "user", "content": "no ts"}},
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "yes ts"},
+            },
+        ],
+    )
+    events = read_events(p)
+    assert len(events) == 1
+    assert events[0].timestamp_ms == 1767225600000
+
+
+def test_read_events_preserves_sidechain_flag(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "isSidechain": True,
+                "uuid": "u-1",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Grep"}],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "isSidechain": False,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Read"}],
+                },
+            },
+        ],
+    )
+    events = read_events(p)
+    side = [e for e in events if e.is_sidechain]
+    main = [e for e in events if not e.is_sidechain]
+    assert len(side) == 1
+    assert side[0].tool_name == "Grep"
+    assert side[0].subagent_id == "u-1"
+    assert len(main) == 1
+    assert main[0].subagent_id is None
+
+
+def test_read_events_subagent_id_falls_back_to_parent_uuid(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            # Continuation message — has a parent, no own uuid; expect parent.
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "isSidechain": True,
+                "parentUuid": "root-A",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Grep"}],
+                },
+            },
+        ],
+    )
+    events = read_events(p)
+    assert len(events) == 1
+    assert events[0].subagent_id == "root-A"
+
+
+def test_read_events_session_id_is_jsonl_stem(tmp_path):
+    p = tmp_path / "the-session.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "hi"},
+            }
+        ],
+    )
+    events = read_events(p)
+    assert events[0].session_id == "the-session"
+
+
+def test_read_events_missing_file_returns_empty(tmp_path):
+    assert read_events(tmp_path / "nope.jsonl") == []
+
+
+def test_read_events_each_kind_round_trips(tmp_path):
+    """Smoke: a single transcript exercising every EventKind."""
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            # USER + TOOL_RESULT inside a user message
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            },
+            # ASSISTANT_TEXT + ASSISTANT_TOOL + ASSISTANT_THINKING
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "x" * 4000},
+                        {"type": "text", "text": "ok"},
+                        {"type": "tool_use", "name": "Read"},
+                    ],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+            # SYSTEM
+            {"type": "system", "timestamp": "2026-01-01T00:00:02Z", "content": ""},
+        ],
+    )
+    events = read_events(p)
+    seen = {e.kind for e in events}
+    assert seen == {
+        EventKind.USER,
+        EventKind.TOOL_RESULT,
+        EventKind.ASSISTANT_THINKING,
+        EventKind.ASSISTANT_TEXT,
+        EventKind.ASSISTANT_TOOL,
+        EventKind.SYSTEM,
+    }
+
+
+def test_event_dataclass_has_no_raw_text_fields():
+    """Privacy invariant: no Event field name suggests raw content storage."""
+    field_names = {f.name for f in dataclasses.fields(Event)}
+    forbidden = {"text", "content", "prompt", "body", "raw"}
+    assert field_names.isdisjoint(forbidden), (
+        f"Event has a forbidden raw-content field: {field_names & forbidden}"
+    )
+
