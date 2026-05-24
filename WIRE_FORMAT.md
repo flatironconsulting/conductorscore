@@ -37,3 +37,61 @@ Skeleton — fleshed out per feature as fields are added.
   "sessions": []
 }
 ```
+
+## Schema v0.1
+
+The first wire-format release, emitted by Feature 3 (hello-world ingest). The
+payload is serialized with `json.dumps(..., sort_keys=True, separators=(",", ":"))`
+so the body is canonical and reproducible bit-for-bit on a given input.
+
+### Top-level object
+
+| Field      | Type                | Nullable | Notes                                            |
+|------------|---------------------|----------|--------------------------------------------------|
+| `device`   | object (DeviceMeta) | no       | Per-device metadata, see below.                  |
+| `sessions` | array of PerSession | no       | May be empty `[]` when no sessions in window.    |
+
+### `device` — DeviceMeta
+
+| Field             | Type    | Nullable | Notes                                                                |
+|-------------------|---------|----------|----------------------------------------------------------------------|
+| `device_id`       | string  | no       | Stable per-device UUID4 (`client_device_id`), generated on first run.|
+| `client_version`  | string  | no       | Semver of the local client package (e.g. `"0.1.0"`).                 |
+| `schema_version`  | string  | no       | Wire-format version. For this schema, MUST be `"0.1"`.               |
+| `extracted_at_ms` | integer | no       | Unix epoch milliseconds when the extractor ran.                      |
+| `window_days`     | integer | no       | Look-back window applied to sessions. Defaults to `30`.              |
+
+### `sessions[]` — PerSession
+
+Sessions are filtered to those whose `ended_at_ms` is within the last
+`window_days` (default 30 days) of `extracted_at_ms`.
+
+| Field            | Type    | Nullable | Notes                                                                                  |
+|------------------|---------|----------|----------------------------------------------------------------------------------------|
+| `session_hash`   | string  | no       | First 16 hex chars of `sha256(session_id)`. 16 chars, lowercase `[0-9a-f]`.            |
+| `project_hash`   | string  | no       | First 16 hex chars of `sha256(project_root)`. Project root is reconstructed from the   |
+|                  |         |          | `~/.claude/projects/<dir>` directory name (leading `-` → `/`, remaining `-` → `/`).    |
+| `started_at_ms`  | integer | no       | Unix epoch ms of the first JSONL line's `timestamp` in the session transcript.         |
+| `ended_at_ms`    | integer | no       | Unix epoch ms of the last JSONL line's `timestamp` in the session transcript.          |
+
+### Example
+
+```json
+{
+  "device": {
+    "client_version": "0.1.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1735689600000,
+    "schema_version": "0.1",
+    "window_days": 30
+  },
+  "sessions": [
+    {
+      "ended_at_ms": 1735689000000,
+      "project_hash": "fedcba9876543210",
+      "session_hash": "0123456789abcdef",
+      "started_at_ms": 1735680000000
+    }
+  ]
+}
+```
