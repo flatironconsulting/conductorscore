@@ -12,8 +12,8 @@ from scripts.output_schema import (
 )
 
 
-def test_schema_version_is_0_6():
-    assert SCHEMA_VERSION == "0.6"
+def test_schema_version_is_0_7():
+    assert SCHEMA_VERSION == "0.7"
 
 
 def test_device_meta_defaults():
@@ -23,7 +23,7 @@ def test_device_meta_defaults():
         extracted_at_ms=1234567890000,
     )
     assert dm.window_days == 30
-    assert dm.schema_version == "0.6"
+    assert dm.schema_version == "0.7"
 
 
 def test_config_counts_defaults():
@@ -49,7 +49,7 @@ def test_to_dict_shape_matches_spec_no_sessions():
     assert d["device"] == {
         "device_id": "dev-1",
         "client_version": "0.1.0",
-        "schema_version": "0.6",
+        "schema_version": "0.7",
         "extracted_at_ms": 1234567890000,
         "window_days": 30,
     }
@@ -59,6 +59,8 @@ def test_to_dict_shape_matches_spec_no_sessions():
         "custom_commands": 0,
         "global_claude_md_lines": 0,
         "project_claude_md_lines_avg": 0,
+        "plugin_count": 0,
+        "distinct_installed_plugins": [],
     }
 
 
@@ -115,6 +117,12 @@ def test_to_dict_shape_with_sessions():
             "assistant_msgs_by_model": {},
             "user_skill_invocations": 0,
             "hitl_mcp_invocations": 0,
+            "cache_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "builtin_tool_invocations": 0,
+            "plugin_invocations": 0,
+            "distinct_plugins": [],
+            "agent_dispatches": 0,
         }
     ]
 
@@ -250,7 +258,7 @@ def test_roundtrip_through_json_preserves_fields():
     )
     j = out.to_json()
     parsed = json.loads(j)
-    assert parsed["device"]["schema_version"] == "0.6"
+    assert parsed["device"]["schema_version"] == "0.7"
     assert parsed["sessions"][0]["session_hash"] == "0123456789abcdef"
     assert parsed["sessions"][0]["distinct_skills"] == ["plan"]
     assert parsed["sessions"][0]["distinct_mcp_tools"] == ["mcp__github__add_comment"]
@@ -334,8 +342,85 @@ def test_v0_6_fields_round_trip_through_json():
         sessions=(s,),
     )
     parsed = json.loads(out.to_json())
-    assert parsed["device"]["schema_version"] == "0.6"
+    assert parsed["device"]["schema_version"] == "0.7"
     s_p = parsed["sessions"][0]
     assert s_p["assistant_msgs_by_model"] == {"claude-opus-4-7": 1}
     assert s_p["user_skill_invocations"] == 2
     assert s_p["hitl_mcp_invocations"] == 3
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — cache split + builtin invocations + plugins + agent dispatches
+# ---------------------------------------------------------------------------
+
+
+def test_per_session_v0_7_default_fields_are_zero_or_empty():
+    s = PerSession(
+        session_hash="a" * 16,
+        project_hash="b" * 16,
+        started_at_ms=1,
+        ended_at_ms=2,
+    )
+    assert s.cache_input_tokens == 0
+    assert s.cache_creation_input_tokens == 0
+    assert s.builtin_tool_invocations == 0
+    assert s.plugin_invocations == 0
+    assert s.distinct_plugins == ()
+    assert s.agent_dispatches == 0
+
+
+def test_to_dict_emits_v0_7_fields_with_populated_values():
+    s = PerSession(
+        session_hash="a" * 16,
+        project_hash="b" * 16,
+        started_at_ms=1,
+        ended_at_ms=2,
+        cache_input_tokens=1234,
+        cache_creation_input_tokens=4321,
+        builtin_tool_invocations=42,
+        plugin_invocations=3,
+        distinct_plugins=("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        agent_dispatches=29,
+    )
+    out = ExtractorOutput(
+        device=DeviceMeta(
+            device_id="dev-1",
+            client_version="0.1.0",
+            extracted_at_ms=1234567890000,
+        ),
+        sessions=(s,),
+    )
+    d = out.to_dict()
+    s_d = d["sessions"][0]
+    assert s_d["cache_input_tokens"] == 1234
+    assert s_d["cache_creation_input_tokens"] == 4321
+    assert s_d["builtin_tool_invocations"] == 42
+    assert s_d["plugin_invocations"] == 3
+    assert s_d["distinct_plugins"] == [
+        "aaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbb",
+    ]
+    assert s_d["agent_dispatches"] == 29
+
+
+def test_config_v0_7_plugin_fields_round_trip():
+    out = ExtractorOutput(
+        device=DeviceMeta(
+            device_id="dev-1",
+            client_version="0.1.0",
+            extracted_at_ms=0,
+        ),
+        config=ConfigCounts(
+            plugin_count=5,
+            distinct_installed_plugins=(
+                "1111111111111111",
+                "2222222222222222",
+            ),
+        ),
+    )
+    parsed = json.loads(out.to_json())
+    assert parsed["config"]["plugin_count"] == 5
+    assert parsed["config"]["distinct_installed_plugins"] == [
+        "1111111111111111",
+        "2222222222222222",
+    ]

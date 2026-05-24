@@ -121,6 +121,31 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert s.distinct_builtin_tools == ("Read",)
     assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
 
+    # v0.7 — privacy contract for the new fields. These must all be
+    # present in the wire payload as integers / hashes / lists-of-hashes,
+    # never raw text. The privacy assertions above are the inclusive
+    # contract; this block pins the field set.
+    parsed_payload = json.loads(js)
+    s_d = parsed_payload["sessions"][0]
+    for k in (
+        "cache_input_tokens",
+        "cache_creation_input_tokens",
+        "builtin_tool_invocations",
+        "plugin_invocations",
+        "agent_dispatches",
+    ):
+        assert isinstance(s_d[k], int), f"{k} must be an int"
+    assert isinstance(s_d["distinct_plugins"], list)
+    for entry in s_d["distinct_plugins"]:
+        # Every plugin id is sha256 first 16 hex chars — categorical only.
+        assert isinstance(entry, str) and len(entry) == 16
+    # config-level plugin counts are also wire-safe.
+    cfg = parsed_payload["config"]
+    assert isinstance(cfg["plugin_count"], int)
+    assert isinstance(cfg["distinct_installed_plugins"], list)
+    for entry in cfg["distinct_installed_plugins"]:
+        assert isinstance(entry, str) and len(entry) == 16
+
 
 def test_v0_5_privacy_invariant_holds_for_all_new_detectors(
     isolated_claude_home,

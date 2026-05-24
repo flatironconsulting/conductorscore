@@ -34,13 +34,22 @@ def _user_event(ts: int, *, is_compaction: bool) -> Event:
     return e
 
 
-def _asst_text(ts: int, *, in_tok: int = 0, out_tok: int = 0) -> Event:
+def _asst_text(
+    ts: int,
+    *,
+    in_tok: int = 0,
+    out_tok: int = 0,
+    cache_hit: int = 0,
+    cache_creation: int = 0,
+) -> Event:
     return Event(
         kind=EventKind.ASSISTANT_TEXT,
         session_id="s",
         timestamp_ms=ts,
         input_tokens=in_tok,
         output_tokens=out_tok,
+        cache_input_tokens=cache_hit,
+        cache_creation_input_tokens=cache_creation,
     )
 
 
@@ -134,3 +143,27 @@ def test_result_dataclass_has_only_int_fields():
         assert f.type in ("int", int), (
             f"non-int field {f.name!r} of type {f.type!r} on CompactionAndTokens"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — cache-aware token split
+# ---------------------------------------------------------------------------
+
+
+def test_cache_tokens_default_to_zero():
+    out = count_compaction_and_tokens([_asst_text(0, in_tok=10, out_tok=20)])
+    assert out.cache_input_tokens == 0
+    assert out.cache_creation_input_tokens == 0
+
+
+def test_cache_tokens_sum_across_events():
+    evs = [
+        _asst_text(0, in_tok=10, out_tok=20, cache_hit=100, cache_creation=50),
+        _asst_text(1, in_tok=5, out_tok=15, cache_hit=200, cache_creation=25),
+    ]
+    out = count_compaction_and_tokens(evs)
+    assert out.cache_input_tokens == 300
+    assert out.cache_creation_input_tokens == 75
+    # Regular totals are independent
+    assert out.total_input_tokens == 15
+    assert out.total_output_tokens == 35

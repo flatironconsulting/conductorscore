@@ -8,6 +8,7 @@ import pytest
 from scripts.config_scanner import (
     ConfigCounts,
     count_claude_md_lines,
+    read_installed_plugins,
     scan_config,
 )
 
@@ -245,3 +246,56 @@ def test_scan_project_claude_md_lines_avg_none_present_is_zero(
 def test_scan_project_claude_md_lines_avg_empty_roots_list(fake_home):
     out = scan_config(fake_home, project_roots=[])
     assert out.project_claude_md_lines_avg == 0
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — installed plugin discovery
+# ---------------------------------------------------------------------------
+
+
+def test_read_installed_plugins_missing_dir_returns_empty(fake_home):
+    assert read_installed_plugins(fake_home) == []
+
+
+def test_read_installed_plugins_from_manifest_plugins_list(fake_home):
+    plugins_dir = fake_home / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "config.json").write_text(
+        json.dumps({"plugins": ["github-helper", "supabase-pro"]})
+    )
+    out = read_installed_plugins(fake_home)
+    # Hashed → 16 hex chars each, sorted, no raw names present.
+    assert len(out) == 2
+    for h in out:
+        assert len(h) == 16
+        assert "github" not in h
+        assert "supabase" not in h
+
+
+def test_read_installed_plugins_from_directory_fallback(fake_home):
+    plugins_dir = fake_home / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "github-helper").mkdir()
+    (plugins_dir / "supabase-pro").mkdir()
+    (plugins_dir / ".hidden").mkdir()  # excluded by leading-dot filter
+    out = read_installed_plugins(fake_home)
+    assert len(out) == 2  # hidden excluded
+
+
+def test_scan_config_populates_v0_7_plugin_fields(fake_home):
+    plugins_dir = fake_home / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "config.json").write_text(
+        json.dumps({"plugins": ["alpha", "beta", "gamma"]})
+    )
+    out = scan_config(fake_home)
+    assert out.plugin_count == 3
+    assert len(out.distinct_installed_plugins) == 3
+    for entry in out.distinct_installed_plugins:
+        assert len(entry) == 16
+
+
+def test_scan_config_v0_7_plugin_fields_default_empty_when_missing(fake_home):
+    out = scan_config(fake_home)
+    assert out.plugin_count == 0
+    assert out.distinct_installed_plugins == ()

@@ -1,11 +1,11 @@
 {
-  "_comment": "Sample wire-format payload (v0.6). The complete schema lives in WIRE_FORMAT.md alongside this file. Privacy invariant: every value below is either a number, a SHA-256 hash, a known categorical (model id, tool name, signal enum), or an array of those. No raw prompts, code, file paths, or transcript content are emitted. This sample is illustrative — the real payload from a 30-day window typically contains 100-200 session objects.",
+  "_comment": "Sample wire-format payload (v0.7). The complete schema lives in WIRE_FORMAT.md alongside this file. Privacy invariant: every value below is either a number, a SHA-256 hash, a known categorical (model id, tool name, signal enum), or an array of those. No raw prompts, code, file paths, or transcript content are emitted. This sample is illustrative — the real payload from a 30-day window typically contains 100-200 session objects.",
 
   "device": {
-    "client_version": "0.6.0",
+    "client_version": "0.7.0",
     "device_id": "11111111-2222-4333-8444-555555555555",
     "extracted_at_ms": 1748102400000,
-    "schema_version": "0.6",
+    "schema_version": "0.7",
     "window_days": 30
   },
 
@@ -14,11 +14,18 @@
     "global_claude_md_lines": 142,
     "hooks": 2,
     "mcp_servers": 9,
-    "project_claude_md_lines_avg": 270
+    "project_claude_md_lines_avg": 270,
+    "plugin_count": 5,
+    "distinct_installed_plugins": [
+      "1111111111111111",
+      "2222222222222222",
+      "3333333333333333",
+      "4444444444444444",
+      "5555555555555555"
+    ]
   },
 
   "sessions": [
-
     {
       "_comment": "Session A: productive AFK session — 4 subagents in parallel, planned, no friction. Worked example #2 from the design doc: HITL=4, AFK=38, Idle=88, parallelism = 123 / 38 = 3.24x.",
       "session_hash": "a2f0e91c4b8d3c1f",
@@ -30,8 +37,8 @@
       "afk_minutes": 38,
       "idle_minutes": 88,
       "afk_intervals": [
-        [1747955220, 1747956720, 4],
-        [1747958040, 1747958820, 1]
+        {"start_minute": 29132585, "end_minute_exclusive": 29132610, "is_cron": false},
+        {"start_minute": 29132634, "end_minute_exclusive": 29132647, "is_cron": false}
       ],
       "afk_max_streak_minutes": 25,
       "afk_parallel_minutes_foreground": 113,
@@ -39,7 +46,7 @@
 
       "distinct_skills": ["brainstorming", "plan", "writing-plans"],
       "distinct_mcp_tools": ["mcp__github__add_comment", "mcp__supabase__execute_sql"],
-      "distinct_builtin_tools": ["Bash", "Edit", "Read", "TodoWrite", "Write"],
+      "distinct_builtin_tools": ["Bash", "Edit", "Read", "Task", "TodoWrite", "Write"],
 
       "strong_plan_signals": ["EnterPlanMode", "writing-plans"],
       "weak_plan_signals": [],
@@ -66,7 +73,14 @@
         "claude-sonnet-4-6": 142
       },
       "user_skill_invocations": 3,
-      "hitl_mcp_invocations": 1
+      "hitl_mcp_invocations": 1,
+
+      "cache_input_tokens": 145200,
+      "cache_creation_input_tokens": 42220,
+      "builtin_tool_invocations": 218,
+      "plugin_invocations": 2,
+      "distinct_plugins": ["1111111111111111", "3333333333333333"],
+      "agent_dispatches": 12
     },
 
     {
@@ -109,7 +123,14 @@
         "claude-sonnet-4-6": 9
       },
       "user_skill_invocations": 0,
-      "hitl_mcp_invocations": 0
+      "hitl_mcp_invocations": 0,
+
+      "cache_input_tokens": 8420,
+      "cache_creation_input_tokens": 4420,
+      "builtin_tool_invocations": 18,
+      "plugin_invocations": 0,
+      "distinct_plugins": [],
+      "agent_dispatches": 0
     },
 
     {
@@ -123,7 +144,7 @@
       "afk_minutes": 78,
       "idle_minutes": 6,
       "afk_intervals": [
-        [1748057100, 1748059920, 1]
+        {"start_minute": 29134285, "end_minute_exclusive": 29134332, "is_cron": false}
       ],
       "afk_max_streak_minutes": 47,
       "afk_parallel_minutes_foreground": 78,
@@ -157,7 +178,14 @@
         "claude-sonnet-4-6": 234
       },
       "user_skill_invocations": 1,
-      "hitl_mcp_invocations": 0
+      "hitl_mcp_invocations": 0,
+
+      "cache_input_tokens": 326700,
+      "cache_creation_input_tokens": 86100,
+      "builtin_tool_invocations": 612,
+      "plugin_invocations": 1,
+      "distinct_plugins": ["2222222222222222"],
+      "agent_dispatches": 8
     },
 
     {
@@ -171,7 +199,7 @@
       "afk_minutes": 18,
       "idle_minutes": 6,
       "afk_intervals": [
-        [1748099400, 1748099700, 1]
+        {"start_minute": 29134990, "end_minute_exclusive": 29134995, "is_cron": false}
       ],
       "afk_max_streak_minutes": 5,
       "afk_parallel_minutes_foreground": 18,
@@ -179,7 +207,7 @@
 
       "distinct_skills": [],
       "distinct_mcp_tools": [],
-      "distinct_builtin_tools": ["Bash", "Edit", "Read", "Write"],
+      "distinct_builtin_tools": ["Bash", "Edit", "Read", "Task", "Write"],
 
       "strong_plan_signals": [],
       "weak_plan_signals": [],
@@ -204,8 +232,14 @@
         "claude-sonnet-4-6": 56
       },
       "user_skill_invocations": 0,
-      "hitl_mcp_invocations": 0
-    }
+      "hitl_mcp_invocations": 0,
 
+      "cache_input_tokens": 219000,
+      "cache_creation_input_tokens": 79400,
+      "builtin_tool_invocations": 144,
+      "plugin_invocations": 0,
+      "distinct_plugins": [],
+      "agent_dispatches": 9
+    }
   ]
 }

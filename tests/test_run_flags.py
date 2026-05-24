@@ -81,7 +81,7 @@ def test_dry_run_prints_valid_json_and_does_not_upload(
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     # Wire-format shape sanity checks — same envelope the uploader sends.
-    assert payload["device"]["schema_version"] == "0.6"
+    assert payload["device"]["schema_version"] == "0.7"
     assert payload["device"]["client_version"] == run_module.CLIENT_VERSION
     assert isinstance(payload["sessions"], list)
     assert len(payload["sessions"]) == 1
@@ -134,7 +134,7 @@ def test_main_routes_dry_run_flag(
     assert rc == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["device"]["schema_version"] == "0.6"
+    assert payload["device"]["schema_version"] == "0.7"
 
 
 def test_main_routes_explain_flag(

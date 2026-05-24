@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.6"
+SCHEMA_VERSION = "0.7"
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,12 @@ class ConfigCounts:
     custom_commands: int = 0
     global_claude_md_lines: int = 0
     project_claude_md_lines_avg: int = 0
+    # v0.7 — Plugins customization surface. ``plugin_count`` is the
+    # number of installed plugins (read from ~/.claude/plugins/...).
+    # ``distinct_installed_plugins`` is a list of stable hashed plugin
+    # identifiers (sha256(name)[:16]) — categorical, never raw names.
+    plugin_count: int = 0
+    distinct_installed_plugins: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,22 @@ class PerSession:
     assistant_msgs_by_model: dict[str, int] = field(default_factory=dict)
     user_skill_invocations: int = 0
     hitl_mcp_invocations: int = 0
+    # v0.7 — cache-aware token split, builtin invocations, plugins,
+    # subagent dispatches. All optional, default-safe so older fixtures
+    # (and the worked-example parity builders) still construct cleanly.
+    #
+    # ``cache_input_tokens``     — cache HIT input tokens
+    # ``cache_creation_input_tokens`` — cache MISS (creation) input tokens
+    # ``builtin_tool_invocations``    — count of all built-in tool_use blocks
+    # ``plugin_invocations``     — count of `<command-name>` blocks (plugin-style commands)
+    # ``distinct_plugins``       — hashed plugin identifiers used in session
+    # ``agent_dispatches``       — count of `Task` tool_use blocks (subagent spawns)
+    cache_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    builtin_tool_invocations: int = 0
+    plugin_invocations: int = 0
+    distinct_plugins: tuple[str, ...] = field(default_factory=tuple)
+    agent_dispatches: int = 0
 
 
 @dataclass(frozen=True)
@@ -88,9 +110,18 @@ class ExtractorOutput:
     sessions: tuple[PerSession, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
+        # asdict() on ConfigCounts preserves the tuple type, but JSON
+        # round-trips tuples back as lists — so to keep
+        # ``to_dict() == json.loads(to_json())`` we explicitly coerce
+        # the tuple field to a list here.
+        config_d = asdict(self.config)
+        if isinstance(config_d.get("distinct_installed_plugins"), tuple):
+            config_d["distinct_installed_plugins"] = list(
+                config_d["distinct_installed_plugins"]
+            )
         return {
             "device": asdict(self.device),
-            "config": asdict(self.config),
+            "config": config_d,
             "sessions": [
                 {
                     "session_hash": s.session_hash,
@@ -134,6 +165,12 @@ class ExtractorOutput:
                     "assistant_msgs_by_model": dict(s.assistant_msgs_by_model),
                     "user_skill_invocations": s.user_skill_invocations,
                     "hitl_mcp_invocations": s.hitl_mcp_invocations,
+                    "cache_input_tokens": s.cache_input_tokens,
+                    "cache_creation_input_tokens": s.cache_creation_input_tokens,
+                    "builtin_tool_invocations": s.builtin_tool_invocations,
+                    "plugin_invocations": s.plugin_invocations,
+                    "distinct_plugins": list(s.distinct_plugins),
+                    "agent_dispatches": s.agent_dispatches,
                 }
                 for s in self.sessions
             ],

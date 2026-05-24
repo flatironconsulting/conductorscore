@@ -75,7 +75,7 @@ def test_run_py_dry_run_via_direct_path(tmp_path: Path) -> None:
     payload = json.loads(proc.stdout)
     assert "device" in payload, payload
     assert "sessions" in payload, payload
-    assert payload["device"]["schema_version"] in {"0.1", "0.2", "0.3", "0.4", "0.5", "0.6"}
+    assert payload["device"]["schema_version"] in {"0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7"}
 
 
 def test_run_py_pair_via_direct_path_does_not_crash_at_import(tmp_path: Path) -> None:

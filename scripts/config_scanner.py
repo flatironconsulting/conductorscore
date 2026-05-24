@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,8 +9,73 @@ from scripts.output_schema import ConfigCounts
 __all__ = [
     "ConfigCounts",
     "count_claude_md_lines",
+    "read_installed_plugins",
     "scan_config",
 ]
+
+
+def _hash_plugin_id(name: str) -> str:
+    """16-hex-char hash for a plugin identifier. Categorical only."""
+    return hashlib.sha256(name.encode()).hexdigest()[:16]
+
+
+def read_installed_plugins(home: Path) -> list[str]:
+    """Return a sorted list of HASHED installed-plugin identifiers.
+
+    Source of truth: ``<home>/.claude/plugins/config.json`` (the
+    upstream Claude Code plugin-runtime manifest). Falls back to scanning
+    ``<home>/.claude/plugins/`` for first-level directory names if the
+    manifest is absent — each plugin lives in its own directory.
+
+    Returns an empty list on any read error or when the directory is
+    missing — older Claude Code installs predate the plugin runtime.
+
+    Privacy: only hashed identifiers leave this helper; raw plugin names
+    never leave the device.
+    """
+    plugins_dir = home / ".claude" / "plugins"
+    names: set[str] = set()
+
+    # Preferred: manifest file (plugin_runtime emits the list of
+    # installed plugin names here).
+    manifest = plugins_dir / "config.json"
+    if manifest.is_file():
+        try:
+            d = json.loads(manifest.read_text())
+            if isinstance(d, dict):
+                # Tolerate a few common shapes: {"plugins": [...]},
+                # {"installed": {"name": {...}}}, or a flat dict keyed
+                # by plugin name.
+                if isinstance(d.get("plugins"), list):
+                    for entry in d["plugins"]:
+                        if isinstance(entry, str):
+                            names.add(entry)
+                        elif isinstance(entry, dict) and isinstance(
+                            entry.get("name"), str
+                        ):
+                            names.add(entry["name"])
+                elif isinstance(d.get("installed"), dict):
+                    for k in d["installed"].keys():
+                        if isinstance(k, str):
+                            names.add(k)
+                else:
+                    for k in d.keys():
+                        if isinstance(k, str) and not k.startswith("_"):
+                            names.add(k)
+        except (OSError, ValueError):
+            pass
+
+    # Fallback: enumerate directory names (one per plugin) when the
+    # manifest is missing.
+    if not names and plugins_dir.is_dir():
+        try:
+            for child in plugins_dir.iterdir():
+                if child.is_dir() and not child.name.startswith("."):
+                    names.add(child.name)
+        except OSError:
+            pass
+
+    return sorted(_hash_plugin_id(n) for n in names)
 
 
 def count_claude_md_lines(path: Path) -> int:
@@ -107,10 +173,14 @@ def scan_config(
         existing = [c for c in counts if c > 0]
         if existing:
             project_avg = sum(existing) // len(existing)
+    # v0.7 — installed plugins.
+    installed_plugins = read_installed_plugins(home)
     return ConfigCounts(
         mcp_servers=_count_mcp_servers(home),
         hooks=_count_hooks(home),
         custom_commands=_count_custom_commands(home),
         global_claude_md_lines=global_md,
         project_claude_md_lines_avg=project_avg,
+        plugin_count=len(installed_plugins),
+        distinct_installed_plugins=tuple(installed_plugins),
     )

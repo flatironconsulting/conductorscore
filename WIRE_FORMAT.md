@@ -18,6 +18,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.4 | Feature 6 — coding-without-a-plan | `sessions[].{strong_plan_signals, weak_plan_signals, is_planned, files_modified, total_lines_edited, is_significant_edit_session}` |
 | 0.5 | Feature 7 — anti-pattern cluster | `sessions[].{revert_count, qualifying_pairs, repetitive_pairs, rage_quit_event, tool_error_count, auto_compaction_events, total_input_tokens, total_output_tokens, redundant_approvals_per_signature}`, `config.{global_claude_md_lines, project_claude_md_lines_avg}` |
 | 0.6 | Feature 8 — fluency + informational | `sessions[].{assistant_msgs_by_model, user_skill_invocations, hitl_mcp_invocations}` |
+| 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, distinct_plugins, agent_dispatches}`, `config.{plugin_count, distinct_installed_plugins}` |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 

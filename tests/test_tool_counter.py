@@ -439,3 +439,124 @@ def test_count_hitl_mcp_invocations_ignores_non_tool_events():
     ]
     hitl = {100}
     assert count_hitl_mcp_invocations(events, hitl) == 0
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — builtin invocations, agent dispatches, plugin invocations
+# ---------------------------------------------------------------------------
+
+
+def test_count_tools_v0_7_counts_builtin_invocations(tmp_path):
+    """Three Read calls + one Bash + one Edit = 5 builtin invocations,
+    3 distinct."""
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Edit"}]}},
+        ],
+    )
+    out = count_tools(p)
+    assert out.builtin_tool_invocations == 5
+    assert out.distinct_builtin_tools == ["Bash", "Edit", "Read"]
+
+
+def test_count_tools_v0_7_excludes_mcp_from_builtin_invocations(tmp_path):
+    """MCP tools are NOT counted as builtin invocations."""
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+            {
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "mcp__github__add_comment"}
+                    ]
+                }
+            },
+        ],
+    )
+    out = count_tools(p)
+    assert out.builtin_tool_invocations == 1
+    assert out.distinct_mcp_tools == ["mcp__github__add_comment"]
+
+
+def test_count_tools_v0_7_counts_agent_dispatches(tmp_path):
+    """Task tool counts toward agent_dispatches AND builtin_tool_invocations."""
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"content": [{"type": "tool_use", "name": "Task"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Task"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+        ],
+    )
+    out = count_tools(p)
+    assert out.agent_dispatches == 2
+    # Task counts as a builtin tool too — invocation count includes it.
+    assert out.builtin_tool_invocations == 3
+    assert "Task" in out.distinct_builtin_tools
+
+
+def test_count_tools_v0_7_counts_plugin_invocations(tmp_path):
+    """<command-name>foo:bar</command-name> in user messages counts as a
+    plugin invocation. Plugin names are hashed before they leave."""
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>myplugin:run</command-name> please",
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>myplugin:run</command-name>",
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "<command-name>otherplugin:list</command-name>",
+                },
+            },
+        ],
+    )
+    out = count_tools(p)
+    assert out.plugin_invocations == 3
+    # Two distinct plugin names → two hashes; "myplugin:run" raw must NOT leak.
+    assert len(out.distinct_plugins) == 2
+    for entry in out.distinct_plugins:
+        assert len(entry) == 16  # sha256[:16]
+    # Raw names must not appear anywhere in the hashed list.
+    joined = ",".join(out.distinct_plugins)
+    assert "myplugin" not in joined
+    assert "otherplugin" not in joined
+
+
+def test_count_tools_v0_7_plugin_invocations_zero_when_absent(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "no plugin here, just /plan"},
+            },
+        ],
+    )
+    out = count_tools(p)
+    assert out.plugin_invocations == 0
+    assert out.distinct_plugins == []

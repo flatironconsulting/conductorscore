@@ -83,6 +83,12 @@ class Event:
     model: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # v0.7 — cache-aware token split. ``cache_input_tokens`` is hits
+    # (cheap input — ~10% of miss). ``cache_creation_input_tokens`` is
+    # cache miss / creation (full price). Both come from the Anthropic
+    # API ``usage`` block; absent on legacy transcripts → 0.
+    cache_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     thinking_tokens: int = 0
     user_text_token_count: int = 0
     user_text_hash: str | None = None
@@ -236,6 +242,24 @@ def _usage_tokens(message: dict) -> tuple[int, int]:
     return (
         int(usage.get("input_tokens") or 0),
         int(usage.get("output_tokens") or 0),
+    )
+
+
+def _usage_cache_tokens(message: dict) -> tuple[int, int]:
+    """Return (cache_hit_input_tokens, cache_creation_input_tokens).
+
+    Anthropic API usage block carries:
+      • ``cache_read_input_tokens``     — cache HIT (cheap input)
+      • ``cache_creation_input_tokens`` — cache MISS (write-through, full price)
+
+    Both default to 0 when absent (older transcripts, non-cache models).
+    """
+    usage = message.get("usage") if isinstance(message, dict) else None
+    if not isinstance(usage, dict):
+        return (0, 0)
+    return (
+        int(usage.get("cache_read_input_tokens") or 0),
+        int(usage.get("cache_creation_input_tokens") or 0),
     )
 
 
@@ -539,6 +563,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
                 else None
             )
             input_tokens, output_tokens = _usage_tokens(message or {})
+            cache_hit_tokens, cache_creation_tokens = _usage_cache_tokens(
+                message or {}
+            )
 
             if isinstance(content, list):
                 text_blocks = [
@@ -583,6 +610,12 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             model=model,
                             input_tokens=input_tokens if first_text else 0,
                             output_tokens=output_tokens if first_text else 0,
+                            cache_input_tokens=cache_hit_tokens
+                            if first_text
+                            else 0,
+                            cache_creation_input_tokens=cache_creation_tokens
+                            if first_text
+                            else 0,
                         )
                     )
                     first_text = False
@@ -660,6 +693,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         model=model,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
+                        cache_input_tokens=cache_hit_tokens,
+                        cache_creation_input_tokens=cache_creation_tokens,
                     )
                 )
             continue
