@@ -137,3 +137,59 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         distinct_mcp_tools=sorted(mcp),
         distinct_builtin_tools=sorted(builtin),
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.6 — Task 8.1 client: HITL-window MCP counting + skill counts.
+# ---------------------------------------------------------------------------
+
+
+def count_user_skill_invocations(events, event_text_map: dict) -> int:
+    """Total count of slash-command invocations across USER events.
+
+    Unlike :func:`count_tools` (which de-duplicates skill names into a
+    sorted set), this counts EVERY ``SLASH_CMD_RE`` match — two
+    ``/plan`` invocations contribute 2. Used as the numerator of the
+    fluency repetition metric.
+
+    Privacy: ``event_text_map`` is a memory-only ``id(event) -> text``
+    side channel produced by ``read_events_and_text``. The raw text is
+    consumed locally and never leaves this function — only the integer
+    count escapes.
+    """
+    count = 0
+    for e in events:
+        if e.kind.name != "USER":
+            continue
+        text = event_text_map.get(id(e), "")
+        if not text:
+            continue
+        for _ in SLASH_CMD_RE.finditer(text):
+            count += 1
+    return count
+
+
+def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
+    """Count of MCP tool calls whose timestamp falls in a HITL minute.
+
+    Per the fluency repetition metric: only MCP calls made while the
+    user is actively in the loop count. ``hitl_minutes`` is the set of
+    absolute minute indices (``floor(ts_ms / 60_000)``) the minute
+    classifier marked as HITL. Calls outside that set (AFK / Idle /
+    Cron) are ignored.
+
+    Only ``ASSISTANT_TOOL`` events with a tool name starting with
+    ``mcp__`` are counted; non-MCP tools and ``TOOL_RESULT`` events
+    never contribute.
+    """
+    if not hitl_minutes:
+        return 0
+    count = 0
+    for e in events:
+        if e.kind.name != "ASSISTANT_TOOL":
+            continue
+        if not e.tool_name or not e.tool_name.startswith("mcp__"):
+            continue
+        if (e.timestamp_ms // 60_000) in hitl_minutes:
+            count += 1
+    return count
