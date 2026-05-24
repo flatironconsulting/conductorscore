@@ -36,7 +36,12 @@ from scripts.plan_signals import (
 from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
-from scripts.tool_counter import count_compaction_and_tokens, count_tools
+from scripts.tool_counter import (
+    count_compaction_and_tokens,
+    count_hitl_mcp_invocations,
+    count_tools,
+    count_user_skill_invocations,
+)
 
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
@@ -139,12 +144,14 @@ def extract(
         afk_parallel_fg = 0
         afk_max_streak = 0
         intervals: list[AfkInterval] = []
+        hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
 
         if window is not None:
             buckets = classify_minutes(events, window)
-            for b in buckets.values():
+            for m, b in buckets.items():
                 if b == MinuteBucket.HITL:
                     hitl_minutes += 1
+                    hitl_minute_set.add(m)
                 elif b == MinuteBucket.AFK:
                     afk_minutes += 1
                 else:
@@ -203,6 +210,36 @@ def extract(
         compaction = count_compaction_and_tokens(events)
         approvals = count_redundant_approvals(events)
 
+        # v0.6 — Feature 8 (fluency + informational).
+        # Count assistant messages per raw model id. A single transcript
+        # message may emit multiple Events (text + tool_use + thinking)
+        # sharing one timestamp_ms — dedupe on that pair so one line is
+        # one message. ``model`` is only set on assistant-side events;
+        # the reader leaves it None elsewhere.
+        seen_assistant_msgs: set[tuple[int, str]] = set()
+        assistant_msgs_by_model: dict[str, int] = {}
+        for e in events:
+            if e.kind not in (
+                EventKind.ASSISTANT_TEXT,
+                EventKind.ASSISTANT_TOOL,
+                EventKind.ASSISTANT_THINKING,
+            ):
+                continue
+            if not e.model:
+                continue
+            key = (e.timestamp_ms, e.model)
+            if key in seen_assistant_msgs:
+                continue
+            seen_assistant_msgs.add(key)
+            assistant_msgs_by_model[e.model] = (
+                assistant_msgs_by_model.get(e.model, 0) + 1
+            )
+
+        user_skill_invocations = count_user_skill_invocations(events, text_map)
+        hitl_mcp_invocations = count_hitl_mcp_invocations(
+            events, hitl_minute_set
+        )
+
         sessions.append(
             PerSession(
                 session_hash=_sha16(s.session_id),
@@ -234,6 +271,9 @@ def extract(
                 total_input_tokens=compaction.total_input_tokens,
                 total_output_tokens=compaction.total_output_tokens,
                 redundant_approvals_per_signature=approvals,
+                assistant_msgs_by_model=assistant_msgs_by_model,
+                user_skill_invocations=user_skill_invocations,
+                hitl_mcp_invocations=hitl_mcp_invocations,
             )
         )
     return ExtractorOutput(

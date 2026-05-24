@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.5"
+    assert out.device.schema_version == "0.6"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -1110,3 +1110,248 @@ def test_extract_v0_5_privacy_invariant_frustration_text_not_leaked(
     assert "SECRET_RAGE_TEXT_66" not in js
     s = out.sessions[0]
     assert s.rage_quit_event is True
+
+
+# ---------------------------------------------------------------------------
+# v0.6 — Feature 8 wire-up (fluency + informational).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_v0_6_json_includes_new_session_keys(isolated_claude_home):
+    """Every v0.6 PerSession key is present on the wire payload."""
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+            {"timestamp": "2026-01-01T00:01:00Z"},
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    parsed = json.loads(out.to_json())
+    s = parsed["sessions"][0]
+    for key in (
+        "assistant_msgs_by_model",
+        "user_skill_invocations",
+        "hitl_mcp_invocations",
+    ):
+        assert key in s, f"v0.6 field {key!r} missing from wire payload"
+    # Defaults
+    assert s["assistant_msgs_by_model"] == {}
+    assert s["user_skill_invocations"] == 0
+    assert s["hitl_mcp_invocations"] == 0
+
+
+def test_extract_v0_6_assistant_msgs_by_model_counts_each_message(
+    isolated_claude_home,
+):
+    """assistant_msgs_by_model: raw model id → count of assistant messages.
+
+    Per plan § Task 8.2: the wire carries the RAW model id (not the
+    tier classifier output — the server applies that mapping).
+    """
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "go"},
+        }
+    ]
+    # 3 Sonnet messages
+    for i in range(3):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (1 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            }
+        )
+    # 2 Opus messages
+    for i in range(2):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (10 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "msgs.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.assistant_msgs_by_model == {
+        "claude-sonnet-4-6": 3,
+        "claude-opus-4-7": 2,
+    }
+
+
+def test_extract_v0_6_assistant_msgs_dedupes_within_a_single_message(
+    isolated_claude_home,
+):
+    """A single assistant transcript line that produces multiple events
+    (text + tool_use + thinking) is counted as ONE message, not three.
+    """
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "multi.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "go"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [
+                        {"type": "text", "text": "let me check"},
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "/tmp/x"},
+                        },
+                        {"type": "thinking", "thinking": "..."},
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.assistant_msgs_by_model == {"claude-sonnet-4-6": 1}
+
+
+def test_extract_v0_6_user_skill_invocations_populated(isolated_claude_home):
+    """Total slash-command count across user messages (not distinct)."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = []
+    for i in range(6):
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms + i * 60_000),
+                "message": {
+                    "role": "user",
+                    "content": "/plan now please",
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "sk.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    # 6 user msgs each with one /plan
+    assert s.user_skill_invocations == 6
+
+
+def test_extract_v0_6_hitl_mcp_invocations_populated(isolated_claude_home):
+    """MCP tool calls inside HITL minutes are counted.
+
+    A user msg at minute m creates HITL minutes {m, m+1}; the mcp__
+    tool call at minute m+1 sits inside the HITL window and so counts.
+    """
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "mcp.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "go"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 30_000),  # same minute as USER
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__github__add_comment",
+                            "input": {"body": "hi"},
+                        }
+                    ],
+                },
+            },
+            # An MCP call far in the future (no nearby USER msg) → AFK,
+            # not HITL → must NOT count.
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 30 * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__github__add_comment",
+                            "input": {"body": "hi"},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.hitl_mcp_invocations == 1
+
+
+def test_extract_v0_6_assistant_msgs_unknown_model_omitted(
+    isolated_claude_home,
+):
+    """An assistant message line with no ``model`` field does NOT add a
+    bucket — assistant_msgs_by_model only keys on present model ids."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "nomodel.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "go"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.assistant_msgs_by_model == {}
