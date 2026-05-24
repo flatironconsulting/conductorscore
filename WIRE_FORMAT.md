@@ -173,3 +173,93 @@ All v0.1 fields (`session_hash`, `project_hash`, `started_at_ms`,
 - All v0.2 list fields default to `[]` when no matching events were
   observed in the session; the server MUST treat absence and `[]`
   identically.
+
+## Schema v0.3
+
+Released with Feature 5 (time partition + AFK leverage metrics). Adds
+seven per-session time-partition fields summarizing the HITL / AFK /
+Idle minute breakdown plus parallelism numerators needed for metrics
+#3 (agent parallelism), #5 (AFK max streak), and #6 (AFK parallel
+minutes). All counts are derived locally from per-event minute
+classification; no raw transcript content, tool input, or assistant
+prose is ever transmitted. The privacy invariant test (`tests/test_extractor_integration.py`) pins this contract.
+
+### Top-level object
+
+Unchanged shape from v0.2 — only `device.schema_version` and the
+per-session field set change. `schema_version` MUST be `"0.3"`.
+
+### `sessions[]` — PerSession (v0.3 additions)
+
+All v0.1 + v0.2 fields remain unchanged. The following are added:
+
+| Field                              | Type              | Nullable | Notes                                                                                                                                |
+|------------------------------------|-------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `hitl_minutes`                     | integer           | no       | Minutes in the foreground session window classified as HITL (user-in-the-loop). A user message at minute X marks both X and X+1 as HITL. `0` for Cron-only sessions. |
+| `afk_minutes`                      | integer           | no       | Minutes classified as AFK (foreground agent activity, no recent user msg). `0` for Cron-only sessions.                               |
+| `idle_minutes`                     | integer           | no       | Minutes inside the window with neither HITL nor AFK activity. `0` for Cron-only sessions.                                            |
+| `afk_parallel_minutes_foreground`  | integer           | no       | Sum over AFK minutes of distinct foreground tracks active in `{m-1, m}`. The Task dispatch tool is excluded from track activity so main-waiting-on-subagents contributes 0 (matches outline Example 1 exactly). |
+| `cron_parallel_minutes`            | integer           | no       | Sum over Cron-event minutes of distinct Cron tracks active AT that minute (no 2-minute spread — Cron runs are discrete). Counted even outside the foreground window. |
+| `afk_max_streak_minutes`           | integer           | no       | Length of the longest contiguous run of AFK minutes. Foreground-only by construction (Cron events live outside the foreground window and cannot extend an AFK streak). |
+| `afk_intervals`                    | array of objects  | no       | Contiguous AFK runs (and Cron intervals). Each element: `{start_minute, end_minute_exclusive, is_cron}`. `start_minute` and `end_minute_exclusive` are absolute minute units (`floor(epoch_ms / 60_000)`). `end_minute_exclusive > start_minute` is required. |
+
+### Window semantics
+
+- Foreground window = `[first_foreground_event_minute, last_foreground_event_minute)` (half-open, end-exclusive).
+- Cron-like tools (`Cron`, `ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList`) do NOT extend the foreground window. They contribute only to `cron_parallel_minutes` and Cron-typed `afk_intervals`.
+- A session with no foreground events (Cron-only transcript) has window = none: `hitl_minutes = afk_minutes = idle_minutes = afk_parallel_minutes_foreground = afk_max_streak_minutes = 0`. Only `cron_parallel_minutes` and Cron `afk_intervals` are populated.
+
+### Example
+
+```json
+{
+  "config": {
+    "custom_commands": 2,
+    "global_claude_md_lines": 0,
+    "hooks": 3,
+    "mcp_servers": 4,
+    "project_claude_md_lines_avg": 0
+  },
+  "device": {
+    "client_version": "0.3.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1735689600000,
+    "schema_version": "0.3",
+    "window_days": 30
+  },
+  "sessions": [
+    {
+      "afk_intervals": [
+        {"end_minute_exclusive": 27228570, "is_cron": false, "start_minute": 27228547}
+      ],
+      "afk_max_streak_minutes": 23,
+      "afk_minutes": 23,
+      "afk_parallel_minutes_foreground": 92,
+      "cron_parallel_minutes": 0,
+      "distinct_builtin_tools": ["Read", "Task"],
+      "distinct_mcp_tools": [],
+      "distinct_skills": [],
+      "ended_at_ms": 1735691400000,
+      "hitl_minutes": 2,
+      "idle_minutes": 0,
+      "project_hash": "fedcba9876543210",
+      "session_hash": "0123456789abcdef",
+      "started_at_ms": 1735689900000
+    }
+  ]
+}
+```
+
+### Compatibility
+
+- Top-level key ordering remains alphabetical: `config`, `device`, `sessions`.
+- The server SHOULD accept `schema_version` of `"0.1"`, `"0.2"`, or `"0.3"` during the deprecation window.
+- All new integer fields default to `0` when the session yields no
+  events of the relevant kind (e.g. Cron-only sessions have
+  `afk_minutes = 0`). The server MUST treat absence and `0` identically.
+- `afk_intervals` defaults to `[]`. The server MUST treat absence and
+  `[]` identically.
+- Worked-example correctness is pinned by
+  `tests/test_worked_examples.py` (Examples 1–4 from
+  `plans/003_outline.md`). Any divergence in the partition numbers is
+  a schema-breaking change.
