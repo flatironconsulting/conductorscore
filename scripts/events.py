@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+# Re-imported lazily inside the reader to avoid an import cycle at module
+# load time (plan_signals imports Event from this module).
+
+
 
 # ---------------------------------------------------------------------------
 # Session discovery (Feature 3) — preserved API.
@@ -45,6 +49,28 @@ class Event:
     messages are reduced to a SHA-256[:16] hash plus an approximate token
     count. Tool inputs and assistant prose are not stored either — only the
     structural metadata needed to compute time-partition metrics.
+
+    Plan-signal + edit-counter fields (added with v0.4, Feature 6):
+      ``is_structured_prompt`` — USER events: outline § "structured first
+        prompt" heuristic; computed at read time so the raw text never
+        escapes this module.
+      ``skill_name`` — ASSISTANT_TOOL events whose tool is ``Skill``: the
+        invoked skill name. A categorical (like ``tool_name``).
+      ``todo_count`` — ASSISTANT_TOOL events whose tool is ``TodoWrite``:
+        number of todo items in the call. An integer count, no content.
+      ``is_plan_file_write`` — ASSISTANT_TOOL Write/Edit events whose
+        ``file_path`` matches the outline's plan-shaped pattern with a
+        ``.md`` extension. Boolean — the path itself is discarded.
+      ``is_plan_md_read`` — ASSISTANT_TOOL Read events whose ``file_path``
+        is a plan-shaped ``.md`` (excluding standard repo-root files).
+        Boolean only.
+      ``edit_file_path_hash`` — ASSISTANT_TOOL Edit/Write/MultiEdit:
+        ``sha256(file_path)[:16]``, used to deduplicate files modified
+        across operations. Never the raw path.
+      ``edit_line_count`` — ASSISTANT_TOOL Edit/Write/MultiEdit: estimated
+        line count touched (max of new/old string newlines).
+      ``is_excluded_edit_path`` — ASSISTANT_TOOL Edit/Write/MultiEdit:
+        ``.claude/`` / ``.git/`` / basename ``CLAUDE.md`` — boolean only.
     """
 
     kind: EventKind
@@ -60,6 +86,15 @@ class Event:
     thinking_tokens: int = 0
     user_text_token_count: int = 0
     user_text_hash: str | None = None
+    # v0.4 — plan signal + edit counter fields. All optional, default-safe.
+    is_structured_prompt: bool = False
+    skill_name: str | None = None
+    todo_count: int = 0
+    is_plan_file_write: bool = False
+    is_plan_md_read: bool = False
+    edit_file_path_hash: str | None = None
+    edit_line_count: int = 0
+    is_excluded_edit_path: bool = False
 
 
 def _parse_ts_ms(line) -> int | None:
