@@ -254,6 +254,88 @@ def _read_lines(jsonl_path: Path) -> list[str]:
         return []
 
 
+_EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+
+# Paths that the Coding-without-a-plan metric must NOT count as a code
+# edit. ``.claude/`` and ``.git/`` are infrastructure; ``CLAUDE.md`` is a
+# settings file (separately tracked by the CLAUDE.md bloat metric).
+_EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".git/")
+_EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md"})
+
+
+def _is_excluded_edit_path(path: str) -> bool:
+    """Outline § coding session: edits to .claude/, .git/, basename
+    CLAUDE.md are excluded from the edit footprint.
+    """
+    if not path:
+        return False
+    if any(part in path for part in _EXCLUDED_EDIT_DIR_PARTS):
+        return True
+    basename = path.rsplit("/", 1)[-1]
+    return basename in _EXCLUDED_EDIT_BASENAMES
+
+
+def _count_string_lines(s) -> int:
+    """Newline-count + 1 (so ``"abc"`` is 1 line, ``"abc\\ndef"`` is 2)."""
+    if not isinstance(s, str) or not s:
+        return 0
+    return s.count("\n") + 1
+
+
+def _estimate_edit_line_count(tool_name: str, inp: dict) -> int:
+    """Estimate lines touched by a single Edit/Write/MultiEdit call.
+
+    Per outline § Common definitions:
+      total_lines_edited ≈ sum across Edit/Write/MultiEdit operations of
+        max(line_count(new_string), line_count(old_string))
+      (Write has empty old_string, so this collapses to line_count(new_string)).
+
+    For MultiEdit we sum the per-edit max() over the ``edits`` array.
+    """
+    if not isinstance(inp, dict):
+        return 0
+    if tool_name == "Write":
+        return _count_string_lines(inp.get("content"))
+    if tool_name == "Edit":
+        return max(
+            _count_string_lines(inp.get("new_string")),
+            _count_string_lines(inp.get("old_string")),
+        )
+    if tool_name == "MultiEdit":
+        total = 0
+        edits = inp.get("edits")
+        if isinstance(edits, list):
+            for ed in edits:
+                if not isinstance(ed, dict):
+                    continue
+                total += max(
+                    _count_string_lines(ed.get("new_string")),
+                    _count_string_lines(ed.get("old_string")),
+                )
+        return total
+    return 0
+
+
+def _extract_skill_name(inp: dict) -> str | None:
+    """Pull the invoked skill name out of a Skill tool's input.
+
+    Accepts the common shapes: ``{"skill": "writing-plans"}`` or
+    ``{"name": "writing-plans"}``. The returned string is a categorical
+    (like a tool name), safe to surface on the Event.
+    """
+    if not isinstance(inp, dict):
+        return None
+    val = inp.get("skill") or inp.get("name")
+    return val if isinstance(val, str) and val else None
+
+
+def _extract_todo_count(inp: dict) -> int:
+    if not isinstance(inp, dict):
+        return 0
+    todos = inp.get("todos")
+    return len(todos) if isinstance(todos, list) else 0
+
+
 def _subagent_id_for(d: dict, is_sidechain: bool) -> str | None:
     """Derive a stable per-subagent identifier from a sidechain JSONL line.
 
@@ -289,6 +371,14 @@ def read_events(jsonl_path: Path) -> list[Event]:
     discarded entirely; only structural metadata survives. Malformed lines
     are silently skipped.
     """
+    # Late import to avoid a cycle: plan_signals imports Event from us.
+    from scripts.plan_signals import (
+        is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
+    )
+    from scripts.plan_signals import (
+        is_structured_prompt as _plan_signals_is_structured_prompt,
+    )
+
     session_id = jsonl_path.stem
     events: list[Event] = []
 
@@ -318,6 +408,15 @@ def read_events(jsonl_path: Path) -> list[Event]:
         if kind_field == "user" or (message and message.get("role") == "user"):
             content = message.get("content") if message else d.get("content")
             text = _flatten_text(content)
+            token_count = _approx_token_count(text)
+            # Privacy: compute the structured-prompt flag here, while we
+            # still have the text in scope; ``text`` itself is discarded
+            # at the end of this block.
+            structured = (
+                _plan_signals_is_structured_prompt(text, token_count)
+                if text
+                else False
+            )
             events.append(
                 Event(
                     kind=EventKind.USER,
@@ -326,7 +425,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     is_sidechain=is_sidechain,
                     subagent_id=subagent_id,
                     user_text_hash=_sha16(text) if text else None,
-                    user_text_token_count=_approx_token_count(text),
+                    user_text_token_count=token_count,
+                    is_structured_prompt=structured,
                 )
             )
             # Tool result blocks may also appear inside a user-role message
@@ -417,6 +517,40 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         if isinstance(block.get("name"), str)
                         else None
                     )
+                    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    # Default-safe v0.4 plan/edit flags.
+                    skill_name_val: str | None = None
+                    todo_count_val = 0
+                    is_plan_file_write_val = False
+                    is_plan_md_read_val = False
+                    edit_file_path_hash_val: str | None = None
+                    edit_line_count_val = 0
+                    is_excluded_edit_path_val = False
+                    if name == "Skill":
+                        skill_name_val = _extract_skill_name(inp)
+                    elif name == "TodoWrite":
+                        todo_count_val = _extract_todo_count(inp)
+                    elif name in _EDIT_TOOL_NAMES:
+                        path = inp.get("file_path") if isinstance(inp, dict) else None
+                        if isinstance(path, str) and path:
+                            edit_file_path_hash_val = _sha16(path)
+                            is_excluded_edit_path_val = _is_excluded_edit_path(path)
+                            edit_line_count_val = _estimate_edit_line_count(name, inp)
+                            # Plan-shaped .md write fires the strong signal.
+                            if (
+                                path.lower().endswith(".md")
+                                and _plan_signals_is_plan_shaped_path(path)
+                            ):
+                                is_plan_file_write_val = True
+                    elif name == "Read":
+                        path = inp.get("file_path") if isinstance(inp, dict) else None
+                        if (
+                            isinstance(path, str)
+                            and path
+                            and path.lower().endswith(".md")
+                            and _plan_signals_is_plan_shaped_path(path)
+                        ):
+                            is_plan_md_read_val = True
                     events.append(
                         Event(
                             kind=EventKind.ASSISTANT_TOOL,
@@ -426,6 +560,13 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             is_sidechain=is_sidechain,
                             subagent_id=subagent_id,
                             model=model,
+                            skill_name=skill_name_val,
+                            todo_count=todo_count_val,
+                            is_plan_file_write=is_plan_file_write_val,
+                            is_plan_md_read=is_plan_md_read_val,
+                            edit_file_path_hash=edit_file_path_hash_val,
+                            edit_line_count=edit_line_count_val,
+                            is_excluded_edit_path=is_excluded_edit_path_val,
                         )
                     )
             elif isinstance(content, str):

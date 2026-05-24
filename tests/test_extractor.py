@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.3"
+    assert out.device.schema_version == "0.4"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -341,3 +341,386 @@ def test_extract_v0_3_json_includes_new_session_keys(isolated_claude_home):
         "afk_intervals",
     ):
         assert key in s, f"v0.3 field {key!r} missing from wire payload"
+
+
+# ---------------------------------------------------------------------------
+# v0.4 — Feature 6 wire-up (plan signals + edit footprint).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_v0_4_json_includes_new_plan_and_edit_keys(isolated_claude_home):
+    """Every v0.4 PerSession key is present on the wire payload."""
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+            {"timestamp": "2026-01-01T00:01:00Z"},
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    parsed = json.loads(out.to_json())
+    s = parsed["sessions"][0]
+    for key in (
+        "strong_plan_signals",
+        "weak_plan_signals",
+        "is_planned",
+        "files_modified",
+        "total_lines_edited",
+        "is_significant_edit_session",
+    ):
+        assert key in s, f"v0.4 field {key!r} missing from wire payload"
+    # Defaults
+    assert s["strong_plan_signals"] == []
+    assert s["weak_plan_signals"] == []
+    assert s["is_planned"] is False
+    assert s["files_modified"] == 0
+    assert s["total_lines_edited"] == 0
+    assert s["is_significant_edit_session"] is False
+
+
+def test_extract_v0_4_significant_edit_session_with_strong_plan_signal(
+    isolated_claude_home,
+):
+    """A session that calls EnterPlanMode and edits >5 files should
+    surface as both planned AND a significant-edit session."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "build me a thing"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": _iso(base_ms + 60_000),
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "EnterPlanMode", "input": {}},
+                ],
+            },
+        },
+    ]
+    # 6 distinct file edits → files > 5 → is_significant True.
+    for i in range(6):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (2 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": f"/repo/file_{i}.py",
+                                "content": "x = 1\n",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert "EnterPlanMode" in s.strong_plan_signals
+    assert s.is_planned is True
+    assert s.files_modified == 6
+    assert s.is_significant_edit_session is True
+
+
+def test_extract_v0_4_unplanned_significant_edit_session(isolated_claude_home):
+    """No plan signals + lots of edits → is_planned False, is_significant True."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "fix it"},
+        },
+    ]
+    for i in range(10):
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + (1 + i) * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": f"/repo/f_{i}.py",
+                                "content": "x = 1\n",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    assert s.is_planned is False
+    assert s.strong_plan_signals == ()
+    assert s.files_modified == 10
+    assert s.is_significant_edit_session is True
+
+
+def test_extract_v0_4_prior_24h_plan_artifact_weak_signal(isolated_claude_home):
+    """A session with a 'structured first prompt' + a sibling session in
+    the same project that wrote a plan in the last 24h should fire two
+    weak signals → is_planned True.
+    """
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+
+    # Sibling session (yesterday): writes a plan-shaped .md → plan artifact.
+    sibling_ms = base_ms - 60 * 60_000  # 1 hour earlier (within 24h)
+    sibling_lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(sibling_ms),
+            "message": {"role": "user", "content": "plan it"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": _iso(sibling_ms + 60_000),
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {
+                            "file_path": "/repo/plans/001_design.md",
+                            "content": "# Plan\n",
+                        },
+                    }
+                ],
+            },
+        },
+    ]
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "yesterday.jsonl",
+        sibling_lines,
+    )
+
+    # Today's session: structured first prompt (>200 tokens + sequence words)
+    # + nothing else strong.
+    long_structured = (
+        "We will first do A. "
+        "Then do B. "
+        "Next do C. "
+        "Finally finish up the whole thing. " * 20  # well over 200 tokens
+    )
+    today_lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": long_structured},
+        },
+        {
+            "type": "assistant",
+            "timestamp": _iso(base_ms + 60_000),
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "ls"},
+                    }
+                ],
+            },
+        },
+    ]
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "today.jsonl", today_lines
+    )
+
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    # Find today's session by start time
+    today = next(s for s in out.sessions if s.started_at_ms == base_ms)
+    assert "structured_first_prompt" in today.weak_plan_signals
+    assert "prior_24h_plan_artifact" in today.weak_plan_signals
+    assert today.is_planned is True
+
+
+def test_extract_v0_4_prior_artifact_lookup_is_per_project(isolated_claude_home):
+    """A plan artifact in project A must NOT fire the weak signal for a
+    session in project B."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+
+    # Project A: produced a plan artifact yesterday.
+    sib_ms = base_ms - 60 * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-projA" / "sib.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(sib_ms),
+                "message": {"role": "user", "content": "plan"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(sib_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "EnterPlanMode",
+                            "input": {},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    # Project B: today, no signals at all.
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-projB" / "today.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "yo"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {}}
+                    ],
+                },
+            },
+        ],
+    )
+
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    proj_b_today = next(
+        s for s in out.sessions if s.started_at_ms == base_ms
+    )
+    assert "prior_24h_plan_artifact" not in proj_b_today.weak_plan_signals
+
+
+def test_extract_v0_4_prior_artifact_lookup_excludes_self(isolated_claude_home):
+    """A session that produces a plan artifact must NOT count itself as
+    a prior-24h artifact (no self-fire)."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "solo.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "plan"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "EnterPlanMode",
+                            "input": {},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    s = out.sessions[0]
+    # Strong fires; the prior-24h weak signal does NOT.
+    assert "EnterPlanMode" in s.strong_plan_signals
+    assert "prior_24h_plan_artifact" not in s.weak_plan_signals
+
+
+def test_extract_v0_4_prior_artifact_lookup_respects_24h_window(
+    isolated_claude_home,
+):
+    """A plan artifact 25h ago should NOT fire the prior-24h signal."""
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+
+    too_old_ms = base_ms - 25 * 60 * 60_000  # 25h earlier
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "old.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(too_old_ms),
+                "message": {"role": "user", "content": "plan"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(too_old_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "EnterPlanMode",
+                            "input": {},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "today.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _iso(base_ms),
+                "message": {"role": "user", "content": "yo"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash", "input": {}}
+                    ],
+                },
+            },
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=base_ms + 60 * 60_000
+    )
+    today = next(s for s in out.sessions if s.started_at_ms == base_ms)
+    assert "prior_24h_plan_artifact" not in today.weak_plan_signals
