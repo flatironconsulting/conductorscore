@@ -45,6 +45,13 @@ def _post_form(url: str, fields: dict, timeout: float = 20.0) -> dict:
 
 
 def request_device_code() -> dict:
+    if GITHUB_DEVICE_CLIENT_ID == "REPLACE_WITH_REAL_CLIENT_ID":
+        raise DeviceFlowError(
+            "GitHub Device Flow client_id is unset. "
+            "The skill maintainer must register an OAuth app at "
+            "https://github.com/settings/developers and set GITHUB_DEVICE_CLIENT_ID "
+            "in scripts/auth/github_device.py."
+        )
     return _post_form(
         "https://github.com/login/device/code",
         {"client_id": GITHUB_DEVICE_CLIENT_ID, "scope": "read:user"},
