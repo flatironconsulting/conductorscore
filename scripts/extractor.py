@@ -4,6 +4,7 @@ import hashlib
 import time
 
 from scripts.config_scanner import scan_config
+from scripts.edit_counter import count_edits
 from scripts.events import claude_home, find_sessions, read_events
 from scripts.minute_classifier import (
     MinuteBucket,
@@ -21,14 +22,46 @@ from scripts.output_schema import (
     ExtractorOutput,
     PerSession,
 )
+from scripts.plan_signals import (
+    detect_plan_signals,
+    session_produced_plan_artifact,
+)
 from scripts.session_window import compute_window
 from scripts.tool_counter import count_tools
 
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
 
 def _sha16(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def _had_plan_artifact_prior_24h(
+    artifact_times_by_project: dict[str, list[tuple[str, int]]],
+    project_root: str,
+    session_id: str,
+    session_start_ms: int,
+) -> bool:
+    """Did another session in the same project produce a plan artifact
+    within the 24h prior to ``session_start_ms``?
+
+    The 24h window is open-ended at the present session's start; the
+    matching artifact may be from any earlier session in the same project
+    (keyed on ``project_root``). The current session is excluded from the
+    lookup so a session never "matches itself".
+    """
+    artifacts = artifact_times_by_project.get(project_root, [])
+    if not artifacts:
+        return False
+    floor = session_start_ms - PRIOR_ARTIFACT_LOOKBACK_MS
+    for entry_session_id, ts_ms in artifacts:
+        if entry_session_id == session_id:
+            # Same session — doesn't count as prior cross-session signal.
+            continue
+        if floor <= ts_ms < session_start_ms:
+            return True
+    return False
 
 
 def extract(
@@ -46,21 +79,40 @@ def extract(
     home = home_dot_claude.parent
     config = scan_config(home)
 
-    sessions: list[PerSession] = []
+    # Pass 1 — load every session in the lookback window once. We keep
+    # the parsed Events around so Pass 2 doesn't re-read the JSONL.
+    #
+    # While we're here, build a per-project list of (session_id, ts_ms)
+    # for sessions that produced a plan artifact, so the weak
+    # "prior-24h plan artifact in same project" signal can be answered
+    # without re-parsing.
+    loaded: list[tuple] = []  # (SessionMeta, events, tool_counts)
+    artifact_times_by_project: dict[str, list[tuple[str, int]]] = {}
     for s in find_sessions():
         if s.last_ts_ms < cutoff:
             continue
         if s.jsonl_path is not None:
             tc = count_tools(s.jsonl_path)
+            events = read_events(s.jsonl_path)
+        else:
+            tc = None
+            events = []
+        loaded.append((s, events, tc))
+        if events and session_produced_plan_artifact(events):
+            artifact_times_by_project.setdefault(s.project_root, []).append(
+                (s.session_id, s.first_ts_ms)
+            )
+
+    sessions: list[PerSession] = []
+    for s, events, tc in loaded:
+        if tc is not None:
             distinct_skills = tuple(tc.distinct_skills)
             distinct_mcp_tools = tuple(tc.distinct_mcp_tools)
             distinct_builtin_tools = tuple(tc.distinct_builtin_tools)
-            events = read_events(s.jsonl_path)
         else:
             distinct_skills = ()
             distinct_mcp_tools = ()
             distinct_builtin_tools = ()
-            events = []
 
         # v0.3 — time partition.
         # A foreground session has a window; a Cron-only session does not.
@@ -102,6 +154,18 @@ def extract(
                 )
             )
 
+        # v0.4 — plan signals + edit footprint.
+        had_prior = _had_plan_artifact_prior_24h(
+            artifact_times_by_project,
+            s.project_root,
+            s.session_id,
+            s.first_ts_ms,
+        )
+        plan = detect_plan_signals(
+            events, project_had_plan_artifact_prior_24h=had_prior
+        )
+        edits = count_edits(events)
+
         sessions.append(
             PerSession(
                 session_hash=_sha16(s.session_id),
@@ -118,6 +182,12 @@ def extract(
                 cron_parallel_minutes=cron_parallel,
                 afk_max_streak_minutes=afk_max_streak,
                 afk_intervals=tuple(intervals),
+                strong_plan_signals=plan.strong,
+                weak_plan_signals=plan.weak,
+                is_planned=plan.is_planned,
+                files_modified=edits.files_modified,
+                total_lines_edited=edits.total_lines_edited,
+                is_significant_edit_session=edits.is_significant,
             )
         )
     return ExtractorOutput(
@@ -131,4 +201,9 @@ def extract(
     )
 
 
-__all__ = ["WINDOW_MS", "extract", "ConfigCounts"]
+__all__ = [
+    "PRIOR_ARTIFACT_LOOKBACK_MS",
+    "WINDOW_MS",
+    "ConfigCounts",
+    "extract",
+]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.3"
+SCHEMA_VERSION = "0.4"
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,13 @@ class PerSession:
     cron_parallel_minutes: int = 0
     afk_max_streak_minutes: int = 0
     afk_intervals: tuple[AfkInterval, ...] = field(default_factory=tuple)
+    # v0.4 — coding-without-a-plan (Feature 6)
+    strong_plan_signals: tuple[str, ...] = field(default_factory=tuple)
+    weak_plan_signals: tuple[str, ...] = field(default_factory=tuple)
+    is_planned: bool = False
+    files_modified: int = 0
+    total_lines_edited: int = 0
+    is_significant_edit_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,12 @@ class ExtractorOutput:
                         }
                         for ivl in s.afk_intervals
                     ],
+                    "strong_plan_signals": list(s.strong_plan_signals),
+                    "weak_plan_signals": list(s.weak_plan_signals),
+                    "is_planned": s.is_planned,
+                    "files_modified": s.files_modified,
+                    "total_lines_edited": s.total_lines_edited,
+                    "is_significant_edit_session": s.is_significant_edit_session,
                 }
                 for s in self.sessions
             ],

@@ -12,8 +12,8 @@ from scripts.output_schema import (
 )
 
 
-def test_schema_version_is_0_3():
-    assert SCHEMA_VERSION == "0.3"
+def test_schema_version_is_0_4():
+    assert SCHEMA_VERSION == "0.4"
 
 
 def test_device_meta_defaults():
@@ -23,7 +23,7 @@ def test_device_meta_defaults():
         extracted_at_ms=1234567890000,
     )
     assert dm.window_days == 30
-    assert dm.schema_version == "0.3"
+    assert dm.schema_version == "0.4"
 
 
 def test_config_counts_defaults():
@@ -49,7 +49,7 @@ def test_to_dict_shape_matches_spec_no_sessions():
     assert d["device"] == {
         "device_id": "dev-1",
         "client_version": "0.1.0",
-        "schema_version": "0.3",
+        "schema_version": "0.4",
         "extracted_at_ms": 1234567890000,
         "window_days": 30,
     }
@@ -97,6 +97,12 @@ def test_to_dict_shape_with_sessions():
             "cron_parallel_minutes": 0,
             "afk_max_streak_minutes": 0,
             "afk_intervals": [],
+            "strong_plan_signals": [],
+            "weak_plan_signals": [],
+            "is_planned": False,
+            "files_modified": 0,
+            "total_lines_edited": 0,
+            "is_significant_edit_session": False,
         }
     ]
 
@@ -232,7 +238,7 @@ def test_roundtrip_through_json_preserves_fields():
     )
     j = out.to_json()
     parsed = json.loads(j)
-    assert parsed["device"]["schema_version"] == "0.3"
+    assert parsed["device"]["schema_version"] == "0.4"
     assert parsed["sessions"][0]["session_hash"] == "0123456789abcdef"
     assert parsed["sessions"][0]["distinct_skills"] == ["plan"]
     assert parsed["sessions"][0]["distinct_mcp_tools"] == ["mcp__github__add_comment"]
