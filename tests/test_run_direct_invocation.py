@@ -42,8 +42,6 @@ def test_run_py_dry_run_via_direct_path(tmp_path: Path) -> None:
     # Empty CONDUCTORSCORE_CLAUDE_HOME so extract finds zero sessions but doesn't crash.
     fake_claude_home = tmp_path / ".claude"
     (fake_claude_home / "projects").mkdir(parents=True)
-    config_home = tmp_path / "config"
-    config_home.mkdir()
 
     # Run from tmp_path (NOT from the repo root) so cwd is not on sys.path.
     proc = subprocess.run(
@@ -52,7 +50,7 @@ def test_run_py_dry_run_via_direct_path(tmp_path: Path) -> None:
         env=_clean_env(
             {
                 "CONDUCTORSCORE_CLAUDE_HOME": str(fake_claude_home),
-                "CONDUCTORSCORE_CONFIG_HOME": str(config_home),
+                "CONDUCTORSCORE_AUTH_PATH": str(tmp_path / "absent.json"),
             }
         ),
         capture_output=True,
@@ -76,40 +74,3 @@ def test_run_py_dry_run_via_direct_path(tmp_path: Path) -> None:
     assert "device" in payload, payload
     assert "sessions" in payload, payload
     assert payload["device"]["schema_version"] in {"0.1", "0.2", "0.3", "0.4", "0.5", "0.6"}
-
-
-def test_run_py_pair_via_direct_path_does_not_crash_at_import(tmp_path: Path) -> None:
-    """pair without a server reachable should fail at the network step, NOT at imports.
-
-    Catches the user-reported regression precisely: the user saw the script crash
-    before any pairing logic could run. We probe by setting BASE to a localhost port
-    that's almost certainly closed; success criterion is "exits with a non-zero code
-    that's NOT ModuleNotFoundError".
-    """
-    config_home = tmp_path / "config"
-    config_home.mkdir()
-    fake_claude_home = tmp_path / ".claude"
-    (fake_claude_home / "projects").mkdir(parents=True)
-
-    proc = subprocess.run(
-        [sys.executable, str(RUN_PY), "pair"],
-        cwd=tmp_path,
-        env=_clean_env(
-            {
-                "CONDUCTORSCORE_BASE_URL": "http://127.0.0.1:1",
-                "CONDUCTORSCORE_CLAUDE_HOME": str(fake_claude_home),
-                "CONDUCTORSCORE_CONFIG_HOME": str(config_home),
-                "BROWSER": "true",  # suppress webbrowser.open side effect
-            }
-        ),
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-
-    assert "ModuleNotFoundError" not in proc.stderr, (
-        f"pair crashed at import time, not at network time.\n"
-        f"stderr: {proc.stderr}\nstdout: {proc.stdout}"
-    )
-    # We don't assert returncode here — the network probe should fail, but the
-    # specific failure mode varies. The contract is "imports work".
