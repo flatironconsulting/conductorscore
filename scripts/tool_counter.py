@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from scripts._hashing import hash_plugin_id
 
 SLASH_CMD_RE = re.compile(r"(?:^|\s)/([a-z][a-z0-9_-]+)\b", re.IGNORECASE)
 
@@ -17,11 +18,6 @@ SLASH_CMD_RE = re.compile(r"(?:^|\s)/([a-z][a-z0-9_-]+)\b", re.IGNORECASE)
 PLUGIN_CMD_RE = re.compile(
     r"<command-name>\s*([^<\s]+)\s*</command-name>", re.IGNORECASE
 )
-
-
-def _hash_plugin_id(name: str) -> str:
-    """Stable 16-hex-char hash of a plugin identifier. Never raw names."""
-    return hashlib.sha256(name.encode()).hexdigest()[:16]
 
 # Marker that Claude Code prepends to a user message when the previous
 # session ran out of context and was auto-compacted. Public so the event
@@ -211,7 +207,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     plugin_invocations += 1
                     plugin_name = pm.group(1).strip()
                     if plugin_name:
-                        plugins.add(_hash_plugin_id(plugin_name))
+                        plugins.add(hash_plugin_id(plugin_name))
 
     return ToolCounts(
         distinct_skills=sorted(skills),

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
+from scripts._hashing import hash_plugin_id
 from scripts.output_schema import ConfigCounts
 
 __all__ = [
@@ -12,11 +12,6 @@ __all__ = [
     "read_installed_plugins",
     "scan_config",
 ]
-
-
-def _hash_plugin_id(name: str) -> str:
-    """16-hex-char hash for a plugin identifier. Categorical only."""
-    return hashlib.sha256(name.encode()).hexdigest()[:16]
 
 
 def read_installed_plugins(home: Path) -> list[str]:
@@ -75,7 +70,7 @@ def read_installed_plugins(home: Path) -> list[str]:
         except OSError:
             pass
 
-    return sorted(_hash_plugin_id(n) for n in names)
+    return sorted(hash_plugin_id(n) for n in names)
 
 
 def count_claude_md_lines(path: Path) -> int:
