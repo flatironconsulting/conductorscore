@@ -27,10 +27,18 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
 
     This is the public-auditable contract for the extractor. Every later
     extractor change MUST keep this test green.
+
+    Covers v0.2 fields (config + distinct_skills/mcp_tools/builtin_tools):
+    secret text inside tool_use ``input`` or surrounding free text must
+    never appear in the wire payload — only tool names and slash command
+    tokens are allowed through.
     """
     secret_phrase = "TOPSECRET_PHRASE_DO_NOT_LEAK_42"
     secret_session_id = "abc-secret-session"
     secret_project_dir = "-tmp-private-project-do-not-leak-PATHSECRET_999"
+    secret_tool_input = "SECRET_TOOL_INPUT_99"
+    secret_slash_arg = "SECRET_SLASH_ARG_88"
+    secret_assistant_text = "SECRET_ASSISTANT_TEXT_77"
 
     proj_dir = isolated_claude_home / "projects" / secret_project_dir
     _write_jsonl(
@@ -41,7 +49,10 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
                 "timestamp": "2026-05-23T00:00:00.000Z",
                 "message": {
                     "role": "user",
-                    "content": f"please remember {secret_phrase} and also keep my path safe",
+                    "content": (
+                        f"please remember {secret_phrase} and also keep my path safe "
+                        f"and run /plan {secret_slash_arg}"
+                    ),
                 },
             },
             {
@@ -50,7 +61,17 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
                 "message": {
                     "role": "assistant",
                     "content": [
-                        {"type": "text", "text": f"sure thing, {secret_phrase}"}
+                        {"type": "text", "text": f"sure thing, {secret_assistant_text}"},
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": secret_tool_input},
+                        },
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__github__add_comment",
+                            "input": {"body": secret_tool_input},
+                        },
                     ],
                 },
             },
@@ -75,12 +96,27 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert "PATHSECRET_999" not in js, (
         "raw project path leaked into wire payload (only hashes allowed)"
     )
+    assert secret_tool_input not in js, (
+        "raw tool_use input leaked into wire payload (only tool names allowed)"
+    )
+    assert secret_slash_arg not in js, (
+        "raw slash-command arguments leaked into wire payload (only token allowed)"
+    )
+    assert secret_assistant_text not in js, (
+        "raw assistant message text leaked into wire payload"
+    )
 
     # And the expected hash IS present
     expected_session_hash = hashlib.sha256(secret_session_id.encode()).hexdigest()[:16]
     assert expected_session_hash in js, (
         f"expected session_hash {expected_session_hash} not in payload"
     )
-    # Sanity: exactly one session
+    # Sanity: exactly one session, with v0.2 fields populated as expected
     assert len(out.sessions) == 1
-    assert out.sessions[0].session_hash == expected_session_hash
+    s = out.sessions[0]
+    assert s.session_hash == expected_session_hash
+    # Slash command token IS allowed (categorical), arg is NOT
+    assert s.distinct_skills == ("plan",)
+    # Tool names ARE allowed (categorical), inputs are NOT
+    assert s.distinct_builtin_tools == ("Read",)
+    assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
