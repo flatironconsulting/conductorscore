@@ -5,8 +5,10 @@ plans/004_wave1_implementation.md § Task 7.5.
 
 A *signature* groups tool calls that are functionally identical from a
 "would the user approve this again" standpoint:
-- Bash: first token of the command (e.g. "ls", "git").
-- Edit/Write/MultiEdit: top-level directory component of the file path.
+- Bash: first token of the command (e.g. "ls", "git") — categorical and
+  safe to emit raw.
+- Edit/Write/MultiEdit: HASH (sha256[:8]) of the top-level directory
+  component of the file path — kept short to group, never to identify.
 
 Destructive Bash patterns (rm -rf, git reset --hard, git push --force,
 git clean -f, DROP TABLE/DATABASE) are exempt — those always deserve a
@@ -18,6 +20,8 @@ count (uses beyond the APPROVAL_THRESHOLD).
 
 from __future__ import annotations
 
+import hashlib
+
 from scripts.approval_counter import (
     APPROVAL_THRESHOLD,
     count_redundant_approvals,
@@ -27,6 +31,10 @@ from scripts.approval_counter import (
     signature_for_event,
 )
 from scripts.events import Event, EventKind
+
+
+def _sha8(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()[:8]
 
 
 def _bash(ts: int, cmd: str) -> Event:
@@ -68,14 +76,29 @@ def test_signature_for_bash_empty_command():
 
 
 def test_signature_for_edit_basic():
-    assert signature_for_edit("/repo/src/main.py") == ("Edit", "repo")
-    assert signature_for_edit("repo/src/main.py") == ("Edit", "repo")
-    assert signature_for_edit("/a") == ("Edit", "a")
+    """Top-level path component is hashed (sha256[:8]) for privacy."""
+    assert signature_for_edit("/repo/src/main.py") == ("Edit", _sha8("repo"))
+    assert signature_for_edit("repo/src/main.py") == ("Edit", _sha8("repo"))
+    assert signature_for_edit("/a") == ("Edit", _sha8("a"))
 
 
 def test_signature_for_edit_empty():
     assert signature_for_edit("") == ("Edit", "")
     assert signature_for_edit("/") == ("Edit", "")
+
+
+def test_signature_for_edit_groups_same_top_level_dir():
+    """Two paths under the same top-level dir must share a signature
+    (the whole point of the signature is to enable grouping)."""
+    a = signature_for_edit("/repo/a/x.py")
+    b = signature_for_edit("/repo/b/y.py")
+    assert a == b
+
+
+def test_signature_for_edit_does_not_collide_across_top_levels():
+    a = signature_for_edit("/repo/x.py")
+    b = signature_for_edit("/lib/x.py")
+    assert a != b
 
 
 # ---------------------------------------------------------------------------
@@ -145,17 +168,17 @@ def test_signature_for_event_bash_returns_signature():
 
 def test_signature_for_event_edit_returns_signature():
     e = _edit(0, "/repo/main.py")
-    assert signature_for_event(e) == ("Edit", "repo")
+    assert signature_for_event(e) == ("Edit", _sha8("repo"))
 
 
 def test_signature_for_event_write_returns_signature():
     e = _edit(0, "/repo/new.py", tool="Write")
-    assert signature_for_event(e) == ("Edit", "repo")
+    assert signature_for_event(e) == ("Edit", _sha8("repo"))
 
 
 def test_signature_for_event_multiedit_returns_signature():
     e = _edit(0, "/repo/lib.py", tool="MultiEdit")
-    assert signature_for_event(e) == ("Edit", "repo")
+    assert signature_for_event(e) == ("Edit", _sha8("repo"))
 
 
 def test_signature_for_event_destructive_bash_returns_none():
@@ -197,7 +220,7 @@ def test_multiple_signatures_independently_tracked():
     out = count_redundant_approvals(evs)
     assert out == {
         "Bash::ls": 2,
-        "Edit::repo": 1,
+        f"Edit::{_sha8('repo')}": 1,
     }
 
 

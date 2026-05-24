@@ -120,3 +120,152 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     # Tool names ARE allowed (categorical), inputs are NOT
     assert s.distinct_builtin_tools == ("Read",)
     assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
+
+
+def test_v0_5_privacy_invariant_holds_for_all_new_detectors(
+    isolated_claude_home,
+):
+    """A session that triggers every Feature 7 detector must leak no
+    raw content to the wire payload. Each detector consumes its raw
+    input in-memory only; only integer counts and the rage_quit_event
+    boolean are allowed through.
+    """
+    secret_bash_arg = "SECRET_REVERT_PATH_V5_77"
+    secret_edit_path = "SECRET_EDIT_TOPLEVEL_V5_88"
+    secret_user_text = "this is broken SECRET_RAGE_PHRASE_V5_99 i give up"
+    # Build a long repeated prompt with >50 distinct alphabetic nonstop
+    # tokens so jaccard_repetitive_rate will treat it as qualifying.
+    # Each token must survive the [a-zA-Z]{2,} regex and the stopword
+    # filter — letters only, 4+ chars each.
+    def _alpha3(n: int) -> str:
+        ls = "abcdefghijklmnopqrstuvwxyz"
+        return ls[n % 26] + ls[(n // 26) % 26] + ls[(n // 676) % 26]
+
+    secret_repeat_text = "SECRETREPEATEDPROMPT " + " ".join(
+        f"alphawordbeta{_alpha3(i)}" for i in range(60)
+    )
+
+    proj_dir = isolated_claude_home / "projects" / "-secret-proj-V5_BB"
+    _write_jsonl(
+        proj_dir / "session.jsonl",
+        [
+            # Tool error to enable rage-quit
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T00:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": True,
+                            "tool_use_name": "Bash",
+                        }
+                    ],
+                },
+            },
+            # Frustration user msg ~2 min later
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T00:02:00Z",
+                "message": {"role": "user", "content": secret_user_text},
+            },
+            # Two long repetitive user prompts
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T01:00:00Z",
+                "message": {"role": "user", "content": secret_repeat_text},
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T02:00:00Z",
+                "message": {"role": "user", "content": secret_repeat_text},
+            },
+            # Revert command — raw path SECRET_REVERT_PATH must not leak
+            {
+                "type": "assistant",
+                "timestamp": "2026-05-23T03:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {
+                                "command": f"git restore {secret_bash_arg}"
+                            },
+                        }
+                    ],
+                },
+            },
+            # Auto-compaction system marker
+            {
+                "type": "system",
+                "timestamp": "2026-05-23T03:30:00Z",
+                "subtype": "compact",
+            },
+        ],
+    )
+    # 6 edits to /SECRET_EDIT_TOPLEVEL → overflow on Edit::<secret>
+    for i in range(6):
+        proj_dir_path = f"/{secret_edit_path}/f_{i}.py"
+        lines_to_append = [
+            {
+                "type": "assistant",
+                "timestamp": f"2026-05-23T04:0{i}:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": proj_dir_path,
+                                "content": "x=1\n",
+                            },
+                        }
+                    ],
+                },
+            },
+        ]
+        with (proj_dir / "session.jsonl").open("a") as f:
+            import json as _json
+            for line in lines_to_append:
+                f.write(_json.dumps(line) + "\n")
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=1779667200000,  # 2026-05-23T01:00:00Z + slack
+    )
+    js = out.to_json()
+
+    # Every raw secret must be absent from the wire payload.
+    assert secret_bash_arg not in js, (
+        "raw revert command argument leaked"
+    )
+    assert "SECRET_RAGE_PHRASE_V5_99" not in js, (
+        "raw frustration text leaked"
+    )
+    assert "SECRETREPEATEDPROMPT" not in js, (
+        "raw repetitive user text leaked"
+    )
+    # Full filenames and Edit top-level path must be absent (the latter
+    # is hashed in the signature, see approval_counter).
+    assert "f_0.py" not in js, "raw filename leaked into payload"
+    assert secret_edit_path not in js, (
+        "Edit top-level dir leaked into signature key"
+    )
+
+    # Sanity: the detectors fired on the in-memory data.
+    s = out.sessions[0]
+    assert s.revert_count == 1
+    assert s.rage_quit_event is True
+    assert s.repetitive_pairs >= 1
+    assert s.auto_compaction_events >= 1
+    # Edit signature appears in approvals dict (top-level component is
+    # hashed — only used for signature grouping).
+    assert any(
+        sig.startswith("Edit::")
+        for sig in s.redundant_approvals_per_signature
+    )

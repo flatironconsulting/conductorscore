@@ -28,6 +28,7 @@ in-memory.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 # Patterns that mark a Bash command as destructive — these are exempt
@@ -64,17 +65,30 @@ def signature_for_bash(cmd: str) -> tuple[str, str]:
     return ("Bash", first)
 
 
-def signature_for_edit(file_path: str) -> tuple[str, str]:
-    """Edit/Write/MultiEdit signature = top-level path component.
+def _sha8(s: str) -> str:
+    """8-hex digest of ``s`` for use as a privacy-preserving signature
+    component. Empty string -> empty string (no hash) so callers can
+    distinguish missing paths."""
+    if not s:
+        return ""
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
 
-    ``/repo/src/main.py`` -> ``("Edit", "repo")``; relative paths and a
-    bare ``/`` produce empty strings.
+
+def signature_for_edit(file_path: str) -> tuple[str, str]:
+    """Edit/Write/MultiEdit signature = hashed top-level path component.
+
+    The top-level path segment is hashed (sha256[:8]) so directory names
+    never leak across the wire while still letting us group repeated
+    edits to the same top-level area. Empty / absolute-root paths
+    produce empty signatures.
+
+    ``/repo/src/main.py`` -> ``("Edit", sha256("repo")[:8])``.
     """
     if not isinstance(file_path, str):
         return ("Edit", "")
     parts = file_path.strip("/").split("/") if file_path else []
     top = parts[0] if parts and parts[0] else ""
-    return ("Edit", top)
+    return ("Edit", _sha8(top))
 
 
 def signature_for_event(event) -> tuple[str, str] | None:

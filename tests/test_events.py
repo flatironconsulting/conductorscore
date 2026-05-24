@@ -13,6 +13,7 @@ from scripts.events import (
     claude_home,
     find_sessions,
     read_events,
+    read_events_and_text,
 )
 
 
@@ -465,4 +466,196 @@ def test_event_dataclass_has_no_raw_text_fields():
     assert field_names.isdisjoint(forbidden), (
         f"Event has a forbidden raw-content field: {field_names & forbidden}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.5 — read_events_and_text + new structural flags
+# ---------------------------------------------------------------------------
+
+
+def test_read_events_populates_bash_raw_input(isolated_claude_home):
+    """v0.5: Bash assistant_tool events carry raw_input={'command': ...}
+    for the revert + approval detectors. The dict is in-memory only and
+    must NOT be serialized into the wire payload (extractor builds dicts
+    explicitly from PerSession fields only)."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "git status"},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    events = read_events(proj_dir / "s.jsonl")
+    bash_events = [e for e in events if e.tool_name == "Bash"]
+    assert len(bash_events) == 1
+    assert bash_events[0].raw_input == {"command": "git status"}
+
+
+def test_read_events_populates_edit_raw_input(isolated_claude_home):
+    """v0.5: Edit/Write/MultiEdit events carry raw_input={'file_path': ...}."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/repo/x.py",
+                                "content": "x=1\n",
+                            },
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    events = read_events(proj_dir / "s.jsonl")
+    w = [e for e in events if e.tool_name == "Write"]
+    assert len(w) == 1
+    assert w[0].raw_input == {"file_path": "/repo/x.py"}
+    # Notably: 'content' (the file body) is NOT carried.
+    assert "content" not in (w[0].raw_input or {})
+
+
+def test_read_events_non_bash_non_edit_has_no_raw_input(isolated_claude_home):
+    """Tools other than Bash/Edit/Write/MultiEdit have no raw_input
+    (the detectors don't need it)."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "/x"},
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    events = read_events(proj_dir / "s.jsonl")
+    r = [e for e in events if e.tool_name == "Read"]
+    assert r[0].raw_input is None
+
+
+def test_read_events_system_auto_compaction_flag(isolated_claude_home):
+    """SYSTEM events with subtype=compact are flagged is_auto_compaction_marker."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "system",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "subtype": "compact",
+            },
+            {
+                "type": "system",
+                "timestamp": "2026-01-01T00:01:00Z",
+            },
+        ],
+    )
+    events = read_events(proj_dir / "s.jsonl")
+    sys_events = [e for e in events if e.kind == EventKind.SYSTEM]
+    assert len(sys_events) == 2
+    assert sys_events[0].is_auto_compaction_marker is True
+    assert sys_events[1].is_auto_compaction_marker is False
+
+
+def test_read_events_user_banner_auto_compaction_flag(isolated_claude_home):
+    """USER events containing the auto-compaction banner are flagged."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        "This session is being continued from a previous "
+                        "conversation that ran out of context — picking up "
+                        "where we left off."
+                    ),
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "message": {"role": "user", "content": "regular message"},
+            },
+        ],
+    )
+    events = read_events(proj_dir / "s.jsonl")
+    user_events = [e for e in events if e.kind == EventKind.USER]
+    assert len(user_events) == 2
+    assert user_events[0].is_auto_compaction_marker is True
+    assert user_events[1].is_auto_compaction_marker is False
+
+
+def test_read_events_and_text_returns_text_map(isolated_claude_home):
+    """read_events_and_text returns (events, text_map) with the user
+    text recoverable by id(event)."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "hello world"},
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "message": {"role": "user", "content": "another message"},
+            },
+        ],
+    )
+    events, text_map = read_events_and_text(proj_dir / "s.jsonl")
+    user_events = [e for e in events if e.kind == EventKind.USER]
+    assert len(user_events) == 2
+    assert text_map[id(user_events[0])] == "hello world"
+    assert text_map[id(user_events[1])] == "another message"
+
+
+def test_read_events_and_text_returns_empty_map_for_no_users(isolated_claude_home):
+    """No user events → empty text map."""
+    proj_dir = isolated_claude_home / "projects" / "-foo"
+    _write_jsonl(
+        proj_dir / "s.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+        ],
+    )
+    events, text_map = read_events_and_text(proj_dir / "s.jsonl")
+    assert text_map == {}
 
