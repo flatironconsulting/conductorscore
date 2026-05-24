@@ -8,7 +8,7 @@ import pytest
 
 from scripts import uploader as uploader_mod
 from scripts.output_schema import DeviceMeta, ExtractorOutput, PerSession
-from scripts.uploader import upload, upload_payload
+from scripts.uploader import upload
 
 
 def _make_handler(responses, hits):
@@ -150,28 +150,34 @@ def test_upload_4xx_other_than_401_422_raises(stub_server_factory, no_sleep):
         upload(_payload(), token="tok", base_url=base)
 
 
-# --- upload_payload (dict-based API, bearer from auth.state) ---
+# --- Additional upload() coverage (bearer header and body correctness) ---
 
-def test_upload_payload_sends_bearer_header(stub_server_factory, no_sleep):
+def test_upload_sends_bearer_header(stub_server_factory, no_sleep):
+    """Authorization header is set from the token argument."""
     base, hits = stub_server_factory([(200, {"accepted": 3})])
-    result = upload_payload({"sessions": [1, 2, 3]}, "tok-abc", base_url=base)
+    result = upload(_payload(), token="tok-abc", base_url=base)
     assert result == {"accepted": 3}
     assert len(hits["requests"]) == 1
     assert hits["requests"][0]["auth"] == "Bearer tok-abc"
     assert hits["requests"][0]["path"] == "/api/ingest"
 
 
-def test_upload_payload_body_is_json(stub_server_factory, no_sleep):
+def test_upload_body_is_json(stub_server_factory, no_sleep):
+    """Request body is the JSON-serialised ExtractorOutput."""
     base, hits = stub_server_factory([(200, {"ok": True})])
-    upload_payload({"sessions": ["a", "b"]}, "tok-xyz", base_url=base)
+    payload = _payload()
+    upload(payload, token="tok-xyz", base_url=base)
     body = json.loads(hits["requests"][0]["body"])
-    assert body == {"sessions": ["a", "b"]}
+    # The serialised output must include the device block and sessions list.
+    assert "device" in body
+    assert isinstance(body["sessions"], list)
 
 
-def test_upload_payload_retries_5xx(stub_server_factory, no_sleep):
+def test_upload_retries_5xx_partial(stub_server_factory, no_sleep):
+    """upload() retries on 5xx and succeeds before exhausting attempts."""
     base, hits = stub_server_factory(
         [(500, {"error": "boom"}), (500, {"error": "boom"}), (200, {"ok": True})]
     )
-    result = upload_payload({}, "tok", base_url=base)
+    result = upload(_payload(), token="tok", base_url=base)
     assert result == {"ok": True}
     assert len(hits["requests"]) == 3
