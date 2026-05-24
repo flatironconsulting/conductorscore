@@ -9,3 +9,10 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Shared workspace resources (symlinked from ../)
+/.mcp.json
+/plans
+
+# Git worktrees (used by autonomous plan execution)
+.worktrees/
