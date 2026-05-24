@@ -8,9 +8,12 @@ import time
 import urllib.request
 import webbrowser
 
+from scripts.extractor import extract
 from scripts.pairing import load_or_create, persist
+from scripts.uploader import upload
 
 BASE = os.environ.get("CONDUCTORSCORE_BASE_URL", "https://conductorscore.com")
+CLIENT_VERSION = "0.1.0"
 
 
 def do_pair() -> int:
@@ -58,6 +61,41 @@ def do_pair() -> int:
     return 2
 
 
+def do_upload() -> int:
+    state = load_or_create()
+    if not state.paired or not state.pairing_token:
+        print(
+            "Not paired. Run `/conductorscore pair` first.",
+            file=sys.stderr,
+        )
+        return 1
+    out = extract(
+        device_id=state.client_device_id,
+        client_version=CLIENT_VERSION,
+    )
+    try:
+        upload(out, token=state.pairing_token, base_url=BASE)
+    except PermissionError as e:
+        print(
+            f"Unauthorized: {e}. Run `/conductorscore pair` to re-pair.",
+            file=sys.stderr,
+        )
+        return 2
+    except ValueError as e:
+        print(f"Server rejected payload: {e}", file=sys.stderr)
+        return 3
+    except RuntimeError as e:
+        print(f"Upload failed: {e}", file=sys.stderr)
+        return 4
+    state.last_upload_ms = int(time.time() * 1000)
+    persist(state)
+    print(
+        f"Uploaded {len(out.sessions)} sessions; "
+        "visit https://conductorscore.com/dashboard to see your score."
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="conductorscore")
     parser.add_argument(
@@ -66,8 +104,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "pair":
         return do_pair()
-    print("upload command not yet implemented (Feature 3)", file=sys.stderr)
-    return 0
+    return do_upload()
 
 
 if __name__ == "__main__":
