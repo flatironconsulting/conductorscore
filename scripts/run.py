@@ -8,9 +8,20 @@ import time
 import urllib.request
 import webbrowser
 
-from scripts.extractor import extract
-from scripts.pairing import load_or_create, persist
-from scripts.uploader import upload
+# Self-bootstrap so `python3 /path/to/scripts/run.py` works in addition to
+# `python3 -m scripts.run`. When invoked as a script, __package__ is None/"",
+# so the absolute `from scripts.<x> import ...` lines below would fail with
+# ModuleNotFoundError. Prepend the parent of the scripts/ dir to sys.path so
+# `scripts` is importable as a top-level package.
+if __package__ in (None, ""):
+    import pathlib as _pathlib
+    _parent = _pathlib.Path(__file__).resolve().parent.parent
+    if str(_parent) not in sys.path:
+        sys.path.insert(0, str(_parent))
+
+from scripts.extractor import extract  # noqa: E402
+from scripts.pairing import load_or_create, persist  # noqa: E402
+from scripts.uploader import upload  # noqa: E402
 
 BASE = os.environ.get("CONDUCTORSCORE_BASE_URL", "https://conductorscore.com")
 CLIENT_VERSION = "0.1.0"
