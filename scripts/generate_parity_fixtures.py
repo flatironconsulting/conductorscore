@@ -3,14 +3,17 @@
 Builds the four worked examples from ``plans/003_outline.md`` § "Worked
 examples" by running the Python event pipeline (events.py →
 session_window.py → minute_classifier.py) end-to-end, then packaging
-the resulting per-session counts into the v0.6 wire envelope and
+the resulting per-session counts into the v0.7 wire envelope and
 emitting one JSON file per example into
 ``server/web/tests/fixtures/parity/``.
 
 The TS-side parity vitest (web/tests/parity.test.ts) loads each fixture
 through ``ExtractorOutputSchema.parse`` then drives ``score()`` and
 asserts the same numbers the Python ``test_worked_examples.py`` suite
-locks in for the AFK leverage cluster.
+locks in for the AFK leverage cluster — plus the Slice-5 (v0.7)
+cache-aware token/plugin/builtin/dispatch rollups on example_2's
+foreground session so ``costAggregate`` / ``pluginUsage`` /
+``toolUsage`` / ``tokensAggregate`` get cross-language coverage too.
 
 Run once after any change to the worked-examples fixtures or the wire
 schema. Idempotent; overwrites in place.
@@ -179,7 +182,11 @@ def _hex16(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()[:16]
 
 
-def _build_per_session(events: list[Event], label: str) -> PerSession:
+def _build_per_session(
+    events: list[Event],
+    label: str,
+    v07_overrides: dict | None = None,
+) -> PerSession:
     window = compute_window(events)
     hitl_minutes = afk_minutes = idle_minutes = 0
     afk_parallel_fg = 0
@@ -223,6 +230,7 @@ def _build_per_session(events: list[Event], label: str) -> PerSession:
         started_at_ms = 1
         ended_at_ms = max(ended_at_ms, started_at_ms + 1)
 
+    overrides = v07_overrides or {}
     return PerSession(
         session_hash=_hex16(f"sess-{label}"),
         project_hash=_hex16(f"proj-{label}"),
@@ -235,12 +243,35 @@ def _build_per_session(events: list[Event], label: str) -> PerSession:
         cron_parallel_minutes=cron_parallel,
         afk_max_streak_minutes=afk_max_streak,
         afk_intervals=tuple(intervals),
+        # v0.6 — fluency surface (needed for the proportional per-model
+        # token split that drives `costAggregate` / `tokensByModelDetailed`).
+        assistant_msgs_by_model=overrides.get("assistant_msgs_by_model", {}),
+        # v0.7 — cache-aware token split + plugins + builtin + dispatch.
+        total_input_tokens=overrides.get("total_input_tokens", 0),
+        total_output_tokens=overrides.get("total_output_tokens", 0),
+        cache_input_tokens=overrides.get("cache_input_tokens", 0),
+        cache_creation_input_tokens=overrides.get(
+            "cache_creation_input_tokens", 0
+        ),
+        builtin_tool_invocations=overrides.get("builtin_tool_invocations", 0),
+        plugin_invocations=overrides.get("plugin_invocations", 0),
+        distinct_plugins=tuple(overrides.get("distinct_plugins", ())),
+        agent_dispatches=overrides.get("agent_dispatches", 0),
     )
 
 
-def _build_envelope(label: str, session_groups: list[list[Event]]) -> dict:
+def _build_envelope(
+    label: str,
+    session_groups: list[list[Event]],
+    *,
+    session_overrides: dict[int, dict] | None = None,
+    config: ConfigCounts | None = None,
+) -> dict:
+    overrides_by_idx = session_overrides or {}
     sessions = tuple(
-        _build_per_session(events, f"{label}-{i}")
+        _build_per_session(
+            events, f"{label}-{i}", v07_overrides=overrides_by_idx.get(i)
+        )
         for i, events in enumerate(session_groups)
     )
     envelope = ExtractorOutput(
@@ -249,24 +280,76 @@ def _build_envelope(label: str, session_groups: list[list[Event]]) -> dict:
             client_version="0.1.0-parity",
             extracted_at_ms=0,
         ),
-        config=ConfigCounts(),
+        config=config or ConfigCounts(),
         sessions=sessions,
     )
     return envelope.to_dict()
 
 
-CASES = [
-    ("example_1", example_1_session_groups),
-    ("example_2", example_2_session_groups),
-    ("example_3", example_3_session_groups),
-    ("example_4", example_4_session_groups),
+# Plugins used in example_2's fg session — pre-hashed so the parity test
+# can assert `distinctPluginsUnion` length deterministically without
+# pulling in hashlib on the TS side.
+_EXAMPLE_2_PLUGINS = (
+    "0123456789abcdef",
+    "fedcba9876543210",
+    "abcdef0123456789",
+)
+
+# Example 2 v0.7 overrides — applied to the foreground session (index 0).
+# Picked to be stable, non-zero, and exercise:
+#   • proportional per-model token split (2 models: opus + sonnet)
+#   • cache hit vs miss split (75% miss / 25% hit ratio)
+#   • plugin + builtin + dispatch invocation counters
+# tokensAggregate sums across sessions — example_2 has 2 sessions but
+# only the fg one carries token activity, so the sums are exactly what
+# we inject below.
+_EXAMPLE_2_FG_V07 = {
+    "assistant_msgs_by_model": {
+        "claude-opus-4-7": 60,
+        "claude-sonnet-4-5": 40,
+    },
+    "total_input_tokens": 1_000_000,
+    "total_output_tokens": 200_000,
+    "cache_input_tokens": 250_000,
+    "cache_creation_input_tokens": 750_000,
+    "builtin_tool_invocations": 42,
+    "plugin_invocations": 9,
+    "distinct_plugins": _EXAMPLE_2_PLUGINS,
+    "agent_dispatches": 4,
+}
+
+
+CASES: list[tuple[str, "callable", dict | None, ConfigCounts | None]] = [
+    ("example_1", example_1_session_groups, None, None),
+    (
+        "example_2",
+        example_2_session_groups,
+        {0: _EXAMPLE_2_FG_V07},
+        # Two installed plugins; one matches a used plugin, one doesn't —
+        # the parity test only asserts `installedPluginsCount` through
+        # `config.plugin_count`, so the identifiers are cosmetic.
+        ConfigCounts(
+            plugin_count=2,
+            distinct_installed_plugins=(
+                "0123456789abcdef",
+                "1111222233334444",
+            ),
+        ),
+    ),
+    ("example_3", example_3_session_groups, None, None),
+    ("example_4", example_4_session_groups, None, None),
 ]
 
 
 def main(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    for label, groups_fn in CASES:
-        payload = _build_envelope(label, groups_fn())
+    for label, groups_fn, session_overrides, config in CASES:
+        payload = _build_envelope(
+            label,
+            groups_fn(),
+            session_overrides=session_overrides,
+            config=config,
+        )
         out_path = out_dir / f"{label}.json"
         out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
         print(f"wrote {out_path}")
