@@ -209,3 +209,135 @@ def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
         "global_claude_md_lines",
         "project_claude_md_lines_avg",
     }
+
+
+def _iso(ms: int) -> str:
+    import datetime as dt
+
+    return (
+        dt.datetime.fromtimestamp(ms / 1000, tz=dt.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def test_extract_populates_v0_3_time_partition_fields(isolated_claude_home):
+    """End-to-end: a JSONL with a user msg + sustained sidechain tool activity
+    produces non-zero hitl/afk/parallel fields on the PerSession.
+    """
+    # Build a fake session spanning ~10 minutes; user msg at the start,
+    # then a single sidechain (subagent) firing one Read per minute.
+    base_min = 27_810_000  # arbitrary minute index ~ year 2022 etc.
+    base_ms = base_min * 60_000
+
+    lines = [
+        {
+            "type": "user",
+            "timestamp": _iso(base_ms),
+            "message": {"role": "user", "content": "go"},
+        },
+    ]
+    for i in range(11):  # minutes 0..10
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + i * 60_000),
+                "isSidechain": True,
+                "uuid": "sub-root",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Read"}],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl", lines
+    )
+    # extracted_at_ms slightly after the last event
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=base_ms + 20 * 60_000,
+    )
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    # window = [base_min, base_min + 10) = 10 minutes
+    # HITL = {base_min, base_min + 1} = 2; remaining 8 minutes = AFK
+    assert s.hitl_minutes == 2
+    assert s.afk_minutes == 8
+    assert s.idle_minutes == 0
+    # 1 subagent active across all 8 AFK minutes
+    assert s.afk_parallel_minutes_foreground == 8
+    assert s.afk_max_streak_minutes == 8
+    assert s.cron_parallel_minutes == 0
+    # One AFK interval covering the AFK run
+    assert len(s.afk_intervals) == 1
+    ivl = s.afk_intervals[0]
+    assert ivl.is_cron is False
+    assert ivl.end_minute_exclusive - ivl.start_minute == 8
+
+
+def test_extract_pure_cron_session_only_cron_parallel(isolated_claude_home):
+    """A JSONL containing only ScheduleWakeup events produces a
+    Cron-only PerSession: no foreground window, no HITL/AFK, only
+    cron_parallel_minutes populated.
+    """
+    base_min = 27_810_000
+    base_ms = base_min * 60_000
+    lines = []
+    for i in range(15):  # 15 distinct cron minutes
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + i * 60_000),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "ScheduleWakeup"}],
+                },
+            }
+        )
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "cron.jsonl", lines
+    )
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=base_ms + 60 * 60_000,
+    )
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.hitl_minutes == 0
+    assert s.afk_minutes == 0
+    assert s.idle_minutes == 0
+    assert s.afk_parallel_minutes_foreground == 0
+    assert s.afk_max_streak_minutes == 0
+    assert s.cron_parallel_minutes == 15
+    # One Cron interval
+    assert len(s.afk_intervals) == 1
+    assert s.afk_intervals[0].is_cron is True
+
+
+def test_extract_v0_3_json_includes_new_session_keys(isolated_claude_home):
+    """The wire payload exposes every v0.3 PerSession key."""
+    _write_jsonl(
+        isolated_claude_home / "projects" / "-foo" / "s1.jsonl",
+        [
+            {"timestamp": "2026-01-01T00:00:00Z"},
+            {"timestamp": "2026-01-01T00:01:00Z"},
+        ],
+    )
+    out = extract(
+        device_id="dev-1", client_version="0.1.0", now_ms=1767225600000 + 1000
+    )
+    parsed = json.loads(out.to_json())
+    s = parsed["sessions"][0]
+    for key in (
+        "hitl_minutes",
+        "afk_minutes",
+        "idle_minutes",
+        "afk_parallel_minutes_foreground",
+        "cron_parallel_minutes",
+        "afk_max_streak_minutes",
+        "afk_intervals",
+    ):
+        assert key in s, f"v0.3 field {key!r} missing from wire payload"
