@@ -8,7 +8,7 @@ import pytest
 
 from scripts import uploader as uploader_mod
 from scripts.output_schema import DeviceMeta, ExtractorOutput, PerSession
-from scripts.uploader import upload
+from scripts.uploader import upload, upload_payload
 
 
 def _make_handler(responses, hits):
@@ -148,3 +148,30 @@ def test_upload_4xx_other_than_401_422_raises(stub_server_factory, no_sleep):
     base, _ = stub_server_factory([(403, {"error": "forbidden"})])
     with pytest.raises(urllib.error.HTTPError):
         upload(_payload(), token="tok", base_url=base)
+
+
+# --- upload_payload (dict-based API, bearer from auth.state) ---
+
+def test_upload_payload_sends_bearer_header(stub_server_factory, no_sleep):
+    base, hits = stub_server_factory([(200, {"accepted": 3})])
+    result = upload_payload({"sessions": [1, 2, 3]}, "tok-abc", base_url=base)
+    assert result == {"accepted": 3}
+    assert len(hits["requests"]) == 1
+    assert hits["requests"][0]["auth"] == "Bearer tok-abc"
+    assert hits["requests"][0]["path"] == "/api/ingest"
+
+
+def test_upload_payload_body_is_json(stub_server_factory, no_sleep):
+    base, hits = stub_server_factory([(200, {"ok": True})])
+    upload_payload({"sessions": ["a", "b"]}, "tok-xyz", base_url=base)
+    body = json.loads(hits["requests"][0]["body"])
+    assert body == {"sessions": ["a", "b"]}
+
+
+def test_upload_payload_retries_5xx(stub_server_factory, no_sleep):
+    base, hits = stub_server_factory(
+        [(500, {"error": "boom"}), (500, {"error": "boom"}), (200, {"ok": True})]
+    )
+    result = upload_payload({}, "tok", base_url=base)
+    assert result == {"ok": True}
+    assert len(hits["requests"]) == 3
