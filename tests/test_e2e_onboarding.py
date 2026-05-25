@@ -287,9 +287,9 @@ class TestE2EOnboarding:
         assert handle.startswith("anon-"), f"unexpected handle: {handle!r}"
 
         # 4. Parse the score block from stdout.
-        #    Line format: "  your score       55 · C · p67 of 1 in cohort"
+        #    Line format: "  your score       54.6 · C · p67 of 1 in cohort"
         score_m = re.search(
-            r"your score\s+(\d+)\s+·\s+(\S+)\s+·\s+p(\d+) of (\d+) in cohort",
+            r"your score\s+([\d.]+)\s+·\s+(\S+)\s+·\s+p(\d+) of (\d+) in cohort",
             r.stdout,
         )
         if score_m is None:
@@ -299,7 +299,7 @@ class TestE2EOnboarding:
                 f"stdout: {r.stdout}"
             )
 
-        total = score_m.group(1)       # e.g. "55"
+        total = score_m.group(1)       # e.g. "54.6"
         grade = score_m.group(2)       # e.g. "C"
         percentile = score_m.group(3)  # e.g. "67"
 
@@ -329,8 +329,22 @@ class TestE2EOnboarding:
         )
 
         # 7. Grade (tier) — rendered as "Tier C" on the page.
-        assert f"Tier {grade}" in html, (
-            f"'Tier {grade}' not found in profile page HTML.\n"
+        #
+        # The CLI uses buildBreakdown().grade (fine-grained: A+, A-, B+, C-, etc.)
+        # while the page renders score.tier from the DB (coarse: S/A/B/C/D/F via
+        # tierLetter()).  Extract only the base letter (e.g. "C" from "C-") for
+        # the page comparison.
+        #
+        # Next.js RSC streaming may also insert an HTML comment between adjacent
+        # text nodes, producing "Tier <!-- -->C" in the raw HTML even though
+        # the browser renders it correctly.  Tolerate that with a regex.
+        tier_base = grade[0]  # "C-" → "C", "A+" → "A", "B" → "B"
+        tier_pattern = re.compile(
+            rf"Tier\s*(?:<!--[^>]*-->\s*)?{re.escape(tier_base)}"
+        )
+        assert tier_pattern.search(html), (
+            f"'Tier {tier_base}' (with possible RSC comment) not found in profile page HTML "
+            f"(CLI grade was {grade!r}).\n"
             f"html snippet: {html[:2000]}"
         )
 
