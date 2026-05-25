@@ -249,3 +249,185 @@ class TestE2EOnboarding:
             assert has_score_block or has_fallback, (
                 f"expected 'your score' block or fallback URL in stdout:\n{r.stdout}"
             )
+
+    def test_profile_page_displays_same_stats_as_ingest_response(self, tmp_path):
+        """Public profile page at /user/<handle> should mirror the score block from stdout.
+
+        What the CLI score block contains:
+          your score       {total} · {grade} · p{percentile} of {cohort_size} in cohort
+          strongest        {metric} {display_value}
+          biggest lift     {label} → {action} = +{delta}
+
+        What the profile page renders (from the scores DB row):
+          - composite * 100 as toFixed(1)  → contains the integer total as a substring
+          - "Tier {tier}"                  → tier / grade
+          - per-metric percentile badges   → "p{N}"
+          - per-metric display names       → e.g. "AFK Max Streak"
+
+        The profile page does NOT render the "strongest" block or "biggest lift"
+        block — those live only in the CLI output (built from breakdown.ts).
+        Those assertions are marked xfail so the test still documents the gap.
+        """
+        auth = tmp_path / "auth.json"
+
+        # 1. Register anonymously.
+        r_auth = _run(["auth", "anonymous"], auth)
+        assert r_auth.returncode == 0, f"auth anonymous failed:\n{r_auth.stderr}"
+
+        # 2. Run default (extract + upload), capture stdout.
+        r = _run([], auth)
+
+        if r.returncode != 0:
+            pytest.skip(
+                f"upload failed (exit {r.returncode}); cannot verify profile page.\n"
+                f"stdout: {r.stdout}\nstderr: {r.stderr}"
+            )
+
+        # 3. Parse handle from auth.json.
+        data = json.loads(auth.read_text())
+        handle = data["handle"]
+        assert handle.startswith("anon-"), f"unexpected handle: {handle!r}"
+
+        # 4. Parse the score block from stdout.
+        #    Line format: "  your score       55 · C · p67 of 1 in cohort"
+        score_m = re.search(
+            r"your score\s+(\d+)\s+·\s+(\S+)\s+·\s+p(\d+) of (\d+) in cohort",
+            r.stdout,
+        )
+        if score_m is None:
+            pytest.skip(
+                "score block not present in stdout (server returned fallback URL); "
+                "cannot verify profile page stats.\n"
+                f"stdout: {r.stdout}"
+            )
+
+        total = score_m.group(1)       # e.g. "55"
+        grade = score_m.group(2)       # e.g. "C"
+        percentile = score_m.group(3)  # e.g. "67"
+
+        # 5. Fetch the public profile page — no auth cookie, anonymous viewer.
+        profile_url = f"{BASE_URL}/user/{handle}"
+        req = urllib.request.Request(profile_url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+                html = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            html = e.read().decode("utf-8", errors="replace")
+            status = e.code
+
+        assert status == 200, (
+            f"profile page {profile_url} returned HTTP {status}.\n"
+            f"body snippet: {html[:500]}"
+        )
+
+        # 6. The composite score appears as toFixed(1), e.g. "55.0".
+        # The integer total (e.g. "55") is a substring of "55.0", so checking for
+        # the integer is sufficient and handles any rounding at the decimal.
+        assert total in html, (
+            f"composite score {total!r} not found in profile page HTML.\n"
+            f"stdout total={total!r} grade={grade!r} pct={percentile!r}\n"
+            f"html snippet: {html[:2000]}"
+        )
+
+        # 7. Grade (tier) — rendered as "Tier C" on the page.
+        assert f"Tier {grade}" in html, (
+            f"'Tier {grade}' not found in profile page HTML.\n"
+            f"html snippet: {html[:2000]}"
+        )
+
+        # 8. Percentile — at least one "p{N}" badge must appear somewhere on the
+        # page (MetricCard renders "p{Math.round(pct*100)}" for each metric).
+        # We just verify that the page renders ANY percentile badge to confirm
+        # the metric grid rendered.  The exact per-metric pct value from the
+        # ingest response is in the score breakdown, not directly in the page
+        # HTML summary, so we check for pattern presence only.
+        assert re.search(r"\bp\d+\b", html), (
+            f"no percentile badge (p<N>) found in profile page HTML.\n"
+            f"html snippet: {html[:2000]}"
+        )
+
+        # 9. The "strongest" metric name and "biggest lift" label exist only in
+        # the CLI breakdown — the profile page does not render them yet.
+        # These are xfail assertions that document the rendering gap.
+        strongest_m = re.search(r"strongest\s+(\S+)", r.stdout)
+        lift_m = re.search(r"biggest lift\s+(\S.*?)\s+→", r.stdout)
+
+        if strongest_m:
+            strongest_label = strongest_m.group(1)
+            # xfail: profile page does not render the "strongest" block
+            if strongest_label not in html:
+                pytest.xfail(
+                    f"Profile page does not render 'strongest' block: "
+                    f"label={strongest_label!r} not in HTML. "
+                    "Page needs a 'Top Metric' section to show this."
+                )
+
+        if lift_m:
+            lift_label = lift_m.group(1).strip()
+            # xfail: profile page does not render the "biggest lift" block
+            if lift_label not in html:
+                pytest.xfail(
+                    f"Profile page does not render 'biggest lift' block: "
+                    f"label={lift_label!r} not in HTML. "
+                    "Page needs a 'Biggest Lift' section to show this."
+                )
+
+    def test_profile_page_accessible_via_at_handle_alias(self, tmp_path):
+        """/@<handle> should 308-redirect to /user/<handle> and the final page renders 200.
+
+        The middleware in the server worktree rewrites /@<handle> → /user/<handle>
+        with status 308.  This test locks in that vanity-URL contract so any
+        future middleware change that breaks it is caught immediately.
+        """
+        auth = tmp_path / "auth.json"
+
+        # Register anonymously to get a real handle in the DB.
+        r_auth = _run(["auth", "anonymous"], auth)
+        assert r_auth.returncode == 0, f"auth anonymous failed:\n{r_auth.stderr}"
+
+        data = json.loads(auth.read_text())
+        handle = data["handle"]
+
+        at_url = f"{BASE_URL}/@{handle}"
+        canonical_path = f"/user/{handle}"
+
+        # urllib follows redirects by default; we need to detect the 308 manually.
+        # Build a custom opener that does NOT follow redirects.
+        class _NoRedirect(urllib.request.HTTPErrorProcessor):
+            def http_response(self, request, response):
+                return response
+            https_response = http_response
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        req = urllib.request.Request(at_url, method="GET")
+        try:
+            with opener.open(req, timeout=10) as resp:
+                redirect_status = resp.status
+                location = resp.headers.get("Location", "")
+        except urllib.error.HTTPError as e:
+            redirect_status = e.code
+            location = e.headers.get("Location", "")
+
+        assert redirect_status == 308, (
+            f"expected 308 from {at_url}, got {redirect_status}. "
+            f"Location: {location!r}"
+        )
+        assert canonical_path in location, (
+            f"expected redirect Location to contain {canonical_path!r}, "
+            f"got {location!r}"
+        )
+
+        # Now follow through to the final page and confirm 200.
+        final_url = f"{BASE_URL}{canonical_path}"
+        final_req = urllib.request.Request(final_url, method="GET")
+        try:
+            with urllib.request.urlopen(final_req, timeout=10) as resp:
+                final_status = resp.status
+        except urllib.error.HTTPError as e:
+            final_status = e.code
+
+        assert final_status == 200, (
+            f"canonical profile page {final_url} returned HTTP {final_status} "
+            f"after following the /@{handle} redirect."
+        )
