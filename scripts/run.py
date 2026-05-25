@@ -46,6 +46,19 @@ from scripts.uploader import upload  # noqa: E402
 BASE = os.environ.get("CONDUCTORSCORE_BASE_URL", "https://conductorscore.com")
 CLIENT_VERSION = "0.2.0"
 
+
+def _auth_pair_line(state) -> str:
+    """Return the '✓ <method> · paired as @<handle>' line for a given auth state."""
+    from scripts.auth.state import AuthState
+    method = state.auth_method
+    if method == "github":
+        verb = "github oauth"
+    elif method == "email":
+        verb = f"email · sent to {state.handle}"
+    else:
+        verb = "anonymous device"
+    return f"✓ {verb} · paired as @{state.handle}"
+
 # Headline per-metric labels surfaced by --explain.
 _EXPLAIN_METRICS: tuple[str, ...] = (
     "hitl_minutes",
@@ -149,17 +162,42 @@ def cmd_default(argv: list[str]) -> int:
     except AuthMissing:
         return 2
 
-    print(f"{state.handle} logged in via {state.auth_method}")
+    # ✓ auth line — always printed so the user sees confirmation.
+    print(_auth_pair_line(state))
+
+    # Scan with wall-clock timing.
+    import time as _time
+    _t0 = _time.perf_counter()
     out = extract(device_id=state.device_token, client_version=CLIENT_VERSION)
+    _elapsed = _time.perf_counter() - _t0
+    n = len(out.sessions)
+
+    # Print session discovery line.
+    print(f"✓ found {n} sessions in ~/.claude/projects/ (30d)")
 
     if not out.sessions:
         print("No Claude Code activity in the last 30 days. Try again after using Claude Code for a bit.")
         return 0
     if dry:
-        print(f"--dry-run: would upload {len(out.sessions)} sessions")
+        print(f"--dry-run: would upload {n} sessions")
         return 0
+
+    # Scan progress — extract() is synchronous so we can't easily stream
+    # per-session events without a larger refactor of the extractor.
+    # We print the final 100% line after extraction completes.
+    # Trade-off: user sees a pause then two lines at once rather than a live
+    # progress bar.  A future improvement could yield session events from
+    # extract() and drive a ProgressBar, but that requires refactoring the
+    # inner per-session loop which is non-trivial.
+    print(f"✓ scanning · 100% · {_elapsed:.1f}s")
+    print(f"✓ scan complete · {_elapsed:.1f}s wall-clock · {n} sessions parsed")
+
+    # Compute payload size before upload.
+    _payload_bytes = len(out.to_json().encode())
+    _payload_kb = _payload_bytes / 1024
+
     try:
-        upload(out, token=state.device_token, base_url=BASE)
+        result = upload(out, token=state.device_token, base_url=BASE)
     except PermissionError as e:
         print(f"Unauthorized: {e}. Run /conductorscore to re-authenticate.", file=sys.stderr)
         return 1
@@ -169,7 +207,41 @@ def cmd_default(argv: list[str]) -> int:
     except RuntimeError as e:
         print(f"Upload failed: {e}. Re-run /conductorscore to try again.")
         return 4
-    print(f"\nScore ready: {state.user_url}")
+
+    print(f"✓ uploaded {n} records · {_payload_kb:.1f} kB, numbers only")
+
+    # Score breakdown block — uses data returned by the server.
+    score = result.get("score") if isinstance(result, dict) else None
+    if score is None:
+        # Old server or missing field — fall back gracefully.
+        print(f"\nScore ready: {state.user_url}")
+        return 0
+
+    total = score.get("total", "?")
+    grade = score.get("grade", "?")
+    pct = score.get("percentile", "?")
+    cohort = score.get("cohort_size", "?")
+
+    strongest = score.get("strongest") or {}
+    s_metric = strongest.get("metric", "")
+    s_display = strongest.get("display_value", "")
+    s_secondary = strongest.get("secondary_value")
+
+    lift = score.get("biggest_lift") or {}
+    lift_label = lift.get("label", "")
+    lift_action = lift.get("action", "")
+    lift_delta = lift.get("score_delta", 0)
+
+    strongest_line = f"  strongest        {s_metric} {s_display}"
+    if s_secondary:
+        strongest_line += f" · {s_secondary}"
+
+    print()
+    print(f"  your score       {total} · {grade} · p{pct} of {cohort} in cohort")
+    print(strongest_line)
+    print(f"  biggest lift     {lift_label} → {lift_action} = +{lift_delta}")
+    print()
+    print(f"  → your credential: conductorscore.com/@{state.handle}")
     return 0
 
 
@@ -180,12 +252,12 @@ def cmd_auth(argv: list[str]) -> int:
     if sub == "anonymous":
         from scripts.auth.anonymous import register
         state = register()
-        print(f"{state.handle} logged in anonymously")
+        print(f"✓ anonymous device · paired as @{state.handle}")
         return 0
     if sub == "github":
         from scripts.auth.github_device import login
         state = login()
-        print(f"{state.handle} logged in via GitHub")
+        print(f"✓ github oauth · paired as @{state.handle}")
         return 0
     if sub == "email":
         from scripts.auth.email_otp import start, verify, BadCode
@@ -210,7 +282,7 @@ def cmd_auth(argv: list[str]) -> int:
             except BadCode as e:
                 print(f"invalid_code attempts_remaining={e.attempts_remaining}")
                 return 3
-            print(f"{argv[2]} logged in via email")
+            print(f"✓ email · paired as @{state.handle}")
             return 0
     _fail(f"unknown auth subcommand: {argv}", 1)
 

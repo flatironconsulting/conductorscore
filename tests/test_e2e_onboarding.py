@@ -124,6 +124,9 @@ class TestE2EOnboarding:
         assert r.returncode == 0, f"auth anonymous failed:\n{r.stderr}"
         assert "anon-" in r.stdout, f"expected 'anon-' in stdout:\n{r.stdout}"
         assert "anonymous" in r.stdout.lower(), f"expected 'anonymous' in stdout:\n{r.stdout}"
+        # New ✓-style output: auth subcommand emits the pair line.
+        assert "✓" in r.stdout, f"expected checkmark line in stdout:\n{r.stdout}"
+        assert "paired as @" in r.stdout, f"expected 'paired as @' in stdout:\n{r.stdout}"
 
         assert auth.exists(), "auth.json not written"
         stat_mode = oct(auth.stat().st_mode)[-3:]
@@ -200,4 +203,44 @@ class TestE2EOnboarding:
         r = _run([], auth)
         assert r.returncode == 2, (
             f"expected exit 2 (no auth), got {r.returncode}:\nstdout: {r.stdout}\nstderr: {r.stderr}"
+        )
+
+    def test_checkmark_output_and_score_block_after_upload(self, tmp_path):
+        """Full default run: ✓ lines appear in stdout; if the server returns a score the
+        'your score' block renders; if no score field the fallback URL line appears."""
+        auth = tmp_path / "auth.json"
+
+        # 1. Register anonymously.
+        r_auth = _run(["auth", "anonymous"], auth)
+        assert r_auth.returncode == 0, f"auth anonymous failed:\n{r_auth.stderr}"
+        # Auth subcommand emits the ✓ pair line.
+        assert "✓ anonymous device · paired as @" in r_auth.stdout, (
+            f"expected '✓ anonymous device · paired as @' in auth stdout:\n{r_auth.stdout}"
+        )
+
+        # 2. Run default (extract + upload).
+        r = _run([], auth)
+        assert r.returncode == 0, (
+            f"default run failed (exit {r.returncode}):\nstdout: {r.stdout}\nstderr: {r.stderr}"
+        )
+
+        # ✓ lines must appear.
+        assert "✓ found" in r.stdout and "sessions in ~/.claude/projects/" in r.stdout, (
+            f"expected '✓ found N sessions' line:\n{r.stdout}"
+        )
+        assert "✓ scanning" in r.stdout, (
+            f"expected '✓ scanning' line:\n{r.stdout}"
+        )
+        assert "✓ scan complete" in r.stdout, (
+            f"expected '✓ scan complete' line:\n{r.stdout}"
+        )
+        assert "✓ uploaded" in r.stdout and "records" in r.stdout, (
+            f"expected '✓ uploaded N records' line:\n{r.stdout}"
+        )
+
+        # Either the score block OR the fallback URL must appear.
+        has_score_block = "your score" in r.stdout
+        has_fallback = "Score ready:" in r.stdout or "conductorscore.com/@" in r.stdout
+        assert has_score_block or has_fallback, (
+            f"expected 'your score' block or fallback URL in stdout:\n{r.stdout}"
         )
