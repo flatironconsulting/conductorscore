@@ -1,4 +1,4 @@
-"""Validate SKILL.md frontmatter and body for the conductorscore skill.
+"""Validate SKILL.md frontmatter and body for the conductorscore skill (v0.2.0).
 
 SKILL.md is the entry point that the Claude Code skills system reads to know
 how to invoke our extractor. The frontmatter is YAML; we parse it manually
@@ -67,22 +67,36 @@ def test_frontmatter_description_is_nonempty_and_mentions_command():
     )
 
 
-def test_body_lists_all_four_subcommands():
-    _, body = _parse_frontmatter(_read_skill_md())
-    # The four user-visible invocations described in the run.py CLI.
-    required = [
-        "/conductorscore",
-        "/conductorscore pair",
-        "/conductorscore --explain",
-        "/conductorscore --dry-run",
-    ]
-    for cmd in required:
-        assert cmd in body, f"SKILL.md body must list {cmd!r}"
-
-
 def test_body_points_at_run_py():
     _, body = _parse_frontmatter(_read_skill_md())
-    # The skill must instruct callers to invoke scripts/run.py — that's the
-    # one entrypoint we ship and version. Without this line the skill router
-    # would have to guess.
     assert "scripts/run.py" in body
+
+
+def test_body_lists_login_picker_options():
+    _, body = _parse_frontmatter(_read_skill_md())
+    # The four picker options required for v0.2.0 login flow.
+    for option in ("GitHub", "email", "Anonymous", "Cancel"):
+        assert option in body, f"SKILL.md body must mention login option {option!r}"
+
+
+def test_body_documents_exit_codes():
+    _, body = _parse_frontmatter(_read_skill_md())
+    # Exit-code contract the skill must document.
+    assert "exit" in body.lower() or "Exit" in body, "must mention exit codes"
+    # Specifically: 2 = picker, 3 = bad code, 4 = network
+    for code in ("2", "3", "4"):
+        assert code in body, f"SKILL.md body must mention exit code {code}"
+
+
+def test_body_documents_v020_subcommands():
+    _, body = _parse_frontmatter(_read_skill_md())
+    for sub in ("auth github", "auth email start", "auth email verify", "auth anonymous",
+                "rename", "logout"):
+        assert sub in body, f"SKILL.md body must document subcommand {sub!r}"
+
+
+def test_body_has_no_pairing_references():
+    _, body = _parse_frontmatter(_read_skill_md())
+    assert "pair" not in body.lower(), (
+        "SKILL.md body must not reference pairing (removed in v0.2.0)"
+    )

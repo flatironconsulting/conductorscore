@@ -16,3 +16,6 @@ htmlcov/
 
 # Git worktrees (used by autonomous plan execution)
 .worktrees/
+
+# Local env overrides (never commit — contains real client IDs)
+.env.local

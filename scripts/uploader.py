@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
 
 from scripts.output_schema import ExtractorOutput
+
+_DEFAULT_BASE = os.environ.get("CONDUCTORSCORE_BASE_URL", "https://conductorscore.com")
 
 
 def upload(payload: ExtractorOutput, token: str, base_url: str) -> dict:

@@ -148,3 +148,36 @@ def test_upload_4xx_other_than_401_422_raises(stub_server_factory, no_sleep):
     base, _ = stub_server_factory([(403, {"error": "forbidden"})])
     with pytest.raises(urllib.error.HTTPError):
         upload(_payload(), token="tok", base_url=base)
+
+
+# --- Additional upload() coverage (bearer header and body correctness) ---
+
+def test_upload_sends_bearer_header(stub_server_factory, no_sleep):
+    """Authorization header is set from the token argument."""
+    base, hits = stub_server_factory([(200, {"accepted": 3})])
+    result = upload(_payload(), token="tok-abc", base_url=base)
+    assert result == {"accepted": 3}
+    assert len(hits["requests"]) == 1
+    assert hits["requests"][0]["auth"] == "Bearer tok-abc"
+    assert hits["requests"][0]["path"] == "/api/ingest"
+
+
+def test_upload_body_is_json(stub_server_factory, no_sleep):
+    """Request body is the JSON-serialised ExtractorOutput."""
+    base, hits = stub_server_factory([(200, {"ok": True})])
+    payload = _payload()
+    upload(payload, token="tok-xyz", base_url=base)
+    body = json.loads(hits["requests"][0]["body"])
+    # The serialised output must include the device block and sessions list.
+    assert "device" in body
+    assert isinstance(body["sessions"], list)
+
+
+def test_upload_retries_5xx_partial(stub_server_factory, no_sleep):
+    """upload() retries on 5xx and succeeds before exhausting attempts."""
+    base, hits = stub_server_factory(
+        [(500, {"error": "boom"}), (500, {"error": "boom"}), (200, {"ok": True})]
+    )
+    result = upload(_payload(), token="tok", base_url=base)
+    assert result == {"ok": True}
+    assert len(hits["requests"]) == 3
