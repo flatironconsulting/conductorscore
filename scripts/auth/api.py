@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-DEFAULT_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com")
+DEFAULT_BASE = os.environ.get("CONDUCTORSCORE_BASE_URL", "https://conductorscore.com")
 
 
 class ApiError(Exception):

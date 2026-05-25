@@ -24,7 +24,7 @@ def test_logout_subcommand_succeeds(tmp_path, monkeypatch):
     # network may fail — that's fine; we expect exit 0 either way
     r = _run(["logout"], env_extra={
         "CONDUCTORSCORE_AUTH_PATH": str(tmp_path / "auth.json"),
-        "CONDUCTORSCORE_API_BASE": "http://127.0.0.1:1",
+        "CONDUCTORSCORE_BASE_URL": "http://127.0.0.1:1",
     })
     assert r.returncode == 0
 

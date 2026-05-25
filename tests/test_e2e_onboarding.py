@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "run.py"
-BASE_URL = os.environ.get("CONDUCTORSCORE_API_BASE", "http://localhost:3000")
+BASE_URL = os.environ.get("CONDUCTORSCORE_BASE_URL", "http://localhost:3000")
 MAILPIT_URL = os.environ.get("MAILPIT_URL", "http://127.0.0.1:54324")
 
 
@@ -71,7 +71,7 @@ def _run(args: list[str], auth_path: Path, extra_env: dict | None = None):
     env = {
         **os.environ,
         "CONDUCTORSCORE_AUTH_PATH": str(auth_path),
-        "CONDUCTORSCORE_API_BASE": BASE_URL,
+        "CONDUCTORSCORE_BASE_URL": BASE_URL,
         **(extra_env or {}),
     }
     return subprocess.run(
