@@ -263,10 +263,8 @@ class TestE2EOnboarding:
           - "Tier {tier}"                  → tier / grade
           - per-metric percentile badges   → "p{N}"
           - per-metric display names       → e.g. "AFK Max Streak"
-
-        The profile page does NOT render the "strongest" block or "biggest lift"
-        block — those live only in the CLI output (built from breakdown.ts).
-        Those assertions are marked xfail so the test still documents the gap.
+          - strongest block                → metric label from breakdown.ts
+          - biggest lift block             → label from LIFT_TABLE in breakdown.ts
         """
         auth = tmp_path / "auth.json"
 
@@ -347,31 +345,26 @@ class TestE2EOnboarding:
             f"html snippet: {html[:2000]}"
         )
 
-        # 9. The "strongest" metric name and "biggest lift" label exist only in
-        # the CLI breakdown — the profile page does not render them yet.
-        # These are xfail assertions that document the rendering gap.
+        # 9. The "strongest" metric label and "biggest lift" label must appear
+        # on the profile page — the page now renders both blocks.
         strongest_m = re.search(r"strongest\s+(\S+)", r.stdout)
         lift_m = re.search(r"biggest lift\s+(\S.*?)\s+→", r.stdout)
 
         if strongest_m:
             strongest_label = strongest_m.group(1)
-            # xfail: profile page does not render the "strongest" block
-            if strongest_label not in html:
-                pytest.xfail(
-                    f"Profile page does not render 'strongest' block: "
-                    f"label={strongest_label!r} not in HTML. "
-                    "Page needs a 'Top Metric' section to show this."
-                )
+            assert strongest_label in html, (
+                f"Profile page does not render 'strongest' block: "
+                f"label={strongest_label!r} not found in HTML.\n"
+                f"html snippet: {html[:3000]}"
+            )
 
         if lift_m:
             lift_label = lift_m.group(1).strip()
-            # xfail: profile page does not render the "biggest lift" block
-            if lift_label not in html:
-                pytest.xfail(
-                    f"Profile page does not render 'biggest lift' block: "
-                    f"label={lift_label!r} not in HTML. "
-                    "Page needs a 'Biggest Lift' section to show this."
-                )
+            assert lift_label in html, (
+                f"Profile page does not render 'biggest lift' block: "
+                f"label={lift_label!r} not found in HTML.\n"
+                f"html snippet: {html[:3000]}"
+            )
 
     def test_profile_page_accessible_via_at_handle_alias(self, tmp_path):
         """/@<handle> should 308-redirect to /user/<handle> and the final page renders 200.
