@@ -86,7 +86,7 @@ def _extract_local():
     try:
         from scripts.auth.state import load_auth, AuthMissing
         state = load_auth()
-        device_id = state.device_token  # stable per-device identifier
+        device_id = state.client_device_id  # stable UUID for wire-format device_id
     except Exception:
         import uuid
         device_id = str(uuid.uuid4())
@@ -168,7 +168,7 @@ def cmd_default(argv: list[str]) -> int:
     # Scan with wall-clock timing.
     import time as _time
     _t0 = _time.perf_counter()
-    out = extract(device_id=state.device_token, client_version=CLIENT_VERSION)
+    out = extract(device_id=state.client_device_id, client_version=CLIENT_VERSION)
     _elapsed = _time.perf_counter() - _t0
     n = len(out.sessions)
 

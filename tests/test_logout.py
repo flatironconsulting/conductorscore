@@ -7,7 +7,7 @@ from scripts.auth.api import NetworkError
 
 def _setup(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTORSCORE_AUTH_PATH", str(tmp_path / "auth.json"))
-    save_auth(AuthState("github", "j", "tok", "u", "now"))
+    save_auth(AuthState("github", "j", "tok", "u", "now", "00000000-0000-0000-0000-000000000001"))
     return Path(tmp_path / "auth.json")
 
 

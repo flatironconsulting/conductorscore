@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from scripts.auth import api
 from scripts.auth.state import AuthState, save_auth
@@ -99,13 +100,18 @@ def login() -> AuthState:
         interval=code["interval"],
         expires_in=code["expires_in"],
     )
-    resp = api.post("/api/auth/github", json={"access_token": access_token})
+    client_device_id = str(uuid4())
+    resp = api.post(
+        "/api/auth/github",
+        json={"access_token": access_token, "client_device_id": client_device_id},
+    )
     state = AuthState(
         auth_method="github",
         handle=resp["handle"],
         device_token=resp["device_token"],
         user_url=resp["user_url"],
         created_at=datetime.now(timezone.utc).isoformat(),
+        client_device_id=client_device_id,
     )
     save_auth(state)
     return state

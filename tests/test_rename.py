@@ -6,7 +6,7 @@ from scripts.auth.api import ApiError
 
 def _setup_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTORSCORE_AUTH_PATH", str(tmp_path / "auth.json"))
-    save_auth(AuthState("github", "old", "tok", "https://conductorscore.com/user/old", "now"))
+    save_auth(AuthState("github", "old", "tok", "https://conductorscore.com/user/old", "now", "00000000-0000-0000-0000-000000000001"))
 
 
 def test_rename_success(tmp_path, monkeypatch, capsys):

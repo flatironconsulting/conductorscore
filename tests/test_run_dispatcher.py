@@ -20,7 +20,7 @@ def test_exit_code_2_when_no_auth(tmp_path):
 
 def test_logout_subcommand_succeeds(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTORSCORE_AUTH_PATH", str(tmp_path / "auth.json"))
-    save_auth(AuthState("anonymous", "anon-abc", "tok", "u", "now"))
+    save_auth(AuthState("anonymous", "anon-abc", "tok", "u", "now", "00000000-0000-0000-0000-000000000001"))
     # network may fail — that's fine; we expect exit 0 either way
     r = _run(["logout"], env_extra={
         "CONDUCTORSCORE_AUTH_PATH": str(tmp_path / "auth.json"),

@@ -27,3 +27,4 @@ def test_register_writes_state_and_returns_it(tmp_path, monkeypatch):
     assert state.handle == "anon-abc123def456"
     assert state.device_token == "tok-xyz"
     assert state.auth_method == "anonymous"
+    assert state.client_device_id == "00000000-0000-0000-0000-000000000001"

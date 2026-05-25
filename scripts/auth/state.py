@@ -21,6 +21,7 @@ class AuthState:
     device_token: str
     user_url: str
     created_at: str
+    client_device_id: str  # stable UUID for wire-format device_id (distinct from bearer token)
 
 
 def _path() -> Path:
@@ -42,6 +43,7 @@ def load_auth() -> AuthState:
             device_token=data["device_token"],
             user_url=data["user_url"],
             created_at=data["created_at"],
+            client_device_id=data["client_device_id"],
         )
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise AuthMissing(f"corrupt auth.json: {e}")

@@ -1,3 +1,4 @@
+import uuid
 import pytest
 from unittest.mock import patch
 
@@ -21,11 +22,16 @@ def test_start_posts_email(tmp_path, monkeypatch):
 
 def test_verify_success_persists_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTORSCORE_AUTH_PATH", str(tmp_path / "auth.json"))
+    monkeypatch.setattr(
+        "scripts.auth.email_otp.uuid4",
+        lambda: uuid.UUID("00000000-0000-0000-0000-000000000002"),
+    )
 
     def fake_post(path, json, **kw):
         assert path == "/api/auth/email/verify"
         assert json["email"] == "user@example.com"
         assert json["code"] == "123456"
+        assert json["client_device_id"] == "00000000-0000-0000-0000-000000000002"
         return {
             "handle": "user-abc",
             "device_token": "tok-email",
@@ -38,6 +44,7 @@ def test_verify_success_persists_state(tmp_path, monkeypatch):
     assert state.handle == "user-abc"
     assert state.device_token == "tok-email"
     assert state.auth_method == "email"
+    assert state.client_device_id == "00000000-0000-0000-0000-000000000002"
     assert (tmp_path / "auth.json").exists()
 
 

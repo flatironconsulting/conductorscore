@@ -17,6 +17,7 @@ def register() -> AuthState:
         device_token=resp["device_token"],
         user_url=resp["user_url"],
         created_at=datetime.now(timezone.utc).isoformat(),
+        client_device_id=device_id,
     )
     save_auth(state)
     return state

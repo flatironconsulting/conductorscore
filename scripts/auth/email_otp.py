@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from scripts.auth import api
 from scripts.auth.api import ApiError
@@ -25,8 +26,12 @@ def verify(email: str, code: str) -> AuthState:
     Raises BadCode (with attempts_remaining) if the server returns HTTP 400
     with error == "invalid_code".  All other ApiErrors propagate unchanged.
     """
+    client_device_id = str(uuid4())
     try:
-        resp = api.post("/api/auth/email/verify", json={"email": email, "code": code})
+        resp = api.post(
+            "/api/auth/email/verify",
+            json={"email": email, "code": code, "client_device_id": client_device_id},
+        )
     except ApiError as e:
         if e.status == 400 and e.body.get("error") == "invalid_code":
             raise BadCode(int(e.body.get("attempts_remaining", 0)))
@@ -37,6 +42,7 @@ def verify(email: str, code: str) -> AuthState:
         device_token=resp["device_token"],
         user_url=resp["user_url"],
         created_at=datetime.now(timezone.utc).isoformat(),
+        client_device_id=client_device_id,
     )
     save_auth(state)
     return state
