@@ -50,13 +50,10 @@ def test_access_denied_raises():
             poll_until_token("dev-code", interval=0.01, expires_in=30)
 
 
-def test_request_device_code_raises_when_placeholder():
+def test_request_device_code_raises_when_placeholder(monkeypatch):
     """request_device_code() must raise DeviceFlowError with a clear message
-    when GITHUB_DEVICE_CLIENT_ID still holds the placeholder value."""
-    original = _gd_mod.GITHUB_DEVICE_CLIENT_ID
-    try:
-        _gd_mod.GITHUB_DEVICE_CLIENT_ID = "REPLACE_WITH_REAL_CLIENT_ID"
-        with pytest.raises(DeviceFlowError, match="client_id is unset"):
-            request_device_code()
-    finally:
-        _gd_mod.GITHUB_DEVICE_CLIENT_ID = original
+    when CONDUCTORSCORE_GITHUB_CLIENT_ID is unset (module constant is "UNSET")."""
+    monkeypatch.delenv("CONDUCTORSCORE_GITHUB_CLIENT_ID", raising=False)
+    monkeypatch.setattr("scripts.auth.github_device.GITHUB_DEVICE_CLIENT_ID", "UNSET")
+    with pytest.raises(DeviceFlowError, match="client_id is unset"):
+        request_device_code()

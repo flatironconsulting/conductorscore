@@ -1,11 +1,12 @@
 """GitHub Device Flow polling (RFC 8628).
 
-GITHUB_DEVICE_CLIENT_ID is a placeholder — replace it after the OAuth app is
-registered (plan Task 0).  Device Flow requires no client secret.
+GITHUB_DEVICE_CLIENT_ID is read from the environment variable
+CONDUCTORSCORE_GITHUB_CLIENT_ID.  Device Flow requires no client secret.
 """
 from __future__ import annotations
 
 import json as _json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -16,8 +17,11 @@ from scripts.auth import api
 from scripts.auth.state import AuthState, save_auth
 
 # Public client ID — Device Flow has no client secret.
-# TODO(Task 0): replace this placeholder once the GitHub OAuth app is registered.
-GITHUB_DEVICE_CLIENT_ID = "REPLACE_WITH_REAL_CLIENT_ID"
+# Set CONDUCTORSCORE_GITHUB_CLIENT_ID in your environment (or .env.local).
+GITHUB_DEVICE_CLIENT_ID = os.environ.get(
+    "CONDUCTORSCORE_GITHUB_CLIENT_ID",
+    "UNSET",
+)
 
 
 class DeviceFlowError(Exception):
@@ -45,12 +49,11 @@ def _post_form(url: str, fields: dict, timeout: float = 20.0) -> dict:
 
 
 def request_device_code() -> dict:
-    if GITHUB_DEVICE_CLIENT_ID == "REPLACE_WITH_REAL_CLIENT_ID":
+    if GITHUB_DEVICE_CLIENT_ID == "UNSET":
         raise DeviceFlowError(
-            "GitHub Device Flow client_id is unset. "
-            "The skill maintainer must register an OAuth app at "
-            "https://github.com/settings/developers and set GITHUB_DEVICE_CLIENT_ID "
-            "in scripts/auth/github_device.py."
+            "GitHub Device Flow client_id is unset. Set the env var "
+            "CONDUCTORSCORE_GITHUB_CLIENT_ID before running this skill. "
+            "Maintainers: register the OAuth app at https://github.com/settings/developers."
         )
     return _post_form(
         "https://github.com/login/device/code",

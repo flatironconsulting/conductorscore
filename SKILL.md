@@ -43,6 +43,13 @@ Use `AskUserQuestion` with these four options:
 
 After any successful login, re-run `python3 …/scripts/run.py` to extract and upload. The user sees progress streaming in real time.
 
+## Required environment variables
+
+The GitHub login path requires `CONDUCTORSCORE_GITHUB_CLIENT_ID` to be set to
+the OAuth App client_id. The public Device Flow client_id is `Ov23litmD8cHtbJmD12h`
+(Device Flow requires no secret — this is safe to document). Without this env
+var, the `auth github` subcommand raises a `DeviceFlowError` with a clear message.
+
 ## Privacy
 
 Only numbers, hashes, and known categoricals leave your machine. No prompts, no code, no file paths. Full field list: https://conductorscore.com/inspector

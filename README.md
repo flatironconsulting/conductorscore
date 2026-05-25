@@ -19,6 +19,16 @@ pytest -v
 
 See `WIRE_FORMAT.md` for the schema the client emits.
 
+## Environment variables
+
+| Variable | Purpose | Required? |
+|---|---|---|
+| `CONDUCTORSCORE_GITHUB_CLIENT_ID` | GitHub OAuth App client_id for the Device Flow login path. Public value (no secret): `Ov23litmD8cHtbJmD12h` | Required for `auth github` |
+| `CONDUCTORSCORE_BASE_URL` | API base URL. Defaults to `https://conductorscore.com`. Override for local dev. | Optional |
+| `CONDUCTORSCORE_AUTH_PATH` | Path to store auth.json. Defaults to `~/.claude/skills/conductorscore/auth.json`. | Optional |
+
+Copy `.env.example` to `.env.local` (gitignored) and fill in the values for local development.
+
 ## Develop against a local server
 
 The client uploads to `https://conductorscore.com` by default. To point it at a
