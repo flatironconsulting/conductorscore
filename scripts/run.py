@@ -217,7 +217,7 @@ def cmd_default(argv: list[str]) -> int:
         print(f"\nScore ready: {state.user_url}")
         return 0
 
-    total = score.get("total", "?")
+    total_raw = score.get("total")
     grade = score.get("grade", "?")
     pct = score.get("percentile", "?")
     cohort = score.get("cohort_size", "?")
@@ -236,8 +236,11 @@ def cmd_default(argv: list[str]) -> int:
     if s_secondary:
         strongest_line += f" · {s_secondary}"
 
+    # Format as XX.X (one decimal). Fall back to "?" if server omitted total.
+    total_str = f"{float(total_raw):.1f}" if total_raw is not None else "?"
+
     print()
-    print(f"  your score       {total} · {grade} · p{pct} of {cohort} in cohort")
+    print(f"  your score       {total_str} · {grade} · p{pct} of {cohort} in cohort")
     print(strongest_line)
     print(f"  biggest lift     {lift_label} → {lift_action} = +{lift_delta}")
     print()
