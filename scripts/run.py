@@ -39,6 +39,7 @@ if __package__ in (None, ""):
     if str(_parent) not in sys.path:
         sys.path.insert(0, str(_parent))
 
+from scripts import env_loader  # noqa: F401 — side effect: loads .env.local
 from scripts.extractor import extract  # noqa: E402
 from scripts.uploader import upload  # noqa: E402
 
