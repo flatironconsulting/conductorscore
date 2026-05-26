@@ -6,9 +6,17 @@ Python skill that extracts structural metrics from local Claude Code transcripts
 
 ## Install
 
+1. Visit https://conductorscore.com/pair and log in with GitHub or email.
+2. Copy the one-line install snippet shown after login.
+3. Paste it into a Claude Code session.
+
+The snippet looks like:
+
 ```
-Claude, install conductorscore from https://conductorscore.com/install.md
+Claude, calculate my ConductorScore using https://conductorscore.com/install.md?pair=cs_pair_<22-chars>
 ```
+
+Claude will install the skill, pair this device, and run your first score.
 
 ## Local development
 
@@ -23,9 +31,8 @@ See `WIRE_FORMAT.md` for the schema the client emits.
 
 | Variable | Purpose | Required? |
 |---|---|---|
-| `CONDUCTORSCORE_GITHUB_CLIENT_ID` | GitHub OAuth App client_id for the Device Flow login path. Public value (no secret): `Ov23litmD8cHtbJmD12h` | Required for `auth github` |
 | `CONDUCTORSCORE_BASE_URL` | API base URL. Defaults to `https://conductorscore.com`. Override for local dev. | Optional |
-| `CONDUCTORSCORE_AUTH_PATH` | Path to store auth.json. Defaults to `~/.claude/skills/conductorscore/auth.json`. | Optional |
+| `CONDUCTORSCORE_AUTH_PATH` | Path to read/write auth.json. Defaults to `~/.config/conductorscore/auth.json`. | Optional |
 
 Copy `.env.example` to `.env.local` (gitignored) and fill in the values for local development.
 

@@ -1,4 +1,4 @@
-"""Validate SKILL.md frontmatter and body for the conductorscore skill (v0.2.0).
+"""Validate SKILL.md frontmatter and body for the conductorscore skill (web-first flow).
 
 SKILL.md is the entry point that the Claude Code skills system reads to know
 how to invoke our extractor. The frontmatter is YAML; we parse it manually
@@ -72,31 +72,38 @@ def test_body_points_at_run_py():
     assert "scripts/run.py" in body
 
 
-def test_body_lists_login_picker_options():
-    _, body = _parse_frontmatter(_read_skill_md())
-    # The four picker options required for v0.2.0 login flow.
-    for option in ("GitHub", "email", "Anonymous", "Cancel"):
-        assert option in body, f"SKILL.md body must mention login option {option!r}"
-
-
 def test_body_documents_exit_codes():
     _, body = _parse_frontmatter(_read_skill_md())
     # Exit-code contract the skill must document.
     assert "exit" in body.lower() or "Exit" in body, "must mention exit codes"
-    # Specifically: 2 = picker, 3 = bad code, 4 = network
-    for code in ("2", "3", "4"):
+    # Specifically: 1 = error, 4 = network
+    for code in ("1", "4"):
         assert code in body, f"SKILL.md body must mention exit code {code}"
 
 
-def test_body_documents_v020_subcommands():
+def test_body_describes_web_first_auth():
     _, body = _parse_frontmatter(_read_skill_md())
-    for sub in ("auth github", "auth email start", "auth email verify", "auth anonymous",
-                "rename", "logout"):
-        assert sub in body, f"SKILL.md body must document subcommand {sub!r}"
+    # Web-first flow: pairing via conductorscore.com/pair, no inline auth pickers.
+    assert "conductorscore.com/pair" in body, (
+        "SKILL.md must mention conductorscore.com/pair for web-first auth"
+    )
+    assert "auth.json" in body, (
+        "SKILL.md must mention auth.json (the credential file)"
+    )
 
 
-def test_body_has_no_pairing_references():
+def test_body_has_no_old_auth_subcommands():
     _, body = _parse_frontmatter(_read_skill_md())
-    assert "pair" not in body.lower(), (
-        "SKILL.md body must not reference pairing (removed in v0.2.0)"
+    # Old inline-auth subcommands must be gone in the web-first flow.
+    for old_sub in ("auth github", "auth email start", "auth anonymous"):
+        assert old_sub not in body, (
+            f"SKILL.md must not reference old subcommand {old_sub!r} "
+            f"(removed in web-first flow)"
+        )
+
+
+def test_body_has_no_hardcoded_oauth_client_id():
+    _, body = _parse_frontmatter(_read_skill_md())
+    assert "Ov23litmD8cHtbJmD12h" not in body, (
+        "SKILL.md must not contain the hardcoded GitHub OAuth client_id"
     )
