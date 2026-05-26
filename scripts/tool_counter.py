@@ -27,6 +27,13 @@ AUTO_COMPACT_BANNER = (
     "ran out of context"
 )
 
+# Subagent-dispatch tool names. Claude Code historically used "Task"; newer
+# releases dispatch via "Agent". Pinned as a set so a single change
+# updates both the counter and any future tests that pin the contract.
+# See docs/debugging/metric-verification.md anti-pattern
+# "trusting a hard-coded tool name across Claude Code versions."
+_SUBAGENT_DISPATCH_NAMES: frozenset[str] = frozenset({"Task", "Agent"})
+
 
 @dataclass(frozen=True)
 class ToolCounts:
@@ -36,8 +43,9 @@ class ToolCounts:
       • ``builtin_tool_invocations`` — total count of built-in tool_use
         blocks (Read, Write, Edit, Bash, Grep, Glob, etc.) — the
         invocations side of the "Tools invoked / distinct" dev-card row.
-      • ``agent_dispatches`` — count of ``tool_use`` blocks named
-        ``Task`` (subagent spawns) — raw activity stat.
+      • ``agent_dispatches`` — count of ``tool_use`` blocks whose name is
+        in ``_SUBAGENT_DISPATCH_NAMES`` (``Task`` historically, ``Agent``
+        in newer Claude Code) — raw activity stat.
       • ``plugin_invocations`` — count of `<command-name>` blocks in
         user messages (Claude Code plugin commands carry the plugin
         name in this marker).
@@ -188,8 +196,13 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     continue
                 if name.startswith("mcp__"):
                     mcp.add(name)
-                elif name == "Task":
-                    # Task subagent dispatch — separate counter.
+                elif name in _SUBAGENT_DISPATCH_NAMES:
+                    # Subagent spawn — pin to an explicit allow-set since
+                    # the tool name shifted between Claude Code versions
+                    # ("Task" historically, "Agent" in newer releases).
+                    # Per the metric-verification playbook anti-pattern
+                    # "trusting a hard-coded tool name across versions",
+                    # this set is the single source of truth.
                     agent_dispatches += 1
                     builtin.add(name)
                     builtin_invocations += 1

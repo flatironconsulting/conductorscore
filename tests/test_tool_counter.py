@@ -487,21 +487,30 @@ def test_count_tools_v0_7_excludes_mcp_from_builtin_invocations(tmp_path):
 
 
 def test_count_tools_v0_7_counts_agent_dispatches(tmp_path):
-    """Task tool counts toward agent_dispatches AND builtin_tool_invocations."""
+    """Subagent dispatches count regardless of tool name version.
+
+    Claude Code historically used ``Task``; newer releases dispatch via
+    ``Agent``. Both must count toward agent_dispatches. (See
+    docs/debugging/metric-verification.md anti-pattern "trusting a
+    hard-coded tool name across Claude Code versions" — this test pins
+    the contract for both names.)
+    """
     p = tmp_path / "s.jsonl"
     _write_jsonl(
         p,
         [
             {"message": {"content": [{"type": "tool_use", "name": "Task"}]}},
-            {"message": {"content": [{"type": "tool_use", "name": "Task"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Agent"}]}},
+            {"message": {"content": [{"type": "tool_use", "name": "Agent"}]}},
             {"message": {"content": [{"type": "tool_use", "name": "Read"}]}},
         ],
     )
     out = count_tools(p)
-    assert out.agent_dispatches == 2
-    # Task counts as a builtin tool too — invocation count includes it.
-    assert out.builtin_tool_invocations == 3
+    assert out.agent_dispatches == 3  # 1 Task + 2 Agent
+    # Both names count as builtin tools too — invocation count includes them.
+    assert out.builtin_tool_invocations == 4
     assert "Task" in out.distinct_builtin_tools
+    assert "Agent" in out.distinct_builtin_tools
 
 
 def test_count_tools_v0_7_counts_plugin_invocations(tmp_path):
