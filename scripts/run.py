@@ -78,9 +78,11 @@ def main() -> int:
     final = _read_status(status_path) or {}
 
     if final.get("phase") == "done":
-        score = final.get("score")
+        score_data = final.get("score")
+        # scan.py writes the full ScoreBreakdown dict; pull out the headline number.
+        score_total = score_data.get("total") if isinstance(score_data, dict) else score_data
         url = final.get("profile_url")
-        print(f"✓ Score: {score}  →  {url}")
+        print(f"✓ Score: {score_total}  →  {url}")
         ver = final.get("verification") or {}
         if ver.get("github") is True:
             print("  Verified via GitHub.")

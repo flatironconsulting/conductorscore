@@ -40,7 +40,7 @@ for i in [1, 25, 47]:
     p.write_text(json.dumps({{"phase": "scanning", "current": i, "total": 47}}))
     time.sleep(0.05)
 p.write_text(json.dumps({{
-    "phase": "done", "score": 78.2,
+    "phase": "done", "score": {{"total": 78.2, "grade": "B-"}},
     "profile_url": "http://x/u/testuser",
     "verification": {{"github": True}},
 }}))
