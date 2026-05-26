@@ -8,6 +8,11 @@ Subcommands:
   auth email verify <email> <code>
   auth anonymous       anonymous registration.
   rename <handle>      rename current handle.
+  verify                                attach a verified identity (status
+                                        + guidance if no method given).
+  verify github                         GitHub Device Flow + attach.
+  verify email start <email>            send OTP to <email>.
+  verify email verify <email> <code>    confirm OTP + attach.
   logout               revoke server token + wipe local auth.json.
 
 Flags:
@@ -26,6 +31,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+from pathlib import Path
 from typing import NoReturn
 
 # Self-bootstrap so `python3 /path/to/scripts/run.py` works in addition to
@@ -160,20 +166,60 @@ def cmd_default(argv: list[str]) -> int:
     try:
         state = load_auth()
     except AuthMissing:
-        return 2
+        # Exit 0 (not 2) so Claude Code's Bash tool doesn't paint a red
+        # "Error: Exit code 2" badge and short-circuit the driver. SKILL.md
+        # dispatches on the stdout substring instead.
+        print("no auth — pick a login method.")
+        return 0
 
-    # ✓ auth line — always printed so the user sees confirmation.
-    print(_auth_pair_line(state))
+    # Resolve the transcripts folder for the display string (respects
+    # CONDUCTORSCORE_CLAUDE_HOME for tests / non-standard installs).
+    from scripts.events import claude_home, find_sessions
+    import time as _time
+    projects_dir = claude_home() / "projects"
+    try:
+        display_dir = "~/" + str(projects_dir.relative_to(Path.home()))
+    except ValueError:
+        display_dir = str(projects_dir)
+
+    # Pre-count sessions so the announce line carries N. find_sessions()
+    # is a fast directory walk (milliseconds for typical inboxes), and
+    # extract() will call it again — the duplication is harmless.
+    WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+    _now_ms = int(_time.time() * 1000)
+    _cutoff = _now_ms - WINDOW_MS
+    _pre_n = sum(1 for s in find_sessions() if s.last_ts_ms >= _cutoff)
+    print(f"Scanning {_pre_n} conversations in {display_dir}…")
+
+    # Progress bar — animates in a real TTY, suppressed in non-TTY
+    # (Claude Code, CI, pipes) where the bracketing announce/scanned
+    # lines are sufficient.
+    from scripts.progress import ProgressBar
+    _bar_holder: dict[str, ProgressBar | None] = {"bar": None}
+    _is_tty = sys.stdout.isatty()
+
+    def _on_progress(done: int, total: int) -> None:
+        if not _is_tty:
+            return
+        bar = _bar_holder["bar"]
+        if bar is None:
+            bar = ProgressBar(total=total, prefix="   ")
+            _bar_holder["bar"] = bar
+        bar.update(done)
 
     # Scan with wall-clock timing.
-    import time as _time
     _t0 = _time.perf_counter()
-    out = extract(device_id=state.client_device_id, client_version=CLIENT_VERSION)
+    out = extract(
+        device_id=state.client_device_id,
+        client_version=CLIENT_VERSION,
+        on_progress=_on_progress,
+    )
     _elapsed = _time.perf_counter() - _t0
     n = len(out.sessions)
+    if _bar_holder["bar"] is not None:
+        _bar_holder["bar"].done()
 
-    # Print session discovery line.
-    print(f"✓ found {n} sessions in ~/.claude/projects/ (30d)")
+    print(f"Scan complete in {_elapsed:.1f}s")
 
     if not out.sessions:
         print("No Claude Code activity in the last 30 days. Try again after using Claude Code for a bit.")
@@ -181,20 +227,6 @@ def cmd_default(argv: list[str]) -> int:
     if dry:
         print(f"--dry-run: would upload {n} sessions")
         return 0
-
-    # Scan progress — extract() is synchronous so we can't easily stream
-    # per-session events without a larger refactor of the extractor.
-    # We print the final 100% line after extraction completes.
-    # Trade-off: user sees a pause then two lines at once rather than a live
-    # progress bar.  A future improvement could yield session events from
-    # extract() and drive a ProgressBar, but that requires refactoring the
-    # inner per-session loop which is non-trivial.
-    print(f"✓ scanning · 100% · {_elapsed:.1f}s")
-    print(f"✓ scan complete · {_elapsed:.1f}s wall-clock · {n} sessions parsed")
-
-    # Compute payload size before upload.
-    _payload_bytes = len(out.to_json().encode())
-    _payload_kb = _payload_bytes / 1024
 
     try:
         result = upload(out, token=state.device_token, base_url=BASE)
@@ -208,43 +240,28 @@ def cmd_default(argv: list[str]) -> int:
         print(f"Upload failed: {e}. Re-run /conductorscore to try again.")
         return 4
 
-    print(f"✓ uploaded {n} records · {_payload_kb:.1f} kB, numbers only")
-
-    # Score breakdown block — uses data returned by the server.
+    # Combined score + URL line. Detailed strongest/biggest-lift breakdown
+    # lives on the profile page; CLI keeps the terminal output tight.
     score = result.get("score") if isinstance(result, dict) else None
     if score is None:
-        # Old server or missing field — fall back gracefully.
-        print(f"\nScore ready: {state.user_url}")
+        print(f"Score ready: {state.user_url}")
         return 0
-
-    total_raw = score.get("total")
     grade = score.get("grade", "?")
-    pct = score.get("percentile", "?")
-    cohort = score.get("cohort_size", "?")
+    print(f"Your score is {grade}, see more at {state.user_url}")
 
-    strongest = score.get("strongest") or {}
-    s_metric = strongest.get("metric", "")
-    s_display = strongest.get("display_value", "")
-    s_secondary = strongest.get("secondary_value")
-
-    lift = score.get("biggest_lift") or {}
-    lift_label = lift.get("label", "")
-    lift_action = lift.get("action", "")
-    lift_delta = lift.get("score_delta", 0)
-
-    strongest_line = f"  strongest        {s_metric} {s_display}"
-    if s_secondary:
-        strongest_line += f" · {s_secondary}"
-
-    # Format as XX.X (one decimal). Fall back to "?" if server omitted total.
-    total_str = f"{float(total_raw):.1f}" if total_raw is not None else "?"
-
-    print()
-    print(f"  your score       {total_str} · {grade} · p{pct} of {cohort} in cohort")
-    print(strongest_line)
-    print(f"  biggest lift     {lift_label} → {lift_action} = +{lift_delta}")
-    print()
-    print(f"  → your credential: conductorscore.com/@{state.handle}")
+    # Context-aware verify hint: suggest only the method(s) still missing.
+    # Server returns `verification: {has_github, has_email}` from /api/ingest.
+    verification = result.get("verification") if isinstance(result, dict) else None
+    has_github = bool(verification and verification.get("has_github"))
+    has_email = bool(verification and verification.get("has_email"))
+    if has_github and has_email:
+        pass  # fully verified — no hint
+    elif has_github:
+        print("Verify your profile with email using /conductorscore verify")
+    elif has_email:
+        print("Verify your profile with GitHub using /conductorscore verify")
+    else:
+        print("Verify your profile with GitHub or email using /conductorscore verify")
     return 0
 
 
@@ -258,10 +275,43 @@ def cmd_auth(argv: list[str]) -> int:
         print(f"✓ anonymous device · paired as @{state.handle}")
         return 0
     if sub == "github":
-        from scripts.auth.github_device import login
-        state = login()
-        print(f"✓ github oauth · paired as @{state.handle}")
-        return 0
+        # Split into start/complete so the verification URL is visible
+        # immediately when called from Claude Code's Bash tool (which
+        # buffers stdout). With no sub-arg we run both inline, which is
+        # the right UX for a real shell where stdout flushes on newline.
+        gh_arg = argv[1] if len(argv) > 1 else None
+        from scripts.auth.github_device import (
+            start_flow,
+            complete_flow,
+            login,
+            DeviceFlowError,
+            DeviceFlowExpired,
+            DeviceFlowDenied,
+        )
+        try:
+            if gh_arg == "start":
+                start_flow()
+                return 0
+            if gh_arg == "complete":
+                state = complete_flow()
+                print(f"✓ github oauth · paired as @{state.handle}")
+                return 0
+            if gh_arg is None:
+                state = login()
+                print(f"✓ github oauth · paired as @{state.handle}")
+                return 0
+        except DeviceFlowExpired:
+            print(
+                "Device Flow code expired. Run `auth github start` again to mint a new one."
+            )
+            return 1
+        except DeviceFlowDenied:
+            print("Authorization denied.")
+            return 1
+        except DeviceFlowError as e:
+            print(str(e))
+            return 1
+        _fail(f"unknown github subcommand: {gh_arg}", 1)
     if sub == "email":
         from scripts.auth.email_otp import start, verify, BadCode
         if len(argv) < 2:
@@ -308,6 +358,9 @@ def main(argv: list[str] | None = None) -> int:
             _fail("rename requires <handle>", 1)
         from scripts.rename import do_rename
         return do_rename(rest[0])
+    if head == "verify":
+        from scripts.verify import do_verify
+        return do_verify(rest)
     if head == "logout":
         from scripts.logout import do_logout
         return do_logout()

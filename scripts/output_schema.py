@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.7"
+SCHEMA_VERSION = "0.8"
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,14 @@ class PerSession:
     plugin_invocations: int = 0
     distinct_plugins: tuple[str, ...] = field(default_factory=tuple)
     agent_dispatches: int = 0
+    # v0.8 — precise per-model token split. Maps each model_id seen in
+    # the session to its `{input_miss, input_hit, output}` breakdown.
+    # Summing across models equals the scalar `cache_creation_input_tokens`
+    # (miss), `cache_input_tokens` (hit), and `total_output_tokens`
+    # respectively. Empty dict when no assistant messages with a model
+    # appeared (e.g. cron-only sessions). Drives the Cost Breakdown
+    # modal's per-(model, leg) rows without server-side approximation.
+    tokens_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -171,6 +179,11 @@ class ExtractorOutput:
                     "plugin_invocations": s.plugin_invocations,
                     "distinct_plugins": list(s.distinct_plugins),
                     "agent_dispatches": s.agent_dispatches,
+                    # Deep-copy the per-model dict so a downstream mutation
+                    # doesn't leak back into the frozen dataclass.
+                    "tokens_by_model": {
+                        m: dict(v) for m, v in s.tokens_by_model.items()
+                    },
                 }
                 for s in self.sessions
             ],

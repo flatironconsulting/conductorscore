@@ -13,9 +13,14 @@ def _run(args, env_extra=None):
                           capture_output=True, text=True, env=env)
 
 
-def test_exit_code_2_when_no_auth(tmp_path):
+def test_no_auth_exits_zero_with_picker_hint(tmp_path):
+    """run.py (no args, no auth.json) must exit 0 with a single-line stdout
+    that SKILL.md can dispatch on. Exit 2 used to be the contract here but
+    Claude Code's Bash tool paints exit-non-zero as a red "Error" badge,
+    which short-circuits the driver. Now: exit 0 + 'no auth' substring."""
     r = _run([], env_extra={"CONDUCTORSCORE_AUTH_PATH": str(tmp_path / "absent.json")})
-    assert r.returncode == 2
+    assert r.returncode == 0
+    assert "no auth" in r.stdout
 
 
 def test_logout_subcommand_succeeds(tmp_path, monkeypatch):

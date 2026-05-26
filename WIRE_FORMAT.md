@@ -19,6 +19,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.5 | Feature 7 — anti-pattern cluster | `sessions[].{revert_count, qualifying_pairs, repetitive_pairs, rage_quit_event, tool_error_count, auto_compaction_events, total_input_tokens, total_output_tokens, redundant_approvals_per_signature}`, `config.{global_claude_md_lines, project_claude_md_lines_avg}` |
 | 0.6 | Feature 8 — fluency + informational | `sessions[].{assistant_msgs_by_model, user_skill_invocations, hitl_mcp_invocations}` |
 | 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, distinct_plugins, agent_dispatches}`, `config.{plugin_count, distinct_installed_plugins}` |
+| 0.8 | Cost-modal precision — precise per-(model, leg) token split | `sessions[].tokens_by_model` (map of `model_id → {input_miss, input_hit, output}`) |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
@@ -684,3 +685,50 @@ following are added:
   the minute classifier (USER message at minute `m` makes minutes
   `m` and `m+1` HITL). Changes to the classifier behave like a
   silent recount and do not bump the schema version.
+
+## v0.8 — precise per-(model, leg) token split
+
+Adds one required per-session field on top of v0.7. The server still
+accepts v0.7 envelopes for the deprecation window, but v0.8 unlocks
+the Cost Breakdown modal's per-row precision (no proportional
+approximation).
+
+### Per-session additions
+
+| Field             | Type                                                                         | Default | Notes |
+|-------------------|------------------------------------------------------------------------------|---------|-------|
+| `tokens_by_model` | `{ [model_id: string]: { input_miss: int, input_hit: int, output: int } }` | `{}`    | Per-(model, leg) precise token split. Summing across models satisfies the invariants below. |
+
+Invariants the client maintains by construction (summing token counts
+from each assistant event grouped by its `model`):
+
+```
+Σ tokens_by_model[m].input_miss  == cache_creation_input_tokens
+Σ tokens_by_model[m].input_hit   == cache_input_tokens
+Σ tokens_by_model[m].output      == total_output_tokens
+```
+
+`tokens_by_model` is `{}` for cron-only sessions (no assistant
+messages with a model). Inner counts MUST be non-negative integers.
+
+### Example session fragment
+
+```json
+{
+  "tokens_by_model": {
+    "claude-opus-4-7":   { "input_miss": 750000, "input_hit": 250000, "output": 180000 },
+    "claude-sonnet-4-6": { "input_miss":  50000, "input_hit":  10000, "output":  20000 }
+  }
+}
+```
+
+### Compatibility
+
+- The server accepts `schema_version` of `"0.7"` or `"0.8"` during the
+  deprecation window. On a `"0.7"` envelope, the server falls back to
+  proportional approximation across `assistant_msgs_by_model` shares;
+  on `"0.8"`, it reads `tokens_by_model` directly.
+- New model IDs in `tokens_by_model` keys are unvalidated raw strings —
+  same convention as `assistant_msgs_by_model`. Unknown IDs MUST NOT
+  fail validation; the server's `model_pricing` table is the source of
+  truth for whether a row contributes to the Cost modal.

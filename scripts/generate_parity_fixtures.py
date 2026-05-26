@@ -257,6 +257,7 @@ def _build_per_session(
         plugin_invocations=overrides.get("plugin_invocations", 0),
         distinct_plugins=tuple(overrides.get("distinct_plugins", ())),
         agent_dispatches=overrides.get("agent_dispatches", 0),
+        tokens_by_model=overrides.get("tokens_by_model", {}),
     )
 
 
@@ -316,6 +317,22 @@ _EXAMPLE_2_FG_V07 = {
     "plugin_invocations": 9,
     "distinct_plugins": _EXAMPLE_2_PLUGINS,
     "agent_dispatches": 4,
+    # v0.8 — precise per-(model, leg) split. Picked to match the
+    # message-share proportional approximation (60/40 across opus/sonnet)
+    # so the parity test's costAggregate / tokensAggregate expectations
+    # are unchanged. The aggregator's v0.8 path reads this directly.
+    "tokens_by_model": {
+        "claude-opus-4-7": {
+            "input_miss": 450_000,
+            "input_hit": 150_000,
+            "output": 120_000,
+        },
+        "claude-sonnet-4-5": {
+            "input_miss": 300_000,
+            "input_hit": 100_000,
+            "output": 80_000,
+        },
+    },
 }
 
 

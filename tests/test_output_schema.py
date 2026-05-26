@@ -12,8 +12,8 @@ from scripts.output_schema import (
 )
 
 
-def test_schema_version_is_0_7():
-    assert SCHEMA_VERSION == "0.7"
+def test_schema_version_is_0_8():
+    assert SCHEMA_VERSION == "0.8"
 
 
 def test_device_meta_defaults():
@@ -23,7 +23,7 @@ def test_device_meta_defaults():
         extracted_at_ms=1234567890000,
     )
     assert dm.window_days == 30
-    assert dm.schema_version == "0.7"
+    assert dm.schema_version == "0.8"
 
 
 def test_config_counts_defaults():
@@ -49,7 +49,7 @@ def test_to_dict_shape_matches_spec_no_sessions():
     assert d["device"] == {
         "device_id": "dev-1",
         "client_version": "0.1.0",
-        "schema_version": "0.7",
+        "schema_version": "0.8",
         "extracted_at_ms": 1234567890000,
         "window_days": 30,
     }
@@ -123,6 +123,7 @@ def test_to_dict_shape_with_sessions():
             "plugin_invocations": 0,
             "distinct_plugins": [],
             "agent_dispatches": 0,
+            "tokens_by_model": {},
         }
     ]
 
@@ -258,7 +259,7 @@ def test_roundtrip_through_json_preserves_fields():
     )
     j = out.to_json()
     parsed = json.loads(j)
-    assert parsed["device"]["schema_version"] == "0.7"
+    assert parsed["device"]["schema_version"] == "0.8"
     assert parsed["sessions"][0]["session_hash"] == "0123456789abcdef"
     assert parsed["sessions"][0]["distinct_skills"] == ["plan"]
     assert parsed["sessions"][0]["distinct_mcp_tools"] == ["mcp__github__add_comment"]
@@ -342,7 +343,7 @@ def test_v0_6_fields_round_trip_through_json():
         sessions=(s,),
     )
     parsed = json.loads(out.to_json())
-    assert parsed["device"]["schema_version"] == "0.7"
+    assert parsed["device"]["schema_version"] == "0.8"
     s_p = parsed["sessions"][0]
     assert s_p["assistant_msgs_by_model"] == {"claude-opus-4-7": 1}
     assert s_p["user_skill_invocations"] == 2

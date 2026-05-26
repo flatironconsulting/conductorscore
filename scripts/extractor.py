@@ -82,7 +82,16 @@ def extract(
     device_id: str,
     client_version: str,
     now_ms: int | None = None,
+    on_progress=None,
 ) -> ExtractorOutput:
+    """Scan + score the user's session transcripts.
+
+    Args:
+        device_id, client_version, now_ms: as before.
+        on_progress: optional callable(done: int, total: int) invoked once per
+            loaded session in Pass 1. Callers wiring a TUI progress bar pass
+            ``ProgressBar.update``; everyone else leaves it ``None``.
+    """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
     cutoff = now_ms - WINDOW_MS
@@ -91,6 +100,12 @@ def extract(
     # .claude dir; the config scanner expects the *parent* of .claude.
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
+
+    # Pre-filter so on_progress has an accurate total (sessions outside the
+    # window are skipped silently, not counted against the bar).
+    all_sessions = find_sessions()
+    in_window = [s for s in all_sessions if s.last_ts_ms >= cutoff]
+    total = len(in_window)
 
     # Pass 1 — load every session in the lookback window once. We keep
     # the parsed Events + in-memory text map around so Pass 2 doesn't
@@ -103,9 +118,7 @@ def extract(
     loaded: list[tuple] = []  # (SessionMeta, events, text_map, tool_counts)
     artifact_times_by_project: dict[str, list[tuple[str, int]]] = {}
     project_roots: set[str] = set()
-    for s in find_sessions():
-        if s.last_ts_ms < cutoff:
-            continue
+    for i, s in enumerate(in_window):
         if s.jsonl_path is not None:
             tc = count_tools(s.jsonl_path)
             events, text_map = read_events_and_text(s.jsonl_path)
@@ -119,6 +132,8 @@ def extract(
             artifact_times_by_project.setdefault(s.project_root, []).append(
                 (s.session_id, s.first_ts_ms)
             )
+        if on_progress is not None:
+            on_progress(i + 1, total)
 
     # v0.5 — scan global + project CLAUDE.md line counts. project_roots
     # are the un-hashed local paths; counts cross the wire as integers.
@@ -248,6 +263,32 @@ def extract(
             events, hitl_minute_set
         )
 
+        # v0.8 — precise per-model token split. Only assistant events
+        # carry a model id and usage counts; the reader only sets
+        # input_tokens on the FIRST text event of a message so the per-
+        # model sum here doesn't double-count multi-block assistant
+        # messages. Skip events without a model — those are user/system
+        # events that don't carry token counts anyway. Invariants by
+        # construction:
+        #   Σ tokens_by_model[m].input_miss  == cache_creation_input_tokens
+        #   Σ tokens_by_model[m].input_hit   == cache_input_tokens
+        #   Σ tokens_by_model[m].output      == total_output_tokens
+        tokens_by_model: dict[str, dict[str, int]] = {}
+        for e in events:
+            if not e.model:
+                continue
+            in_miss = int(getattr(e, "cache_creation_input_tokens", 0) or 0)
+            in_hit = int(getattr(e, "cache_input_tokens", 0) or 0)
+            out = int(getattr(e, "output_tokens", 0) or 0)
+            if in_miss == 0 and in_hit == 0 and out == 0:
+                continue
+            slot = tokens_by_model.setdefault(
+                e.model, {"input_miss": 0, "input_hit": 0, "output": 0}
+            )
+            slot["input_miss"] += in_miss
+            slot["input_hit"] += in_hit
+            slot["output"] += out
+
         sessions.append(
             PerSession(
                 session_hash=_sha16(s.session_id),
@@ -289,6 +330,8 @@ def extract(
                 plugin_invocations=plugin_invocations,
                 distinct_plugins=distinct_plugins,
                 agent_dispatches=agent_dispatches,
+                # v0.8 — precise per-(model, leg) token split.
+                tokens_by_model=tokens_by_model,
             )
         )
     return ExtractorOutput(

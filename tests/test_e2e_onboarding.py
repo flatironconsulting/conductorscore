@@ -243,28 +243,24 @@ class TestE2EOnboarding:
             assert "✓ uploaded" in r.stdout and "records" in r.stdout, (
                 f"expected '✓ uploaded N records' line:\n{r.stdout}"
             )
-            # Either the score block OR the fallback URL must appear.
-            has_score_block = "your score" in r.stdout
+            # Either the new headline score block OR the fallback URL must appear.
+            has_score_block = "Your ConductorScore:" in r.stdout
             has_fallback = "Score ready:" in r.stdout or "conductorscore.com/@" in r.stdout
             assert has_score_block or has_fallback, (
-                f"expected 'your score' block or fallback URL in stdout:\n{r.stdout}"
+                f"expected 'Your ConductorScore:' block or fallback URL in stdout:\n{r.stdout}"
             )
 
     def test_profile_page_displays_same_stats_as_ingest_response(self, tmp_path):
-        """Public profile page at /user/<handle> should mirror the score block from stdout.
+        """Public profile page at /u/<handle> should mirror the headline score from stdout.
 
-        What the CLI score block contains:
-          your score       {total} · {grade} · p{percentile} of {cohort_size} in cohort
-          strongest        {metric} {display_value}
-          biggest lift     {label} → {action} = +{delta}
+        The CLI score block was tightened to three lines:
+          Your ConductorScore: {total} · {grade}
+          Profile: {user_url}
+          Verify your profile with GitHub or email using /conductorscore verify
 
-        What the profile page renders (from the scores DB row):
-          - composite * 100 as toFixed(1)  → contains the integer total as a substring
-          - "Tier {tier}"                  → tier / grade
-          - per-metric percentile badges   → "p{N}"
-          - per-metric display names       → e.g. "AFK Max Streak"
-          - strongest block                → metric label from breakdown.ts
-          - biggest lift block             → label from LIFT_TABLE in breakdown.ts
+        Detailed strongest / biggest-lift breakdowns now live only on the
+        profile page — this test verifies the page renders them by looking
+        for the rendered labels.
         """
         auth = tmp_path / "auth.json"
 
@@ -286,10 +282,10 @@ class TestE2EOnboarding:
         handle = data["handle"]
         assert handle.startswith("anon-"), f"unexpected handle: {handle!r}"
 
-        # 4. Parse the score block from stdout.
-        #    Line format: "  your score       54.6 · C · p67 of 1 in cohort"
+        # 4. Parse the headline score line from stdout.
+        #    Line format: "Your ConductorScore: 54.6 · C-"
         score_m = re.search(
-            r"your score\s+([\d.]+)\s+·\s+(\S+)\s+·\s+p(\d+) of (\d+) in cohort",
+            r"Your ConductorScore:\s+([\d.]+)\s+·\s+(\S+)",
             r.stdout,
         )
         if score_m is None:
@@ -300,8 +296,8 @@ class TestE2EOnboarding:
             )
 
         total = score_m.group(1)       # e.g. "54.6"
-        grade = score_m.group(2)       # e.g. "C"
-        percentile = score_m.group(3)  # e.g. "67"
+        grade = score_m.group(2)       # e.g. "C-"
+        percentile = None              # no longer surfaced in CLI
 
         # 5. Fetch the public profile page — no auth cookie, anonymous viewer.
         profile_url = f"{BASE_URL}/user/{handle}"
@@ -359,26 +355,15 @@ class TestE2EOnboarding:
             f"html snippet: {html[:2000]}"
         )
 
-        # 9. The "strongest" metric label and "biggest lift" label must appear
-        # on the profile page — the page now renders both blocks.
-        strongest_m = re.search(r"strongest\s+(\S+)", r.stdout)
-        lift_m = re.search(r"biggest lift\s+(\S.*?)\s+→", r.stdout)
-
-        if strongest_m:
-            strongest_label = strongest_m.group(1)
-            assert strongest_label in html, (
-                f"Profile page does not render 'strongest' block: "
-                f"label={strongest_label!r} not found in HTML.\n"
-                f"html snippet: {html[:3000]}"
-            )
-
-        if lift_m:
-            lift_label = lift_m.group(1).strip()
-            assert lift_label in html, (
-                f"Profile page does not render 'biggest lift' block: "
-                f"label={lift_label!r} not found in HTML.\n"
-                f"html snippet: {html[:3000]}"
-            )
+        # 9. The strongest / biggest-lift labels are no longer in CLI stdout
+        # (they moved to the profile page only). Just confirm the page renders
+        # both block headers so the templates haven't regressed.
+        assert "strongest" in html.lower(), (
+            f"Profile page missing 'strongest' block.\nhtml snippet: {html[:3000]}"
+        )
+        assert "biggest lift" in html.lower() or "biggest_lift" in html.lower(), (
+            f"Profile page missing 'biggest lift' block.\nhtml snippet: {html[:3000]}"
+        )
 
     def test_profile_page_accessible_via_at_handle_alias(self, tmp_path):
         """/@<handle> should 308-redirect to /user/<handle> and the final page renders 200.
