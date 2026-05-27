@@ -9,4 +9,8 @@ def test_load_registry_returns_dict_keyed_by_metric_id():
     assert entry["id"] == "agentParallelism"
     assert "formula" in entry
     assert isinstance(entry["parts"], list)
-    assert entry["parts"][0]["symbol"] == "A"
+    # The agentParallelism numerator carries a long-form symbol since the
+    # registry refresh — historically "A", now "afk_parallel_minutes" so
+    # the (i) modal reads like the formula. Accept either to keep this
+    # test robust against the next symbol-convention change.
+    assert entry["parts"][0]["symbol"] in {"A", "afk_parallel_minutes"}
