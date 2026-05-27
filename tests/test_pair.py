@@ -59,19 +59,33 @@ def test_happy_path_writes_auth_json(tmp_home, httpserver):
     assert oct(auth_path.stat().st_mode)[-3:] == "600"
 
 
-def test_idempotent_skip_when_auth_already_present(tmp_home):
+def test_overwrites_auth_json_when_re_pairing_as_different_user(tmp_home, httpserver):
+    # Pre-existing pairing as "olduser" — should be overwritten by a fresh
+    # exchange that returns "newuser". Re-pasting a snippet must always
+    # surface the current identity, not the stale one.
     auth_dir = tmp_home / ".config" / "conductorscore"
     auth_dir.mkdir(parents=True)
     (auth_dir / "auth.json").write_text(json.dumps({
         "device_token": "cs_dev_" + "B" * 32,
-        "github_username": "existing",
+        "github_username": "olduser",
     }))
+    httpserver.expect_request(
+        "/api/pair/exchange", method="POST"
+    ).respond_with_json({
+        "device_token": "cs_dev_" + "N" * 32,
+        "github_username": "newuser",
+        "email": None,
+    })
     result = run_pair("cs_pair_" + "A" * 12, env_extra={
+        "CONDUCTORSCORE_API_BASE": httpserver.url_for(""),
         "HOME": str(tmp_home),
         "XDG_CONFIG_HOME": str(tmp_home / ".config"),
     })
-    assert result.returncode == 0
-    assert "already paired" in result.stdout.lower()
+    assert result.returncode == 0, result.stderr
+    assert "Paired as @newuser" in result.stdout
+    auth = json.loads((auth_dir / "auth.json").read_text())
+    assert auth["github_username"] == "newuser"
+    assert auth["device_token"] == "cs_dev_" + "N" * 32
 
 
 def test_410_prints_expired_message(tmp_home, httpserver):

@@ -4,8 +4,11 @@
 Usage: pair.py <pairing_code>
 
 Writes ~/.config/conductorscore/auth.json with the device token and
-the user's identity on success. Idempotent: if auth.json already exists,
-prints "already paired" and exits 0 without contacting the server.
+the user's identity on success. Always performs the exchange — each
+install snippet carries a fresh single-use code, so re-running with
+a new code is the intended way to switch identities or refresh the
+device token. Accidental double-paste of the SAME code surfaces as a
+409 (code_already_used) from the server.
 """
 from __future__ import annotations
 
@@ -83,10 +86,12 @@ def main() -> int:
         print(f"bad_format: pairing code must match cs_pair_<12 chars>", file=sys.stderr)
         return 2
 
-    if _auth_path().exists():
-        print("already paired (auth.json exists); skipping exchange")
-        return 0
-
+    # Always do the exchange — each install snippet has a fresh single-use
+    # code, and re-pasting may be a user switching identities (e.g., signed
+    # in as a different GitHub account). If we skipped when auth.json existed,
+    # auth.json would stay stale + scans would attribute to the old identity.
+    # The server's single-use-code check (409 already_used) handles the
+    # accidental-double-paste case gracefully.
     device_id = _load_or_create_device_id()
     status, body = _post(
         f"{API_BASE}/api/pair/exchange",
