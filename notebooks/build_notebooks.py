@@ -109,18 +109,52 @@ def _common_setup_cells(entry: dict) -> list[dict]:
             "    print(f'  {s.session_id[:12]}  project={s.project_root}  '",
             "          f'first={s.first_ts_ms}  last={s.last_ts_ms}')",
         ),
-        md("## Step 2 — Run the production extractor",
+        md("## Step 2 — Anchor to the last upload, then run the extractor",
            "",
-           "`extract(device_id, client_version)` is the **single function** that powers",
-           "the production `/conductorscore` upload. It scans all sessions, classifies",
-           "minutes as HITL/AFK/Idle, counts tool invocations, detects plan signals,",
-           "etc., and returns an `ExtractorOutput` matching the wire format."),
+           "ConductorScore's Supabase schema does **not** preserve the wire payload —",
+           "only the per-metric `raw` values the server computed (in the `scores`",
+           "table). That means we can't replay the original payload byte-for-byte,",
+           "but we can anchor the 30-day window to the upload's `extracted_at_ms` so",
+           "the local re-extract sees the same sessions the upload did.",
+           "",
+           "Two modes — pick via `MODE` below:",
+           "",
+           "- `\"reextract_anchored\"` (default when Supabase creds are present) — pulls",
+           "  the upload's anchor timestamp from `devices.last_upload_at` and feeds it",
+           "  to `extract(now_ms=…)`. Window matches exactly; values may still differ",
+           "  from the live UI if the extractor logic changed since the upload (e.g.",
+           "  the `Agent` tool-name fix this branch shipped, or wire-schema bumps).",
+           "- `\"reextract_now\"` — anchors to current time. Drifts by whatever has",
+           "  happened since the upload. Useful for \"what would my score be today?\""),
         code(
+            "import time",
             "from scripts.extractor import extract",
+            "from scripts.debug_metric.collectors.uploads_body import fetch_last_upload, UploadNotFound",
             "",
-            "payload = extract(device_id=str(uuid.UUID(int=0)), client_version='notebook')",
+            "USERNAME = 'jswift24'         # change to your GitHub handle",
+            "MODE = 'reextract_anchored'   # 'reextract_anchored' | 'reextract_now'",
+            "",
+            "upload = None",
+            "try:",
+            "    upload = fetch_last_upload(USERNAME)",
+            "    from datetime import datetime, timezone",
+            "    dt = datetime.fromtimestamp(upload['extracted_at_ms'] / 1000, tz=timezone.utc)",
+            "    print(f'last upload: {upload[\"hours_ago\"]}h ago, extracted_at_ms={upload[\"extracted_at_ms\"]} ({dt.isoformat()})')",
+            "    print(f'live score row: composite={upload[\"composite\"]:.3f} tier={upload[\"tier\"]} computed_at={upload[\"computed_at\"]}')",
+            "except (UploadNotFound, RuntimeError) as e:",
+            "    print(f'⚠ could not fetch last upload ({e}); falling back to reextract_now')",
+            "    MODE = 'reextract_now'",
+            "",
+            "if MODE == 'reextract_anchored' and upload is not None:",
+            "    now_ms = upload['extracted_at_ms']",
+            "    label = f'anchored to upload ({now_ms})'",
+            "else:",
+            "    now_ms = int(time.time() * 1000)",
+            "    label = f'anchored to now ({now_ms})'",
+            "",
+            "payload = extract(device_id=str(uuid.UUID(int=0)), client_version='notebook', now_ms=now_ms)",
             "wire = json.loads(payload.to_json())",
-            "print(f'extracted {len(wire[\"sessions\"])} sessions into the wire payload')",
+            "print(f'extracted {len(wire[\"sessions\"])} sessions {label}')",
             "print(f'schema_version: {wire[\"device\"][\"schema_version\"]}')",
         ),
         md("## Step 3 — Inspect the wire fields this metric reads",
@@ -304,11 +338,70 @@ def _per_metric_inspector_cells(entry: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _compare_to_live_cells(entry: dict) -> list[dict]:
+    """Cells that read the canonical `raw` from Supabase's `scores` row
+    and diff it against the locally-computed value from Step 4."""
+    mid = entry["id"]
+    # Legacy-name map: ScoredRowKey -> CurrentRegistryId. Reflects the
+    # prototype-merge renames in the v0.1-vs-v0.7+ wire jump. Notebooks
+    # consult this when the user's most-recent score row predates the
+    # rename.
+    legacy_map = {
+        "agentMaxRuntime": "afkMaxStreak",
+        "topTierShare": "modelVariety",
+    }
+    legacy_key = legacy_map.get(mid)
+    return [
+        md(f"## Step 6 — Compare to the live `scores` row",
+           "",
+           "Supabase's `scores.metrics.<id>.raw` is the value the dev card",
+           "renders. Below we read it and diff against what Step 4 computed",
+           "locally. Any divergence means the extractor / aggregator logic",
+           "moved between the upload and now (e.g. the `Agent` tool-name fix,",
+           "or a v0.2+ wire-schema bump that this metric reads)." +
+           (f"\n\nThis metric was renamed during the prototype-merge: the live"
+            f" scored row uses the legacy key `{legacy_key}`. The notebook"
+            f" falls back to it automatically when the new key is absent."
+            if legacy_key else "")),
+        code(
+            f"current_id = {mid!r}",
+            f"legacy_id = {legacy_key!r}" if legacy_key else "legacy_id = None",
+            "live_raw = None",
+            "live_source = None",
+            "if upload is not None:",
+            "    scored = upload['scored_raws']",
+            "    if current_id in scored:",
+            "        live_raw, live_source = scored[current_id], current_id",
+            "    elif legacy_id and legacy_id in scored:",
+            "        live_raw, live_source = scored[legacy_id], f'{legacy_id} (legacy)'",
+            "if live_raw is None:",
+            "    print('⚠ no live scored value available — most-recent upload predates this metric, or no Supabase creds')",
+            "else:",
+            "    local_raw = agg.get('raw')",
+            "    print(f'live  {live_source!r:36} raw={live_raw!r}')",
+            "    print(f'local {current_id!r:36} raw={local_raw!r}')",
+            "    # Tolerance: most metrics are scalars; pair-raws/dict-raws diff structurally.",
+            "    def _close(a, b):",
+            "        try:",
+            "            return abs(float(a) - float(b)) < 1e-4",
+            "        except (TypeError, ValueError):",
+            "            return a == b",
+            "    if _close(live_raw, local_raw):",
+            "        print('\\n✓ MATCH — local value matches the live UI exactly.')",
+            "    else:",
+            "        print('\\n⚠ DIVERGENCE — the local extractor produced a different value.')",
+            "        print('  Likely causes: extractor/aggregator code moved between upload and now.')",
+            "        print(f'  Bridge with: re-run /conductorscore to push a fresh upload, then re-run this cell.')",
+        ),
+    ]
+
+
 def build_notebook(entry: dict) -> dict:
     cells = []
     cells.extend(_common_setup_cells(entry))
     cells.extend(_per_metric_inspector_cells(entry))
     cells.extend(_aggregate_cells(entry))
+    cells.extend(_compare_to_live_cells(entry))
     if entry["id"] in ("costAggregate", "modelFreshness"):
         cells.append(
             md(
