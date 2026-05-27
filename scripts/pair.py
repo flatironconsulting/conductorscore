@@ -18,7 +18,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-PAIRING_CODE_RE = re.compile(r"^cs_pair_[A-Z2-7]{22}$")
+PAIRING_CODE_RE = re.compile(r"^cs_pair_[A-Z2-7]{12}$")
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
 
@@ -80,7 +80,7 @@ def main() -> int:
 
     code = sys.argv[1].strip()
     if not PAIRING_CODE_RE.match(code):
-        print(f"bad_format: pairing code must match cs_pair_<22 chars>", file=sys.stderr)
+        print(f"bad_format: pairing code must match cs_pair_<12 chars>", file=sys.stderr)
         return 2
 
     if _auth_path().exists():

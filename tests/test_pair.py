@@ -41,7 +41,7 @@ def test_happy_path_writes_auth_json(tmp_home, httpserver):
         "email": None,
     })
     result = run_pair(
-        "cs_pair_" + "A" * 22,
+        "cs_pair_" + "A" * 12,
         env_extra={
             "CONDUCTORSCORE_API_BASE": httpserver.url_for(""),
             "HOME": str(tmp_home),
@@ -66,7 +66,7 @@ def test_idempotent_skip_when_auth_already_present(tmp_home):
         "device_token": "cs_dev_" + "B" * 32,
         "github_username": "existing",
     }))
-    result = run_pair("cs_pair_" + "A" * 22, env_extra={
+    result = run_pair("cs_pair_" + "A" * 12, env_extra={
         "HOME": str(tmp_home),
         "XDG_CONFIG_HOME": str(tmp_home / ".config"),
     })
@@ -79,7 +79,7 @@ def test_410_prints_expired_message(tmp_home, httpserver):
         "/api/pair/exchange", method="POST"
     ).respond_with_json({"error": "code_expired"}, status=410)
     result = run_pair(
-        "cs_pair_" + "A" * 22,
+        "cs_pair_" + "A" * 12,
         env_extra={
             "CONDUCTORSCORE_API_BASE": httpserver.url_for(""),
             "HOME": str(tmp_home),
