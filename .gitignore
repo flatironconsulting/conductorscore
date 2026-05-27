@@ -24,3 +24,6 @@ docs/
 .env.local
 
 .playwright-mcp/
+
+# Playwright MCP screenshot output dir (configured in workspace .mcp.json)
+tmp/
