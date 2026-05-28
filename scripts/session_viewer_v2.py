@@ -7,10 +7,138 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.events import read_events
 from scripts.timeline_classifier import classify_intervals
+
+
+TRUNCATE_CHARS = 100
+
+
+@dataclass
+class TimelineMessage:
+    """A bubble in the rendered timeline."""
+    ts_ms: int
+    role: str  # 'user' | 'assistant_text' | 'assistant_tool'
+    text: str
+    tool_name: str | None = None
+    tool_use_id: str | None = None
+    end_ts_ms: int | None = None
+    is_end_turn: bool = False
+
+
+_AUTO_COMPACT_BANNER = (
+    "This session is being continued from a previous conversation that "
+    "ran out of context"
+)
+
+
+def _flatten_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                t = b.get("text")
+                if isinstance(t, str):
+                    out.append(t)
+        return " ".join(out)
+    return ""
+
+
+def _truncate(s: str, n: int = TRUNCATE_CHARS) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+def _tool_input_summary(inp) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    parts = []
+    for k, v in list(inp.items())[:3]:
+        vs = v if isinstance(v, str) else json.dumps(v)
+        parts.append(f"{k}={_truncate(vs, 40)}")
+    return "  ".join(parts)
+
+
+def _parse_ts_ms(d: dict) -> int | None:
+    ts = d.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_messages(jsonl_path: Path) -> list[TimelineMessage]:
+    """Parse a JSONL into chronological bubble messages (main thread only)."""
+    messages: list[TimelineMessage] = []
+    pending: dict[str, int] = {}  # tool_use_id -> msg index
+    with jsonl_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            ts_ms = _parse_ts_ms(d)
+            if ts_ms is None:
+                continue
+            if d.get("isSidechain"):
+                continue
+            msg = d.get("message")
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            is_synthetic = bool(d.get("isMeta") or d.get("sourceToolUseID"))
+            if role == "user":
+                if isinstance(content, list):
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            tid = b.get("tool_use_id")
+                            if isinstance(tid, str) and tid in pending:
+                                messages[pending.pop(tid)].end_ts_ms = ts_ms
+                text = _flatten_text(content)
+                if text and _AUTO_COMPACT_BANNER not in text and not is_synthetic:
+                    messages.append(TimelineMessage(
+                        ts_ms=ts_ms, role="user", text=_truncate(text)))
+            elif role == "assistant":
+                if not isinstance(content, list):
+                    continue
+                is_end_turn = msg.get("stop_reason") == "end_turn"
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    btype = b.get("type")
+                    if btype == "text":
+                        text = b.get("text", "")
+                        if text:
+                            messages.append(TimelineMessage(
+                                ts_ms=ts_ms, role="assistant_text",
+                                text=_truncate(text), is_end_turn=is_end_turn))
+                    elif btype == "tool_use":
+                        name = b.get("name") or "?"
+                        tid = b.get("id") if isinstance(b.get("id"), str) else None
+                        messages.append(TimelineMessage(
+                            ts_ms=ts_ms, role="assistant_tool",
+                            tool_name=name, tool_use_id=tid,
+                            text=_truncate(_tool_input_summary(b.get("input")))))
+                        if tid:
+                            pending[tid] = len(messages) - 1
+    messages.sort(key=lambda m: m.ts_ms)
+    return messages
 
 
 _CSS = """
@@ -48,6 +176,29 @@ _CSS += """
 }
 """
 
+_CSS += """
+:root {
+  --human: #22c55e;
+  --user-bg: #0f2a1c; --user-border: #16a34a; --user-role: #86efac;
+  --agent: #3b82f6;
+  --agent-text-bg: #172554; --agent-text-border: #2563eb; --agent-text-role: #93c5fd;
+  --agent-tool-bg: #1e293b; --agent-tool-border: #475569; --agent-tool-role: #cbd5e1;
+}
+.msg { display: flex; flex-direction: column; }
+.bubble { max-width: 580px; padding: 8px 14px; border-radius: 12px; font-size: 13px; line-height: 1.45; border: 1px solid transparent; word-break: break-word; }
+.bubble-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 2px; }
+.bubble .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.bubble .ts { font-size: 10px; color: var(--muted); }
+.bubble .end-turn { margin-top: 6px; padding-top: 4px; border-top: 1px dashed var(--rule); text-align: right; font-size: 10px; color: var(--agent); }
+.msg.user { align-items: flex-end; }
+.msg.user .bubble { background: var(--user-bg); border-color: var(--user-border); }
+.msg.user .bubble .role { color: var(--user-role); }
+.msg.assistant .bubble { background: var(--agent-text-bg); border-color: var(--agent-text-border); }
+.msg.assistant .bubble .role { color: var(--agent-text-role); }
+.msg.tool .bubble { background: var(--agent-tool-bg); border-color: var(--agent-tool-border); font-size: 12px; }
+.msg.tool .bubble .role { color: var(--agent-tool-role); }
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -61,34 +212,58 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds / 3600:.1f} hr"
 
 
+def _bubble_html(msg: TimelineMessage) -> str:
+    role_cls = {"user": "user", "assistant_text": "assistant", "assistant_tool": "tool"}[msg.role]
+    role_label = {
+        "user": "USER",
+        "assistant_text": "ASSISTANT_TEXT",
+        "assistant_tool": f"ASSISTANT_TOOL · {msg.tool_name or '?'}",
+    }[msg.role]
+    ts_str = _fmt_clock(msg.ts_ms)
+    if msg.role == "assistant_tool" and msg.end_ts_ms and msg.end_ts_ms > msg.ts_ms:
+        d_s = (msg.end_ts_ms - msg.ts_ms) // 1000
+        ts_str = f"{ts_str} → {_fmt_clock(msg.end_ts_ms)} ({d_s}s)"
+    end_turn = (f'<div class="end-turn">⏹ End turn: {_fmt_clock(msg.ts_ms)}</div>'
+                if msg.is_end_turn else "")
+    return (
+        f'<div class="msg {role_cls}"><div class="bubble">'
+        f'<div class="bubble-head"><span class="role">{html.escape(role_label)}</span>'
+        f'<span class="ts">{html.escape(ts_str)}</span></div>'
+        f"{html.escape(msg.text)}{end_turn}</div></div>"
+    )
+
+
 def render_session(jsonl_path: Path, out_path: Path) -> dict:
-    """Render a session JSONL as a standalone HTML file."""
     events = read_events(jsonl_path)
-    parts: list[str] = [
-        '<!doctype html><html><head><meta charset="utf-8">'
-        f'<title>Session viewer — {html.escape(jsonl_path.name)}</title>'
-        f'<style>{_CSS}</style></head><body><div class="wrap">'
-    ]
     intervals = classify_intervals(events)
+    messages = parse_messages(jsonl_path)
+    parts: list[str] = [
+        f"<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>Session viewer — {html.escape(jsonl_path.name)}</title>"
+        f"<style>{_CSS}</style></head><body><div class=\"wrap\">"
+    ]
     turn_idx = 0
     for itv in intervals:
         if itv.label == "Idle":
-            duration_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+            d_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
             parts.append(
-                f"<div class=\"idle-gap\">⏸ Idle · {_fmt_dur(duration_s)} · "
+                f"<div class=\"idle-gap\">⏸ Idle · {_fmt_dur(d_s)} · "
                 f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}</div>"
             )
         else:
             cls = itv.label.lower()
-            duration_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+            d_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
             parts.append(
                 f"<div class=\"turn-banner {cls}\" id=\"turn-{turn_idx}\">"
                 f"<span class=\"badge\">{itv.label}</span>"
-                f"Turn {turn_idx + 1} · {_fmt_dur(duration_s)} · "
+                f"Turn {turn_idx + 1} · {_fmt_dur(d_s)} · "
                 f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}"
                 f"</div>"
             )
+            for m in messages:
+                if itv.start_ts_ms <= m.ts_ms <= itv.end_ts_ms:
+                    parts.append(_bubble_html(m))
             turn_idx += 1
     parts.append("</div></body></html>")
     out_path.write_text("".join(parts))
-    return {"turns": turn_idx, "output": str(out_path)}
+    return {"turns": turn_idx, "messages": len(messages), "output": str(out_path)}
