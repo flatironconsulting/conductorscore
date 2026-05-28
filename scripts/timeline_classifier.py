@@ -6,6 +6,7 @@ HITL/AFK determined by total turn duration vs K_TURN_SECONDS (default 5 min).
 """
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -245,3 +246,100 @@ def total_leverage_seconds(
         return float("inf")
     parallel = parallel_leverage_seconds(jsonl_path, k_turn_seconds=k_turn_seconds)
     return (agg["afk_s"] + parallel) / agg["hitl_s"]
+
+
+def _sum_usage_tokens_in_jsonl(jsonl_path: Path) -> dict[str, int]:
+    """Sum usage tokens across all assistant messages in a single JSONL."""
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    if not jsonl_path.exists():
+        return totals
+    import json as _json
+    with jsonl_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            msg = d.get("message") if isinstance(d.get("message"), dict) else None
+            if not msg or msg.get("role") != "assistant":
+                continue
+            usage = msg.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            totals["input"] += int(usage.get("input_tokens") or 0)
+            totals["output"] += int(usage.get("output_tokens") or 0)
+            totals["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+            totals["cache_create"] += int(usage.get("cache_creation_input_tokens") or 0)
+    return totals
+
+
+def _label_for_ts(ts_ms: int, turns: list[Turn]) -> str:
+    for t in turns:
+        if t.start_ts_ms <= ts_ms <= t.end_ts_ms:
+            return t.label
+    return "Idle"
+
+
+def tokens_by_label(
+    jsonl_path: Path,
+    k_turn_seconds: int = K_TURN_SECONDS,
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]]]:
+    """Return ``(main_by_label, subagent_by_label)``."""
+    from scripts.events import load_subagent_panels
+    events = read_events(jsonl_path)
+    turns = classify_turns(events, k_turn_seconds=k_turn_seconds)
+    empty = lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    main_by: dict[str, dict[str, int]] = {l: empty() for l in ("HITL", "AFK", "Idle")}
+    sub_by: dict[str, dict[str, int]] = {l: empty() for l in ("HITL", "AFK", "Idle")}
+
+    import json as _json
+    with jsonl_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict) or d.get("isSidechain"):
+                continue
+            msg = d.get("message") if isinstance(d.get("message"), dict) else None
+            if not msg or msg.get("role") != "assistant":
+                continue
+            usage = msg.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            ts = d.get("timestamp")
+            if not isinstance(ts, str):
+                continue
+            try:
+                if ts.endswith("Z"):
+                    ts = ts[:-1] + "+00:00"
+                ts_ms = int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
+            except (ValueError, TypeError):
+                continue
+            label = _label_for_ts(ts_ms, turns)
+            b = main_by[label]
+            b["input"] += int(usage.get("input_tokens") or 0)
+            b["output"] += int(usage.get("output_tokens") or 0)
+            b["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+            b["cache_create"] += int(usage.get("cache_creation_input_tokens") or 0)
+
+    panels = load_subagent_panels(jsonl_path)
+    for _tool_use_id, (_description, sub_jsonl) in panels.items():
+        sub_events = read_events(sub_jsonl)
+        if not sub_events:
+            continue
+        first_ts = min(e.timestamp_ms for e in sub_events)
+        label = _label_for_ts(first_ts, turns)
+        sub_totals = _sum_usage_tokens_in_jsonl(sub_jsonl)
+        for k in sub_by[label]:
+            sub_by[label][k] += sub_totals[k]
+
+    return main_by, sub_by

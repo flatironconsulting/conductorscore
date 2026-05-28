@@ -183,3 +183,18 @@ def test_total_leverage_sums(tmp_path):
     events = read_events(jsonl)
     # No subagents here; total = wallclock
     assert total_leverage_seconds(jsonl, events) == pytest.approx(wallclock_leverage(events), rel=0.001)
+
+
+from scripts.timeline_classifier import tokens_by_label
+
+
+def test_tokens_by_label_buckets_main_and_subagents(tmp_path):
+    """Tokens attributed to HITL/AFK/Idle by message timestamp; subagents
+    attributed by their first-event timestamp."""
+    from tests.fixtures.synthetic.builder import build_session_with_one_subagent
+    main = build_session_with_one_subagent(tmp_path)
+    main_by_label, sub_by_label = tokens_by_label(main)
+    assert main_by_label["HITL"]["output"] > 0
+    assert main_by_label["AFK"]["output"] == 0
+    assert sub_by_label["HITL"]["output"] > 0
+    assert sub_by_label["AFK"]["output"] == 0
