@@ -14,3 +14,12 @@ def test_render_session_emits_one_turn_banner_per_turn(tmp_path):
     assert html.count('class="turn-banner') == 2
     assert "HITL" in html
     assert "AFK" in html
+
+
+def test_render_session_shows_idle_gap_between_turns(tmp_path):
+    """Idle interval between two turns should render as an .idle-gap element."""
+    jsonl = build_two_turn_session(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert 'class="idle-gap' in text

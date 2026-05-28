@@ -10,7 +10,7 @@ import html
 from pathlib import Path
 
 from scripts.events import read_events
-from scripts.timeline_classifier import classify_turns
+from scripts.timeline_classifier import classify_intervals, classify_turns
 
 
 _CSS = """
@@ -38,6 +38,16 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--mono)
 .turn-banner.afk  .badge { background: rgba(59,130,246,0.15); color: var(--afk); }
 """
 
+_CSS += """
+.idle-gap {
+  display: flex; justify-content: center; align-items: center;
+  margin: 6px 0; padding: 6px 12px;
+  border: 1px dashed var(--rule); border-radius: 6px;
+  background: rgba(75,85,99,0.05);
+  font-size: 11px; color: var(--muted);
+}
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -54,21 +64,31 @@ def _fmt_dur(seconds: float) -> str:
 def render_session(jsonl_path: Path, out_path: Path) -> dict:
     """Render a session JSONL as a standalone HTML file."""
     events = read_events(jsonl_path)
-    turns = classify_turns(events)
     parts: list[str] = [
         '<!doctype html><html><head><meta charset="utf-8">'
         f'<title>Session viewer — {html.escape(jsonl_path.name)}</title>'
         f'<style>{_CSS}</style></head><body><div class="wrap">'
     ]
-    for idx, t in enumerate(turns):
-        cls = t.label.lower()
-        parts.append(
-            f'<div class="turn-banner {cls}" id="turn-{idx}">'
-            f'<span class="badge">{t.label}</span>'
-            f"Turn {idx + 1} · {_fmt_dur(t.duration_s)} · "
-            f"{_fmt_clock(t.start_ts_ms)} → {_fmt_clock(t.end_ts_ms)}"
-            f"</div>"
-        )
+    intervals = classify_intervals(events)
+    turn_idx = 0
+    for itv in intervals:
+        if itv.label == "Idle":
+            duration_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+            parts.append(
+                f"<div class=\"idle-gap\">⏸ Idle · {_fmt_dur(duration_s)} · "
+                f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}</div>"
+            )
+        else:
+            cls = itv.label.lower()
+            duration_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+            parts.append(
+                f"<div class=\"turn-banner {cls}\" id=\"turn-{turn_idx}\">"
+                f"<span class=\"badge\">{itv.label}</span>"
+                f"Turn {turn_idx + 1} · {_fmt_dur(duration_s)} · "
+                f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}"
+                f"</div>"
+            )
+            turn_idx += 1
     parts.append("</div></body></html>")
     out_path.write_text("".join(parts))
-    return {"turns": len(turns), "output": str(out_path)}
+    return {"turns": turn_idx, "output": str(out_path)}
