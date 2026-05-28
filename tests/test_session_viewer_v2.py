@@ -110,3 +110,26 @@ def test_render_session_emits_two_summary_tables_with_leverage(tmp_path):
     assert "Leverage (AFK / HITL)" in text
     for row in ("Main (wallclock)", "Subagents (parallel)", "Total (main + subagents)"):
         assert row in text
+
+
+def test_render_session_emits_user_bubble_for_ask_user_question_answer(tmp_path):
+    """When the user answers an AskUserQuestion, the answer should render
+    as a green USER bubble with its own timestamp (the answer's tool_result ts)."""
+    from tests.fixtures.synthetic.builder import (
+        write_jsonl, _user, _assistant_text, _assistant_tool, _tool_result,
+    )
+    p = write_jsonl(tmp_path / "auq_answer.jsonl", [
+        _user(0, "let's pick a number"),
+        _assistant_tool(5, "AskUserQuestion", "toolu_q1", {"questions": [{"q": "1 or 2?"}]}),
+        _tool_result(60, "toolu_q1", content="user picked option 2"),
+        _assistant_text(70, "ok, 2 it is.", end_turn=True),
+    ])
+    out = tmp_path / "viewer.html"
+    render_session(p, out)
+    text = out.read_text()
+    # Two USER bubbles: original prompt + AUQ answer
+    assert text.count('class="msg user"') == 2
+    # The answer text appears in the rendered HTML
+    assert "user picked option 2" in text
+    # The AskUserQuestion dispatch is still rendered as an ASSISTANT_TOOL bubble
+    assert "ASSISTANT_TOOL" in text and "AskUserQuestion" in text
