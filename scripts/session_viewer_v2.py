@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.events import read_events
-from scripts.timeline_classifier import classify_intervals
+from scripts.timeline_classifier import (
+    classify_intervals,
+    classify_turns,
+    derive_streaks,
+    K_BRIDGE_IDLE_SECONDS,
+)
 
 
 TRUNCATE_CHARS = 100
@@ -199,6 +204,27 @@ _CSS += """
 .msg.tool .bubble .role { color: var(--agent-tool-role); }
 """
 
+_CSS += """
+.streak-group {
+  border-left: 4px solid transparent;
+  padding-left: 10px;
+  margin: 10px 0;
+}
+.streak-group.hitl { border-left-color: var(--hitl); }
+.streak-group.afk  { border-left-color: var(--afk); }
+.streak-banner {
+  font-size: 11px; color: var(--muted); margin: 0 0 6px 0; letter-spacing: 0.04em;
+}
+.streak-banner .badge {
+  padding: 2px 8px; border-radius: 4px;
+  font-weight: 700; font-size: 10px; letter-spacing: 0.06em;
+  text-transform: uppercase; margin-right: 6px;
+}
+.streak-group.hitl .streak-banner .badge { background: rgba(34,197,94,0.15); color: var(--hitl); }
+.streak-group.afk  .streak-banner .badge { background: rgba(59,130,246,0.15); color: var(--afk); }
+.streak-banner .stats { color: var(--text); }
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -236,21 +262,70 @@ def _bubble_html(msg: TimelineMessage) -> str:
 def render_session(jsonl_path: Path, out_path: Path) -> dict:
     events = read_events(jsonl_path)
     intervals = classify_intervals(events)
+    turns = classify_turns(events)
     messages = parse_messages(jsonl_path)
+
+    streak_id_for_turn: list[int] = []
+    next_streak_id = 0
+    for idx, t in enumerate(turns):
+        if idx == 0:
+            streak_id_for_turn.append(next_streak_id)
+            continue
+        prev = turns[idx - 1]
+        same_label = (t.label == prev.label)
+        idle_gap_s = (t.start_ts_ms - prev.end_ts_ms) / 1000.0
+        bridged = (idle_gap_s <= K_BRIDGE_IDLE_SECONDS)
+        if same_label and bridged:
+            streak_id_for_turn.append(streak_id_for_turn[-1])
+        else:
+            next_streak_id += 1
+            streak_id_for_turn.append(next_streak_id)
+    members: dict[int, list[int]] = {}
+    for i, sid in enumerate(streak_id_for_turn):
+        members.setdefault(sid, []).append(i)
+
+    def _stats(sid: int) -> tuple[float, float, int, str]:
+        idxs = members[sid]
+        sum_s = sum((turns[i].end_ts_ms - turns[i].start_ts_ms) / 1000.0 for i in idxs)
+        span_s = (turns[idxs[-1]].end_ts_ms - turns[idxs[0]].start_ts_ms) / 1000.0
+        return sum_s, span_s, len(idxs), turns[idxs[0]].label
+
     parts: list[str] = [
         f"<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>Session viewer — {html.escape(jsonl_path.name)}</title>"
         f"<style>{_CSS}</style></head><body><div class=\"wrap\">"
     ]
     turn_idx = 0
+    open_sid: int | None = None
     for itv in intervals:
         if itv.label == "Idle":
             d_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+            if open_sid is not None:
+                next_turn_idx = turn_idx
+                if next_turn_idx < len(turns) and streak_id_for_turn[next_turn_idx] != open_sid:
+                    parts.append("</div>")
+                    open_sid = None
             parts.append(
                 f"<div class=\"idle-gap\">⏸ Idle · {_fmt_dur(d_s)} · "
                 f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}</div>"
             )
         else:
+            sid = streak_id_for_turn[turn_idx]
+            if open_sid != sid:
+                if open_sid is not None:
+                    parts.append("</div>")
+                sum_s, span_s, n_turns, label = _stats(sid)
+                cls = label.lower()
+                noun = "turn" if n_turns == 1 else "turns"
+                parts.append(
+                    f"<div class=\"streak-group {cls}\" id=\"streak-{sid}\">"
+                    f"<div class=\"streak-banner\">"
+                    f"<span class=\"badge\">{label} streak</span>"
+                    f"<span class=\"stats\">{n_turns} {noun} · "
+                    f"sum {_fmt_dur(sum_s)} · span {_fmt_dur(span_s)}</span>"
+                    f"</div>"
+                )
+                open_sid = sid
             cls = itv.label.lower()
             d_s = (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
             parts.append(
@@ -264,6 +339,8 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
                 if itv.start_ts_ms <= m.ts_ms <= itv.end_ts_ms:
                     parts.append(_bubble_html(m))
             turn_idx += 1
+    if open_sid is not None:
+        parts.append("</div>")
     parts.append("</div></body></html>")
     out_path.write_text("".join(parts))
     return {"turns": turn_idx, "messages": len(messages), "output": str(out_path)}

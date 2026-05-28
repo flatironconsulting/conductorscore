@@ -6,6 +6,19 @@ from tests.fixtures.synthetic.builder import (
     build_session_with_tool_call,
     build_two_turn_session,
 )
+from tests.fixtures.synthetic.builder import build_three_hitl_then_afk
+
+
+def test_render_session_wraps_streaks_in_streak_group(tmp_path):
+    """Three consecutive HITL turns wrap in ONE streak-group div."""
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert text.count('class="streak-group hitl') == 1
+    assert text.count('class="streak-group afk') == 1
+    assert "3 turns" in text
+    assert "1 turn" in text
 
 
 def test_render_session_emits_one_turn_banner_per_turn(tmp_path):
