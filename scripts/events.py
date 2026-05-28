@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -303,6 +304,49 @@ _AUTO_COMPACT_BANNER = (
     "ran out of context"
 )
 
+# Content-layer synthetic wrappers Claude Code injects into user-role
+# messages without the isMeta / sourceToolUseID flags. Tag names are
+# matched as XML-ish blocks <name>...</name>; everything inside is harness
+# output, not human input. After stripping all known wrappers, if the
+# residue is empty the message is fully synthetic and emits no USER event;
+# if non-empty (e.g. <ide_opened_file>...</ide_opened_file>Real question)
+# we hash/count only the residue.
+_SYNTHETIC_WRAPPER_TAGS = (
+    "ide_opened_file",
+    "ide_selection",
+    "system-reminder",
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "bash-input",
+    "bash-stdout",
+    "bash-stderr",
+    "user-prompt-submit-hook",
+    "task-notification",
+)
+_SYNTHETIC_TAG_RE = re.compile(
+    r"<(" + "|".join(_SYNTHETIC_WRAPPER_TAGS) + r")>.*?</\1>",
+    re.DOTALL,
+)
+_SYNTHETIC_SENTINELS = (
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+)
+
+
+def _strip_synthetic_content(text: str) -> str:
+    """Remove harness-injected wrapper tags + literal sentinels from a
+    user-role message. Returns the human residue (may be empty)."""
+    if not text:
+        return ""
+    stripped = _SYNTHETIC_TAG_RE.sub("", text)
+    for sentinel in _SYNTHETIC_SENTINELS:
+        stripped = stripped.replace(sentinel, "")
+    return stripped.strip()
+
 
 def _select_raw_input(tool_name: str | None, inp: dict) -> dict | None:
     """Return the minimal in-memory ``raw_input`` dict for the detectors,
@@ -504,7 +548,21 @@ def read_events(jsonl_path: Path) -> list[Event]:
         if kind_field == "user" or (message and message.get("role") == "user"):
             content = message.get("content") if message else d.get("content")
             text = _flatten_text(content)
+            # Strip harness-injected wrapper tags (ide_opened_file, task-
+            # notification, command-name scaffolding, etc.) and literal
+            # sentinels ([Request interrupted by user]). What remains is
+            # the actual human prose, if any. See _strip_synthetic_content.
+            text = _strip_synthetic_content(text)
             token_count = _approx_token_count(text)
+            # Claude Code wraps several kinds of system-injected content in
+            # user-role messages: skill content, hook outputs, IDE selection
+            # context, task notifications. These are flagged with
+            # ``isMeta: true`` or carry a ``sourceToolUseID`` linking them
+            # to a preceding tool_use. They are not human actions and must
+            # not emit USER events (would otherwise create false HITL minutes).
+            is_synthetic_injection = bool(
+                d.get("isMeta") or d.get("sourceToolUseID")
+            )
             # Privacy: compute the structured-prompt flag here, while we
             # still have the text in scope; ``text`` itself is discarded
             # at the end of this block.
@@ -516,19 +574,29 @@ def read_events(jsonl_path: Path) -> list[Event]:
             # v0.5 — auto-compaction banner detection. Banner is a fixed
             # known prefix; the raw text never leaves this block.
             is_auto_compaction = bool(text) and (_AUTO_COMPACT_BANNER in text)
-            events.append(
-                Event(
-                    kind=EventKind.USER,
-                    session_id=session_id,
-                    timestamp_ms=ts_ms,
-                    is_sidechain=is_sidechain,
-                    subagent_id=subagent_id,
-                    user_text_hash=_sha16(text) if text else None,
-                    user_text_token_count=token_count,
-                    is_structured_prompt=structured,
-                    is_auto_compaction_marker=is_auto_compaction,
+            # Only emit a USER event when the message carries real user text
+            # AND is not a system-injected wrapper. Anthropic API tool results
+            # come back wrapped in user-role messages with
+            # content = [{"type": "tool_result", ...}] and no text block;
+            # those are not human actions and must not influence HITL
+            # classification (they previously created spurious HITL minutes
+            # immediately after every tool call). Same goes for Claude Code's
+            # synthetic injections (skill content, hooks, IDE context) which
+            # do have text but carry isMeta=true or sourceToolUseID.
+            if text and not is_synthetic_injection:
+                events.append(
+                    Event(
+                        kind=EventKind.USER,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        is_sidechain=is_sidechain,
+                        subagent_id=subagent_id,
+                        user_text_hash=_sha16(text),
+                        user_text_token_count=token_count,
+                        is_structured_prompt=structured,
+                        is_auto_compaction_marker=is_auto_compaction,
+                    )
                 )
-            )
             # Tool result blocks may also appear inside a user-role message
             # (Claude Code convention). Surface each as a TOOL_RESULT event.
             if isinstance(content, list):
@@ -762,6 +830,13 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
                 break
             content = message.get("content") if message else d.get("content")
             text = _flatten_text(content)
+            text = _strip_synthetic_content(text)
+            # Tool-result-only user-role messages and synthetic injections
+            # (isMeta / sourceToolUseID) no longer create USER events (see
+            # read_events). Skip them here too so the pairing stays aligned.
+            is_synthetic = bool(d.get("isMeta") or d.get("sourceToolUseID"))
+            if not text or is_synthetic:
+                continue
             text_map[id(user_events[user_idx])] = text
             user_idx += 1
     # Suppress unused-import warning — keep the late import for parity

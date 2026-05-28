@@ -251,6 +251,14 @@ def test_read_events_assistant_thinking_estimates_tokens(tmp_path):
 
 
 def test_read_events_tool_result_inside_user_message(tmp_path):
+    """Tool-result-only user-role messages must NOT emit a USER event.
+
+    Anthropic API returns tool output wrapped as ``role: "user"`` with
+    content = [{"type": "tool_result", ...}]. That's not a human action;
+    if we surface it as a USER Event, it triggers spurious HITL minutes
+    after every tool call (extending HITL by one minute via the
+    forward-extension rule). Only the TOOL_RESULT event should fire.
+    """
     p = tmp_path / "sess.jsonl"
     _write_raw_jsonl(
         p,
@@ -273,8 +281,7 @@ def test_read_events_tool_result_inside_user_message(tmp_path):
     )
     events = read_events(p)
     kinds = [e.kind for e in events]
-    # User event with no text + tool_result event
-    assert EventKind.USER in kinds
+    assert EventKind.USER not in kinds
     assert EventKind.TOOL_RESULT in kinds
     tr = [e for e in events if e.kind == EventKind.TOOL_RESULT][0]
     assert tr.is_error is True
@@ -414,7 +421,14 @@ def test_read_events_each_kind_round_trips(tmp_path):
     _write_raw_jsonl(
         p,
         [
-            # USER + TOOL_RESULT inside a user message
+            # USER (real text) — must emit USER
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "hello"},
+            },
+            # TOOL_RESULT inside a user-role message — emits TOOL_RESULT only,
+            # NOT USER (the user did not type; this is Anthropic API protocol).
             {
                 "type": "user",
                 "timestamp": "2026-01-01T00:00:00Z",
