@@ -73,3 +73,27 @@ def test_classify_intervals_is_mece(tmp_path):
     assert "HITL" in labels and "AFK" in labels and "Idle" in labels
     total = sum(i.end_ts_ms - i.start_ts_ms for i in intervals)
     assert total == session_end - session_start
+
+
+def test_classify_intervals_no_zero_width_idle_for_adjacent_turns(tmp_path):
+    """When one turn ends exactly when the next begins (e.g., a USER event
+    closes the previous turn and starts the next), no zero-width Idle is emitted."""
+    p = write_jsonl(tmp_path / "adjacent.jsonl", [
+        _user(0, "first"),
+        _assistant_text(10, "Done.", end_turn=True),
+        _user(10, "second"),       # opens at exactly cursor; should NOT trigger Idle
+        _assistant_text(20, "Done again.", end_turn=True),
+    ])
+    events = read_events(p)
+    intervals = classify_intervals(events)
+    # No interval should have zero duration
+    for itv in intervals:
+        assert itv.end_ts_ms > itv.start_ts_ms, f"zero-width interval: {itv}"
+    # No Idle between the two turns (only possibly trailing/leading boundary Idle)
+    labels = [i.label for i in intervals]
+    assert labels.count("Idle") == 0  # session_start==first USER, session_end==last assistant
+
+
+def test_classify_intervals_empty_events_returns_empty():
+    """classify_intervals must return [] for empty input, not raise."""
+    assert classify_intervals([]) == []

@@ -10,7 +10,7 @@ import html
 from pathlib import Path
 
 from scripts.events import read_events
-from scripts.timeline_classifier import classify_intervals, classify_turns
+from scripts.timeline_classifier import classify_intervals
 
 
 _CSS = """
