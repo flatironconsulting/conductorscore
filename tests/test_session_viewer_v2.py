@@ -8,6 +8,7 @@ from tests.fixtures.synthetic.builder import (
 )
 from tests.fixtures.synthetic.builder import build_three_hitl_then_afk
 from tests.fixtures.synthetic.builder import build_session_with_one_subagent
+from tests.fixtures.synthetic.builder import build_session_with_parallel_subagents
 
 
 def test_render_session_wraps_streaks_in_streak_group(tmp_path):
@@ -83,3 +84,16 @@ def test_render_session_inlines_subagent_panel_beside_dispatch(tmp_path):
     assert text.count('class="dispatch-row"') == 1
     assert 'class="subagent-panel"' in text
     assert "find files" in text
+
+
+def test_render_session_groups_parallel_dispatches_into_n_columns(tmp_path):
+    """3 Agent dispatches with overlapping execution → 1 dispatch-row-parallel
+    with 3 dispatch-column divs."""
+    jsonl = build_session_with_parallel_subagents(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert text.count('class="dispatch-row-parallel"') == 1
+    assert text.count('class="dispatch-column"') == 3
+    # When grouped, the 2-column single-dispatch layout should NOT appear
+    assert text.count('class="dispatch-row"') == 0

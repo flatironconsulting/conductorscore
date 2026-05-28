@@ -291,6 +291,16 @@ _CSS += """
 .subagent-panel .bubble { max-width: 100%; font-size: 11px; padding: 6px 10px; }
 """
 
+_CSS += """
+.dispatch-row-parallel {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  gap: 10px; margin: 4px 0; align-items: flex-start;
+}
+.dispatch-column { min-width: 0; }
+.dispatch-column .bubble { max-width: 100%; font-size: 11px; }
+.dispatch-column .subagent-panel { margin-top: 6px; }
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -352,6 +362,79 @@ def _bubble_html(
         f'<span class="meta">· {n} msgs · {_fmt_dur(dur_s)}</span>'
         f"</div>{panel_inner}</div></div>"
     )
+
+
+def _subagent_panel_inner_html(description: str, sub_jsonl_path: Path) -> str:
+    """Render just the <div class="subagent-panel">...</div> for one subagent.
+
+    Used in both single-dispatch (inline via _bubble_html) and parallel
+    (column-based) layouts.
+    """
+    sub_msgs = _parse_subagent_messages(sub_jsonl_path)
+    n = len(sub_msgs)
+    dur_s = (sub_msgs[-1].ts_ms - sub_msgs[0].ts_ms) / 1000.0 if n >= 2 else 0.0
+    inner = "".join(_bubble_html(m, subagent_panels=None) for m in sub_msgs)
+    return (
+        f'<div class="subagent-panel">'
+        f'<div class="subagent-banner">'
+        f'<span class="badge">subagent</span> '
+        f'<span class="desc">{html.escape(description)}</span> '
+        f'<span class="meta">· {n} msgs · {_fmt_dur(dur_s)}</span>'
+        f"</div>{inner}</div>"
+    )
+
+
+def _emit_bubbles(
+    parts: list[str],
+    msgs: list[TimelineMessage],
+    subagent_panels: dict[str, tuple[str, Path]],
+) -> None:
+    """Emit bubbles, grouping consecutive Agent dispatches whose execution
+    intervals overlap into a single multi-column dispatch-row-parallel."""
+    def _is_grouping_target(m: TimelineMessage) -> bool:
+        return (m.role == "assistant_tool"
+                and m.tool_name == "Agent"
+                and m.tool_use_id is not None
+                and m.tool_use_id in subagent_panels)
+
+    def _exec_end(m: TimelineMessage) -> int:
+        if m.end_ts_ms:
+            return m.end_ts_ms
+        panel = subagent_panels.get(m.tool_use_id) if m.tool_use_id else None
+        if panel:
+            sub_msgs = _parse_subagent_messages(panel[1])
+            if sub_msgs:
+                return sub_msgs[-1].ts_ms
+        return m.ts_ms
+
+    i = 0
+    while i < len(msgs):
+        m = msgs[i]
+        if _is_grouping_target(m):
+            group = [m]
+            group_end = _exec_end(m)
+            j = i + 1
+            while j < len(msgs) and _is_grouping_target(msgs[j]):
+                if msgs[j].ts_ms <= group_end:
+                    group.append(msgs[j])
+                    group_end = max(group_end, _exec_end(msgs[j]))
+                    j += 1
+                else:
+                    break
+            if len(group) >= 2:
+                parts.append('<div class="dispatch-row-parallel">')
+                for dm in group:
+                    parts.append('<div class="dispatch-column">')
+                    parts.append(_bubble_html(dm, subagent_panels=None))
+                    panel = subagent_panels.get(dm.tool_use_id)
+                    if panel:
+                        parts.append(_subagent_panel_inner_html(panel[0], panel[1]))
+                    parts.append("</div>")
+                parts.append("</div>")
+                i = j
+                continue
+        parts.append(_bubble_html(m, subagent_panels=subagent_panels))
+        i += 1
 
 
 def render_session(jsonl_path: Path, out_path: Path) -> dict:
@@ -484,9 +567,8 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
                 f"{_fmt_clock(itv.start_ts_ms)} → {_fmt_clock(itv.end_ts_ms)}"
                 f"</div>"
             )
-            for m in messages:
-                if itv.start_ts_ms <= m.ts_ms <= itv.end_ts_ms:
-                    parts.append(_bubble_html(m, subagent_panels=subagent_panels))
+            turn_msgs = [m for m in messages if itv.start_ts_ms <= m.ts_ms <= itv.end_ts_ms]
+            _emit_bubbles(parts, turn_msgs, subagent_panels)
             turn_idx += 1
     if open_sid is not None:
         parts.append("</div>")
