@@ -680,3 +680,17 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
     parts.append("</div></body></html>")
     out_path.write_text("".join(parts))
     return {"turns": turn_idx, "messages": len(messages), "output": str(out_path)}
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Render a Claude Code JSONL transcript to a standalone HTML session viewer."
+    )
+    parser.add_argument("input_jsonl", type=Path, help="Path to the input .jsonl file.")
+    parser.add_argument("output_html", type=Path, help="Path to write the rendered .html file.")
+    args = parser.parse_args()
+    summary = render_session(args.input_jsonl, args.output_html)
+    print(f"{summary['turns']} turns, {summary.get('messages', 0)} messages → {summary['output']}", file=sys.stderr)
