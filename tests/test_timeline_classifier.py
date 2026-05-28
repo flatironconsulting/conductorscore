@@ -50,3 +50,26 @@ def test_classify_turns_ask_user_question_is_soft_boundary(tmp_path):
     assert turns[0].duration_s == pytest.approx(10, abs=0.5)
     assert turns[1].end_reason == "end_turn"
     assert turns[1].duration_s == pytest.approx(20, abs=0.5)
+
+
+from scripts.timeline_classifier import Interval, classify_intervals
+
+
+def test_classify_intervals_is_mece(tmp_path):
+    """The full session timeline is partitioned into HITL + AFK + Idle with no gaps,
+    no overlaps, and total duration matching the session span."""
+    jsonl = build_two_turn_session(tmp_path)
+    events = read_events(jsonl)
+    intervals = classify_intervals(events)
+    session_start = min(e.timestamp_ms for e in events)
+    session_end = max(e.timestamp_ms for e in events)
+    assert intervals[0].start_ts_ms == session_start
+    assert intervals[-1].end_ts_ms == session_end
+    for i in range(1, len(intervals)):
+        assert intervals[i].start_ts_ms == intervals[i - 1].end_ts_ms
+    for itv in intervals:
+        assert itv.label in ("HITL", "AFK", "Idle")
+    labels = [i.label for i in intervals]
+    assert "HITL" in labels and "AFK" in labels and "Idle" in labels
+    total = sum(i.end_ts_ms - i.start_ts_ms for i in intervals)
+    assert total == session_end - session_start

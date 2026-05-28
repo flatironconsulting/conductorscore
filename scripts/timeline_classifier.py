@@ -99,3 +99,35 @@ def classify_turns(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) ->
         )
         for t in turns
     ]
+
+
+@dataclass(frozen=True)
+class Interval:
+    start_ts_ms: int
+    end_ts_ms: int
+    label: str  # 'HITL' | 'AFK' | 'Idle'
+
+
+def classify_intervals(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) -> list[Interval]:
+    """Partition the session into ``{HITL, AFK, Idle}`` intervals.
+
+    HITL and AFK intervals come from ``classify_turns``. Idle intervals fill
+    the gaps between turns (including before the first turn and after the
+    last). The output is MECE: contiguous, non-overlapping, summing to the
+    full session span.
+    """
+    if not events:
+        return []
+    turns = classify_turns(events, k_turn_seconds=k_turn_seconds)
+    session_start = min(e.timestamp_ms for e in events)
+    session_end = max(e.timestamp_ms for e in events)
+    intervals: list[Interval] = []
+    cursor = session_start
+    for t in turns:
+        if t.start_ts_ms > cursor:
+            intervals.append(Interval(cursor, t.start_ts_ms, "Idle"))
+        intervals.append(Interval(t.start_ts_ms, t.end_ts_ms, t.label))
+        cursor = t.end_ts_ms
+    if cursor < session_end:
+        intervals.append(Interval(cursor, session_end, "Idle"))
+    return intervals
