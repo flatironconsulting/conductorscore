@@ -161,3 +161,51 @@ def build_session_with_one_subagent(tmp_path: Path) -> Path:
         "toolUseId": "toolu_a1",
     }))
     return main_path
+
+
+def build_session_with_parallel_subagents(tmp_path: Path) -> Path:
+    """Main session with 3 Agent dispatches fired 2 sec apart, all overlapping
+    in execution. Each has its own subagent transcript file."""
+    main_path = tmp_path / "parallel_subs.jsonl"
+    write_jsonl(main_path, [
+        _user(0, "do three things"),
+        _assistant_tool(2, "Agent", "toolu_p1", {"description": "thing 1"}),
+        _assistant_tool(4, "Agent", "toolu_p2", {"description": "thing 2"}),
+        _assistant_tool(6, "Agent", "toolu_p3", {"description": "thing 3"}),
+        _tool_result(10, "toolu_p1"),
+        _tool_result(11, "toolu_p2"),
+        _tool_result(12, "toolu_p3"),
+        _assistant_text(15, "All done.", end_turn=True),
+    ])
+    sub_dir = tmp_path / main_path.stem / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    for i, (tid, desc, start) in enumerate([
+        ("toolu_p1", "thing 1", 2),
+        ("toolu_p2", "thing 2", 4),
+        ("toolu_p3", "thing 3", 6),
+    ]):
+        end = 10 + i
+        sid = f"agent-{tid}"
+        sub_path = sub_dir / f"{sid}.jsonl"
+        meta_path = sub_dir / f"{sid}.meta.json"
+        sub_path.write_text("\n".join([
+            json.dumps({
+                "type": "user", "timestamp": _ts(start + 1), "isSidechain": True,
+                "message": {"role": "user", "content": f"do {desc}"},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": _ts(end - 1), "isSidechain": True,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"{desc} done"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 2, "output_tokens": 5},
+                },
+            }),
+        ]) + "\n")
+        meta_path.write_text(json.dumps({
+            "agentType": "general-purpose",
+            "description": desc,
+            "toolUseId": tid,
+        }))
+    return main_path
