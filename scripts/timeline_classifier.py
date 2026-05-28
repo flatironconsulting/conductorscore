@@ -224,9 +224,17 @@ def parallel_leverage_seconds(
     jsonl_path: Path,
     k_turn_seconds: int = K_TURN_SECONDS,
 ) -> float:
-    """Per-second intersection of each subagent's active interval with each AFK turn.
+    """Extra concurrent subagent thread-seconds during AFK turns.
 
-    Subagents discovered from the ``<session>/subagents/`` subdirectory.
+    At each instant when ``N`` subagents are concurrently active during an
+    AFK turn, count ``N`` thread-seconds when ``N >= 2``; count ``0`` when
+    ``N <= 1`` (a single subagent represents work the main thread would have
+    done while waiting — no parallelism boost).
+
+    Examples:
+      - 1 subagent active alone: extra = 0 (sequential)
+      - 2 subagents overlapping for 10 s: extra = 20 thread-seconds
+      - 3 subagents overlapping for 100 s: extra = 300 thread-seconds
     """
     from scripts.events import load_subagent_panels
     events = read_events(jsonl_path)
@@ -235,19 +243,38 @@ def parallel_leverage_seconds(
     if not afk_turns:
         return 0.0
     panels = load_subagent_panels(jsonl_path)
-    total = 0.0
+    sub_intervals: list[tuple[int, int]] = []
     for _tool_use_id, (_description, sub_jsonl) in panels.items():
         sub_events = read_events(sub_jsonl)
         if not sub_events:
             continue
-        sub_start = min(e.timestamp_ms for e in sub_events)
-        sub_end = max(e.timestamp_ms for e in sub_events)
-        for turn in afk_turns:
-            overlap_start = max(sub_start, turn.start_ts_ms)
-            overlap_end = min(sub_end, turn.end_ts_ms)
-            if overlap_end > overlap_start:
-                total += (overlap_end - overlap_start) / 1000.0
-    return total
+        sub_intervals.append((
+            min(e.timestamp_ms for e in sub_events),
+            max(e.timestamp_ms for e in sub_events),
+        ))
+    if not sub_intervals:
+        return 0.0
+    # Event-driven sweep: at each subagent-interval endpoint, the concurrency
+    # count changes. Between endpoints, the count is constant — multiply by
+    # (endpoint - prev_endpoint) and the AFK-turn overlap to get thread-seconds.
+    endpoints: list[tuple[int, int]] = []
+    for s, e in sub_intervals:
+        endpoints.append((s, +1))
+        endpoints.append((e, -1))
+    endpoints.sort()
+    total_thread_ms = 0
+    n_active = 0
+    prev_t: int | None = None
+    for t, delta in endpoints:
+        if prev_t is not None and n_active >= 2:
+            for turn in afk_turns:
+                overlap_start = max(prev_t, turn.start_ts_ms)
+                overlap_end = min(t, turn.end_ts_ms)
+                if overlap_end > overlap_start:
+                    total_thread_ms += (overlap_end - overlap_start) * n_active
+        n_active += delta
+        prev_t = t
+    return total_thread_ms / 1000.0
 
 
 def total_leverage_seconds(

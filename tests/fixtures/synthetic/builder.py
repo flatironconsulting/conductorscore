@@ -163,6 +163,60 @@ def build_session_with_one_subagent(tmp_path: Path) -> Path:
     return main_path
 
 
+def build_session_with_parallel_subagents_in_afk(tmp_path: Path) -> Path:
+    """Three Agent dispatches at t=2/4/6, results at t=400/410/420.
+
+    The turn is 420 s > 300 s → AFK. Subagents overlap heavily:
+      - t in [2, 4): 1 sub active (extra = 0)
+      - t in [4, 6): 2 subs active (extra = 2 per sec)
+      - t in [6, 400): 3 subs active (extra = 3 per sec)
+      - t in [400, 410): 2 subs active (extra = 2 per sec)
+      - t in [410, 420): 1 sub active (extra = 0)
+
+    Expected parallel_leverage_seconds = 0*2 + 2*2 + 3*394 + 2*10 + 0*10 = 1206 s.
+    """
+    main_path = tmp_path / "parallel_afk.jsonl"
+    write_jsonl(main_path, [
+        _user(0, "do three big things"),
+        _assistant_tool(2, "Agent", "toolu_pa1", {"description": "big 1"}),
+        _assistant_tool(4, "Agent", "toolu_pa2", {"description": "big 2"}),
+        _assistant_tool(6, "Agent", "toolu_pa3", {"description": "big 3"}),
+        _tool_result(400, "toolu_pa1"),
+        _tool_result(410, "toolu_pa2"),
+        _tool_result(420, "toolu_pa3"),
+        _assistant_text(425, "All done.", end_turn=True),
+    ])
+    sub_dir = tmp_path / main_path.stem / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    for tid, desc, start, end in [
+        ("toolu_pa1", "big 1", 2, 400),
+        ("toolu_pa2", "big 2", 4, 410),
+        ("toolu_pa3", "big 3", 6, 420),
+    ]:
+        sid = f"agent-{tid}"
+        (sub_dir / f"{sid}.jsonl").write_text("\n".join([
+            json.dumps({
+                "type": "user", "timestamp": _ts(start), "isSidechain": True,
+                "message": {"role": "user", "content": f"do {desc}"},
+            }),
+            json.dumps({
+                "type": "assistant", "timestamp": _ts(end), "isSidechain": True,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"{desc} done"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 2, "output_tokens": 5},
+                },
+            }),
+        ]) + "\n")
+        (sub_dir / f"{sid}.meta.json").write_text(json.dumps({
+            "agentType": "general-purpose",
+            "description": desc,
+            "toolUseId": tid,
+        }))
+    return main_path
+
+
 def build_session_with_parallel_subagents(tmp_path: Path) -> Path:
     """Main session with 3 Agent dispatches fired 2 sec apart, all overlapping
     in execution. Each has its own subagent transcript file."""

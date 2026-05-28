@@ -177,6 +177,65 @@ def test_parallel_leverage_intersects_subagent_with_afk(tmp_path):
     assert parallel_leverage_seconds(main) == 0.0
 
 
+def test_parallel_leverage_counts_concurrent_subagents_in_afk(tmp_path):
+    """When N >= 2 subagents are concurrently active in an AFK turn,
+    each second contributes N thread-seconds (extra concurrent threads
+    beyond the baseline of 1). Single-subagent windows contribute 0
+    (sequential — main was waiting)."""
+    from tests.fixtures.synthetic.builder import build_session_with_parallel_subagents_in_afk
+    main = build_session_with_parallel_subagents_in_afk(tmp_path)
+    parallel_s = parallel_leverage_seconds(main)
+    # Worked example:
+    #   [2,4):  N=1 → extra=0  for 2 s = 0
+    #   [4,6):  N=2 → extra=2  for 2 s = 4
+    #   [6,400): N=3 → extra=3 for 394 s = 1182
+    #   [400,410): N=2 → extra=2 for 10 s = 20
+    #   [410,420): N=1 → extra=0 for 10 s = 0
+    # Total = 1206 s.
+    assert parallel_s == pytest.approx(1206, abs=2)
+
+
+def test_parallel_leverage_sequential_subagent_is_zero(tmp_path):
+    """A single subagent running while the main agent waits for it produces
+    zero parallel leverage — no extra work was done vs a single-threaded agent."""
+    # Build a session with one Agent dispatch in an AFK turn (single, sequential).
+    main_path = tmp_path / "seq_sub.jsonl"
+    p = write_jsonl(main_path, [
+        _user(0, "do one big thing"),
+        _assistant_tool(5, "Agent", "toolu_s1", {"description": "big"}),
+        _tool_result(700, "toolu_s1"),
+        _assistant_text(710, "done", end_turn=True),
+    ])
+    sub_dir = tmp_path / main_path.stem / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    sid = "agent-toolu_s1"
+    import json
+    from tests.fixtures.synthetic.builder import _ts
+    (sub_dir / f"{sid}.jsonl").write_text("\n".join([
+        json.dumps({
+            "type": "user", "timestamp": _ts(6), "isSidechain": True,
+            "message": {"role": "user", "content": "do big"},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": _ts(699), "isSidechain": True,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "big done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 2, "output_tokens": 5},
+            },
+        }),
+    ]) + "\n")
+    (sub_dir / f"{sid}.meta.json").write_text(json.dumps({
+        "agentType": "general-purpose",
+        "description": "big",
+        "toolUseId": "toolu_s1",
+    }))
+    # Turn is 710 s > 300 → AFK. Subagent runs alone for entire turn (no overlap).
+    # New rule: single-subagent windows count 0.
+    assert parallel_leverage_seconds(p) == 0.0
+
+
 def test_total_leverage_sums(tmp_path):
     """total_leverage = (AFK + parallel) / HITL (in seconds)."""
     jsonl = build_three_hitl_then_afk(tmp_path)
