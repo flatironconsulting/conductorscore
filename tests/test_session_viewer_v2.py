@@ -53,3 +53,20 @@ def test_render_session_emits_three_bubble_types(tmp_path):
     # No purple. The agent-tool color is slate blue (#1e293b), not purple.
     assert "#a78bfa" not in text  # the old purple
     assert "purple" not in text.lower()
+
+
+def test_render_session_emits_session_card_with_afk_jump(tmp_path):
+    """Header has the 4-section card and a jump link to the longest AFK streak."""
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert 'class="session-card"' in text
+    assert text.count('class="card-section"') == 4
+    for title in ("Session", "Activity", "Tokens", "Jump to"):
+        assert title in text
+    assert 'class="jump-link"' in text
+    assert '#streak-' in text
+    assert 'class="summary-table"' in text
+    for label in ("HITL", "AFK", "Idle", "Wallclock", "Longest streak"):
+        assert label in text

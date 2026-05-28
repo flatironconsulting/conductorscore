@@ -16,6 +16,7 @@ from scripts.timeline_classifier import (
     classify_intervals,
     classify_turns,
     derive_streaks,
+    aggregates,
     K_BRIDGE_IDLE_SECONDS,
 )
 
@@ -225,6 +226,41 @@ _CSS += """
 .streak-banner .stats { color: var(--text); }
 """
 
+_CSS += """
+.session-card {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+  padding: 16px 18px; margin: 14px 0;
+  border: 1px solid var(--rule); border-radius: 8px;
+  background: rgba(255,255,255,0.02);
+  font-size: 12px;
+}
+.card-section { display: flex; flex-direction: column; gap: 6px; }
+.card-section-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.10em;
+  color: var(--muted); font-weight: 600; margin-bottom: 2px;
+}
+.card-kv { display: flex; flex-direction: column; gap: 1px; }
+.card-kv .k { font-size: 11px; color: var(--muted); }
+.card-kv .v { font-size: 13px; color: var(--text); word-break: break-all; }
+.card-kv .v .muted { color: var(--muted); font-size: 11px; }
+.jump-link { color: var(--afk); text-decoration: none; font-size: 13px; font-weight: 600; padding: 4px 0; }
+.jump-link:hover { text-decoration: underline; }
+.jump-link.muted { color: var(--muted); font-weight: 500; }
+.summary-table {
+  border-collapse: collapse; margin: 12px 0; width: 100%;
+  font-size: 13px; background: rgba(255,255,255,0.02);
+  border: 1px solid var(--rule); border-radius: 8px; overflow: hidden;
+}
+.summary-table th, .summary-table td { padding: 8px 14px; text-align: right; border-bottom: 1px solid var(--rule); }
+.summary-table thead th { background: rgba(255,255,255,0.03); color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.summary-table thead th.hitl { color: var(--hitl); }
+.summary-table thead th.afk  { color: var(--afk); }
+.summary-table thead th.idle { color: var(--muted); }
+.summary-table tbody th { text-align: left; color: var(--text); font-weight: 500; }
+.summary-table tbody tr:last-child td, .summary-table tbody tr:last-child th { border-bottom: 0; }
+.summary-table td.muted { color: var(--muted); }
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -236,6 +272,10 @@ def _fmt_dur(seconds: float) -> str:
     if seconds < 3600:
         return f"{seconds / 60:.1f} min"
     return f"{seconds / 3600:.1f} hr"
+
+
+def _fmt_date(ts_ms: int) -> str:
+    return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M")
 
 
 def _bubble_html(msg: TimelineMessage) -> str:
@@ -290,11 +330,64 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
         span_s = (turns[idxs[-1]].end_ts_ms - turns[idxs[0]].start_ts_ms) / 1000.0
         return sum_s, span_s, len(idxs), turns[idxs[0]].label
 
+    longest_afk_streak_id: int | None = None
+    best_afk_sum = 0.0
+    for sid, idxs in members.items():
+        if not idxs or turns[idxs[0]].label != "AFK":
+            continue
+        s = sum((turns[i].end_ts_ms - turns[i].start_ts_ms) / 1000.0 for i in idxs)
+        if s > best_afk_sum:
+            best_afk_sum = s
+            longest_afk_streak_id = sid
+
+    agg = aggregates(events)
+    session_start = min(e.timestamp_ms for e in events) if events else 0
+    jump_link_html = (
+        f"<a class=\"jump-link\" href=\"#streak-{longest_afk_streak_id}\">"
+        f"↓ Longest AFK streak ({_fmt_dur(agg['longest_afk_streak_s'])})</a>"
+        if longest_afk_streak_id is not None else
+        "<span class=\"jump-link muted\">no AFK streak in this session</span>"
+    )
+
     parts: list[str] = [
         f"<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>Session viewer — {html.escape(jsonl_path.name)}</title>"
         f"<style>{_CSS}</style></head><body><div class=\"wrap\">"
     ]
+    card = f"""
+<div class="session-card">
+  <div class="card-section">
+    <div class="card-section-title">Session</div>
+    <div class="card-kv"><span class="k">jsonl</span><span class="v">{html.escape(jsonl_path.name)}</span></div>
+    <div class="card-kv"><span class="k">start</span><span class="v">{_fmt_date(session_start)}</span></div>
+    <div class="card-kv"><span class="k">duration</span><span class="v">{_fmt_dur(agg['session_s'])}</span></div>
+  </div>
+  <div class="card-section">
+    <div class="card-section-title">Activity</div>
+    <div class="card-kv"><span class="k">turns</span><span class="v">{agg['n_turns']} <span class="muted">({agg['n_hitl_turns']} HITL · {agg['n_afk_turns']} AFK)</span></span></div>
+    <div class="card-kv"><span class="k">messages</span><span class="v">{len(messages)}</span></div>
+    <div class="card-kv"><span class="k">subagent tracks</span><span class="v">0</span></div>
+  </div>
+  <div class="card-section">
+    <div class="card-section-title">Tokens</div>
+    <div class="card-kv"><span class="k">cache hit</span><span class="v">0 <span class="muted">cheap input</span></span></div>
+    <div class="card-kv"><span class="k">cache miss</span><span class="v">0 <span class="muted">full-price</span></span></div>
+    <div class="card-kv"><span class="k">subagent share</span><span class="v">0.0% <span class="muted">of output</span></span></div>
+  </div>
+  <div class="card-section">
+    <div class="card-section-title">Jump to</div>
+    <div class="card-kv">{jump_link_html}</div>
+  </div>
+</div>
+<table class="summary-table">
+  <thead><tr><th></th><th class="hitl">HITL</th><th class="afk">AFK</th><th class="idle">Idle</th></tr></thead>
+  <tbody>
+    <tr><th>Wallclock</th><td>{_fmt_dur(agg['hitl_s'])}</td><td>{_fmt_dur(agg['afk_s'])}</td><td>{_fmt_dur(agg['idle_s'])}</td></tr>
+    <tr><th>Longest streak</th><td>{_fmt_dur(agg['longest_hitl_streak_s'])}</td><td>{_fmt_dur(agg['longest_afk_streak_s'])}</td><td class="muted">—</td></tr>
+  </tbody>
+</table>
+"""
+    parts.append(card)
     turn_idx = 0
     open_sid: int | None = None
     for itv in intervals:
