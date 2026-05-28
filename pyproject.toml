@@ -14,7 +14,7 @@ dependencies = []  # stdlib only — privacy + portability
 dev = ["pytest>=8", "pytest-cov>=5", "pytest-httpserver>=1.0"]
 
 [tool.setuptools.packages.find]
-exclude = ["plans*", "notebooks*", "tests*", "docs*"]
+exclude = ["tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

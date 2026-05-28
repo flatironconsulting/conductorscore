@@ -12,10 +12,6 @@ htmlcov/
 
 # Shared workspace resources (symlinked from ../)
 /.mcp.json
-/plans
-
-#docs
-docs/
 
 # Git worktrees (used by autonomous plan execution)
 .worktrees/

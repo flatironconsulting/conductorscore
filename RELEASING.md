@@ -7,5 +7,5 @@ Schema bumps are coordinated 2-PR rollouts (client first, server follows).
 3. Commit + push main.
 4. Tag `vX.Y.Z`: `git tag -a vX.Y.Z -m "..."`; `git push --tags`.
 5. `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`.
-6. Run `scripts/verify-release-urls.sh vX.Y.Z`.
+6. Run `../server/scripts/client/verify-release-urls.sh vX.Y.Z`.
 7. Server: update vendored `WIRE_FORMAT.md` if it changed; extend Zod accept-list to the new version.
