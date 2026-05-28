@@ -97,3 +97,16 @@ def test_render_session_groups_parallel_dispatches_into_n_columns(tmp_path):
     assert text.count('class="dispatch-column"') == 3
     # When grouped, the 2-column single-dispatch layout should NOT appear
     assert text.count('class="dispatch-row"') == 0
+
+
+def test_render_session_emits_two_summary_tables_with_leverage(tmp_path):
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert text.count('class="summary-table"') == 2
+    for row in ("Wallclock", "Parallel", "Total", "Longest streak"):
+        assert row in text
+    assert "Leverage (AFK / HITL)" in text
+    for row in ("Main (wallclock)", "Subagents (parallel)", "Total (main + subagents)"):
+        assert row in text

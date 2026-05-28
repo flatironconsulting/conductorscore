@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,10 @@ from scripts.timeline_classifier import (
     classify_turns,
     derive_streaks,
     aggregates,
+    wallclock_leverage,
+    parallel_leverage_seconds,
+    total_leverage_seconds,
+    tokens_by_label,
     K_BRIDGE_IDLE_SECONDS,
 )
 
@@ -488,6 +493,28 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
         "<span class=\"jump-link muted\">no AFK streak in this session</span>"
     )
 
+    main_tokens, sub_tokens = tokens_by_label(jsonl_path)
+    total_tokens = {
+        l: {k: main_tokens[l][k] + sub_tokens[l][k] for k in main_tokens[l]}
+        for l in ("HITL", "AFK", "Idle")
+    }
+    sum_all = lambda d, key: d["HITL"][key] + d["AFK"][key] + d["Idle"][key]
+    grand_main = {k: sum_all(main_tokens, k) for k in ("input", "output", "cache_read", "cache_create")}
+    grand_sub = {k: sum_all(sub_tokens, k) for k in ("input", "output", "cache_read", "cache_create")}
+    grand = {k: grand_main[k] + grand_sub[k] for k in grand_main}
+
+    wlev = wallclock_leverage(events)
+    plev_s = parallel_leverage_seconds(jsonl_path)
+    plev = plev_s / agg["hitl_s"] if agg["hitl_s"] > 0 else float("inf")
+    tlev = total_leverage_seconds(jsonl_path, events)
+
+    def _fmt_lev(x: float) -> str:
+        if math.isinf(x):
+            return "∞"
+        return f"{x:.2f}×"
+
+    sub_share = (grand_sub["output"] / grand["output"] * 100) if grand["output"] else 0.0
+
     parts: list[str] = [
         f"<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>Session viewer — {html.escape(jsonl_path.name)}</title>"
@@ -509,24 +536,41 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
   </div>
   <div class="card-section">
     <div class="card-section-title">Tokens</div>
-    <div class="card-kv"><span class="k">cache hit</span><span class="v">0 <span class="muted">cheap input</span></span></div>
-    <div class="card-kv"><span class="k">cache miss</span><span class="v">0 <span class="muted">full-price</span></span></div>
-    <div class="card-kv"><span class="k">subagent share</span><span class="v">0.0% <span class="muted">of output</span></span></div>
+    <div class="card-kv"><span class="k">cache hit</span><span class="v">{grand['cache_read']:,} <span class="muted">cheap input</span></span></div>
+    <div class="card-kv"><span class="k">cache miss</span><span class="v">{grand['cache_create']:,} <span class="muted">full-price</span></span></div>
+    <div class="card-kv"><span class="k">subagent share</span><span class="v">{sub_share:.1f}% <span class="muted">of output</span></span></div>
   </div>
   <div class="card-section">
     <div class="card-section-title">Jump to</div>
     <div class="card-kv">{jump_link_html}</div>
   </div>
 </div>
+"""
+    time_table_html = f"""
+<table class="summary-table">
+  <thead><tr><th></th><th class="hitl">HITL</th><th class="afk">AFK</th><th class="idle">Idle</th><th>Leverage (AFK / HITL)</th></tr></thead>
+  <tbody>
+    <tr><th>Wallclock</th><td>{_fmt_dur(agg['hitl_s'])}</td><td>{_fmt_dur(agg['afk_s'])}</td><td>{_fmt_dur(agg['idle_s'])}</td><td>{_fmt_lev(wlev)}</td></tr>
+    <tr><th>Parallel (subagents only)</th><td class="muted">—</td><td>{_fmt_dur(plev_s)}</td><td class="muted">—</td><td>{_fmt_lev(plev)}</td></tr>
+    <tr><th>Total (main + subagents)</th><td class="muted">—</td><td>{_fmt_dur(agg['afk_s'] + plev_s)}</td><td class="muted">—</td><td>{_fmt_lev(tlev)}</td></tr>
+    <tr><th>Longest streak</th><td>{_fmt_dur(agg['longest_hitl_streak_s'])}</td><td>{_fmt_dur(agg['longest_afk_streak_s'])}</td><td class="muted">—</td><td class="muted">—</td></tr>
+  </tbody>
+</table>
+"""
+    tokens_table_html = f"""
+<h2 style="font-size: 14px; margin: 16px 0 4px 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Output tokens by turn label</h2>
 <table class="summary-table">
   <thead><tr><th></th><th class="hitl">HITL</th><th class="afk">AFK</th><th class="idle">Idle</th></tr></thead>
   <tbody>
-    <tr><th>Wallclock</th><td>{_fmt_dur(agg['hitl_s'])}</td><td>{_fmt_dur(agg['afk_s'])}</td><td>{_fmt_dur(agg['idle_s'])}</td></tr>
-    <tr><th>Longest streak</th><td>{_fmt_dur(agg['longest_hitl_streak_s'])}</td><td>{_fmt_dur(agg['longest_afk_streak_s'])}</td><td class="muted">—</td></tr>
+    <tr><th>Main (wallclock)</th><td>{main_tokens['HITL']['output']:,}</td><td>{main_tokens['AFK']['output']:,}</td><td>{main_tokens['Idle']['output']:,}</td></tr>
+    <tr><th>Subagents (parallel)</th><td>{sub_tokens['HITL']['output']:,}</td><td>{sub_tokens['AFK']['output']:,}</td><td>{sub_tokens['Idle']['output']:,}</td></tr>
+    <tr><th>Total (main + subagents)</th><td>{total_tokens['HITL']['output']:,}</td><td>{total_tokens['AFK']['output']:,}</td><td>{total_tokens['Idle']['output']:,}</td></tr>
   </tbody>
 </table>
 """
     parts.append(card)
+    parts.append(time_table_html)
+    parts.append(tokens_table_html)
     turn_idx = 0
     open_sid: int | None = None
     for itv in intervals:
