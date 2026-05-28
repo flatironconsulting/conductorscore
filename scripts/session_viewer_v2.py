@@ -76,6 +76,23 @@ def _tool_input_summary(inp) -> str:
     return "  ".join(parts)
 
 
+def _extract_tool_result_text(block: dict) -> str:
+    """Extract a printable string from a tool_result block. ``content`` may
+    be a string OR a list of text-typed sub-blocks."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for sub in content:
+            if isinstance(sub, dict) and sub.get("type") == "text":
+                t = sub.get("text")
+                if isinstance(t, str):
+                    out.append(t)
+        return " ".join(out)
+    return ""
+
+
 def _parse_ts_ms(d: dict) -> int | None:
     ts = d.get("timestamp")
     if not isinstance(ts, str):
@@ -89,7 +106,44 @@ def _parse_ts_ms(d: dict) -> int | None:
 
 
 def parse_messages(jsonl_path: Path, skip_sidechain: bool = True) -> list[TimelineMessage]:
-    """Parse a JSONL into chronological bubble messages (main thread only)."""
+    """Parse a JSONL into chronological bubble messages.
+
+    First pass: collect AskUserQuestion tool_use IDs so we can render the
+    user's answer (the matching tool_result) as a USER bubble.
+    Second pass: emit messages in chronological order.
+    """
+    # First pass: AskUserQuestion tool_use IDs.
+    auq_ids: set[str] = set()
+    with jsonl_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if skip_sidechain and d.get("isSidechain"):
+                continue
+            msg = d.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_use"
+                    and b.get("name") == "AskUserQuestion"
+                ):
+                    tid = b.get("id")
+                    if isinstance(tid, str):
+                        auq_ids.add(tid)
+
+    # Second pass: emit messages.
     messages: list[TimelineMessage] = []
     pending: dict[str, int] = {}  # tool_use_id -> msg index
     with jsonl_path.open() as f:
@@ -121,6 +175,13 @@ def parse_messages(jsonl_path: Path, skip_sidechain: bool = True) -> list[Timeli
                             tid = b.get("tool_use_id")
                             if isinstance(tid, str) and tid in pending:
                                 messages[pending.pop(tid)].end_ts_ms = ts_ms
+                            # AskUserQuestion answer → render as USER bubble
+                            if isinstance(tid, str) and tid in auq_ids:
+                                answer = _extract_tool_result_text(b)
+                                if answer:
+                                    messages.append(TimelineMessage(
+                                        ts_ms=ts_ms, role="user",
+                                        text=_truncate(answer)))
                 text = _flatten_text(content)
                 if text and _AUTO_COMPACT_BANNER not in text and not is_synthetic:
                     messages.append(TimelineMessage(
