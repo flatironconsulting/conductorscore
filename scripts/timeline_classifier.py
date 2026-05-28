@@ -52,55 +52,69 @@ def _is_ask_user_question_result(e: Event, auq_tool_use_ids: set[str]) -> bool:
 
 
 def classify_turns(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) -> list[Turn]:
+    """Segment events into turns and label each HITL or AFK.
+
+    Turns are opened by:
+      1. A real USER event,
+      2. The tool_result of an AskUserQuestion dispatch (soft-USER), or
+      3. The first ASSISTANT_* event when no turn is open (continuation).
+    Turns close the same way regardless of how they opened: at end_turn,
+    next USER/soft-USER, next AskUserQuestion dispatch, or session end.
+
+    Labeling: turns opened by a human event are HITL when duration ≤ k_turn_seconds,
+    else AFK. Continuation turns are AFK regardless of duration (no USER signal
+    means we cannot presume the human is at the keyboard).
+    """
     sorted_events = sorted(events, key=lambda e: e.timestamp_ms)
     auq_ids: set[str] = {
         e.tool_use_id for e in sorted_events
         if _is_ask_user_question_dispatch(e) and e.tool_use_id is not None
     }
-    turns: list[Turn] = []
+    raw_turns: list[tuple[int, int, str, bool]] = []  # (start, end, reason, is_continuation)
     current_start_ms: int | None = None
+    current_is_continuation = False
     last_ts_ms: int | None = None
     for e in sorted_events:
         last_ts_ms = e.timestamp_ms
         is_human = _is_human_event(e) or _is_ask_user_question_result(e, auq_ids)
         is_auq_dispatch = _is_ask_user_question_dispatch(e)
+        is_assistant_event = e.kind in (
+            EventKind.ASSISTANT_TEXT,
+            EventKind.ASSISTANT_TOOL,
+            EventKind.ASSISTANT_THINKING,
+        )
         if is_human:
             if current_start_ms is not None:
-                turns.append(Turn(
-                    start_ts_ms=current_start_ms,
-                    end_ts_ms=e.timestamp_ms,
-                    end_reason="next_user",
-                ))
+                raw_turns.append((current_start_ms, e.timestamp_ms, "next_user", current_is_continuation))
             current_start_ms = e.timestamp_ms
-        elif current_start_ms is not None and is_auq_dispatch:
-            turns.append(Turn(
-                start_ts_ms=current_start_ms,
-                end_ts_ms=e.timestamp_ms,
-                end_reason="ask_user_question",
-            ))
+            current_is_continuation = False
+            continue
+        # Open a continuation turn if no turn is currently open and we see assistant activity.
+        # Do this BEFORE the close-checks so an end_turn-bearing assistant event can both
+        # open and close a (zero-or-positive-duration) continuation turn in one iteration.
+        if current_start_ms is None and is_assistant_event:
+            current_start_ms = e.timestamp_ms
+            current_is_continuation = True
+        if current_start_ms is not None and is_auq_dispatch:
+            raw_turns.append((current_start_ms, e.timestamp_ms, "ask_user_question", current_is_continuation))
             current_start_ms = None
+            current_is_continuation = False
         elif current_start_ms is not None and _is_end_turn_event(e):
-            turns.append(Turn(
-                start_ts_ms=current_start_ms,
-                end_ts_ms=e.timestamp_ms,
-                end_reason="end_turn",
-            ))
+            raw_turns.append((current_start_ms, e.timestamp_ms, "end_turn", current_is_continuation))
             current_start_ms = None
+            current_is_continuation = False
     if current_start_ms is not None and last_ts_ms is not None and last_ts_ms > current_start_ms:
-        turns.append(Turn(
-            start_ts_ms=current_start_ms,
-            end_ts_ms=last_ts_ms,
-            end_reason="session_end",
-        ))
+        raw_turns.append((current_start_ms, last_ts_ms, "session_end", current_is_continuation))
     threshold_ms = k_turn_seconds * 1000
     return [
         Turn(
-            start_ts_ms=t.start_ts_ms,
-            end_ts_ms=t.end_ts_ms,
-            end_reason=t.end_reason,
-            label="HITL" if (t.end_ts_ms - t.start_ts_ms) <= threshold_ms else "AFK",
+            start_ts_ms=s,
+            end_ts_ms=ev,
+            end_reason=r,
+            label="AFK" if cont else ("HITL" if (ev - s) <= threshold_ms else "AFK"),
+            is_continuation=cont,
         )
-        for t in turns
+        for s, ev, r, cont in raw_turns
     ]
 
 

@@ -198,3 +198,69 @@ def test_tokens_by_label_buckets_main_and_subagents(tmp_path):
     assert main_by_label["AFK"]["output"] == 0
     assert sub_by_label["HITL"]["output"] > 0
     assert sub_by_label["AFK"]["output"] == 0
+
+
+def test_classify_turns_opens_continuation_after_end_turn(tmp_path):
+    """After end_turn with no USER between, the next assistant event opens
+    a continuation turn that is always labeled AFK."""
+    p = write_jsonl(tmp_path / "continuation.jsonl", [
+        _user(0, "first"),
+        _assistant_text(10, "Done.", end_turn=True),
+        # No USER follows — assistant continues autonomously
+        _assistant_text(15, "Actually let me also..."),
+        _assistant_tool(20, "Bash", "toolu_b1", {"command": "ls"}),
+        _tool_result(25, "toolu_b1", content="ok"),
+        _assistant_text(40, "Now I'm really done.", end_turn=True),
+    ])
+    events = read_events(p)
+    turns = classify_turns(events)
+    assert len(turns) == 2
+    # Turn 1: USER-anchored, short → HITL
+    assert turns[0].label == "HITL"
+    assert turns[0].is_continuation is False
+    assert turns[0].end_reason == "end_turn"
+    # Turn 2: continuation (opens at the first post-end_turn assistant event at t=15)
+    assert turns[1].is_continuation is True
+    assert turns[1].label == "AFK"  # Always AFK regardless of duration
+    assert turns[1].duration_s == pytest.approx(25, abs=0.5)  # 15 → 40
+    assert turns[1].end_reason == "end_turn"
+
+
+def test_classify_turns_continuation_at_session_start(tmp_path):
+    """If a session starts with assistant activity (e.g., loaded-context
+    continuation) before any USER, the first turn is a continuation AFK."""
+    p = write_jsonl(tmp_path / "session_start_continuation.jsonl", [
+        _assistant_text(0, "Continuing from previous context."),
+        _assistant_text(20, "All set.", end_turn=True),
+        _user(30, "thanks"),
+        _assistant_text(40, "Welcome.", end_turn=True),
+    ])
+    events = read_events(p)
+    turns = classify_turns(events)
+    assert len(turns) == 2
+    assert turns[0].is_continuation is True
+    assert turns[0].label == "AFK"
+    assert turns[1].is_continuation is False
+    assert turns[1].label == "HITL"
+
+
+def test_classify_turns_short_continuation_still_labeled_afk(tmp_path):
+    """Even a < 5-second continuation turn is AFK (no USER signal).
+
+    Sequence: USER@0 → end_turn@5 → assistant_text(end_turn=True)@6. The continuation
+    turn opens AND closes at t=6 (assistant event with end_turn=True). The continuation
+    turn anchors at the assistant event's timestamp (per the rule "opens at the first
+    post-end_turn assistant event"), so duration is small (≤ 1.5s). The point of the
+    test is the AFK label on a short continuation, regardless of exact duration.
+    """
+    p = write_jsonl(tmp_path / "short_cont.jsonl", [
+        _user(0, "go"),
+        _assistant_text(5, "Done.", end_turn=True),
+        _assistant_text(6, "PS:", end_turn=True),  # 1-sec continuation
+    ])
+    events = read_events(p)
+    turns = classify_turns(events)
+    assert len(turns) == 2
+    assert turns[1].is_continuation is True
+    assert turns[1].label == "AFK"
+    assert turns[1].duration_s == pytest.approx(0, abs=1.5)
