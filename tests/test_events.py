@@ -673,3 +673,17 @@ def test_read_events_and_text_returns_empty_map_for_no_users(isolated_claude_hom
     events, text_map = read_events_and_text(proj_dir / "s.jsonl")
     assert text_map == {}
 
+
+def test_event_has_stop_reason_and_tool_use_id():
+    """Event must expose stop_reason (for end_turn detection) and tool_use_id
+    (for matching to subagents)."""
+    from scripts.events import Event, EventKind
+    e = Event(
+        kind=EventKind.ASSISTANT_TEXT,
+        session_id="s",
+        timestamp_ms=1,
+        stop_reason="end_turn",
+        tool_use_id="toolu_abc",
+    )
+    assert e.stop_reason == "end_turn"
+    assert e.tool_use_id == "toolu_abc"

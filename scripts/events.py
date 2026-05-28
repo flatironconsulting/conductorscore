@@ -111,6 +111,8 @@ class Event:
     # pins this contract.
     raw_input: dict | None = None
     is_auto_compaction_marker: bool = False
+    stop_reason: str | None = None        # ASSISTANT_TEXT/TOOL: 'end_turn' | 'tool_use' | 'stop_sequence' | 'max_tokens' | None
+    tool_use_id: str | None = None        # ASSISTANT_TOOL: dispatch id; TOOL_RESULT: matching id
 
 
 def _parse_ts_ms(line) -> int | None:
