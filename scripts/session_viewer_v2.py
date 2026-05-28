@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.events import read_events
+from scripts.events import read_events, load_subagent_panels
 from scripts.timeline_classifier import (
     classify_intervals,
     classify_turns,
@@ -83,7 +83,7 @@ def _parse_ts_ms(d: dict) -> int | None:
         return None
 
 
-def parse_messages(jsonl_path: Path) -> list[TimelineMessage]:
+def parse_messages(jsonl_path: Path, skip_sidechain: bool = True) -> list[TimelineMessage]:
     """Parse a JSONL into chronological bubble messages (main thread only)."""
     messages: list[TimelineMessage] = []
     pending: dict[str, int] = {}  # tool_use_id -> msg index
@@ -101,7 +101,7 @@ def parse_messages(jsonl_path: Path) -> list[TimelineMessage]:
             ts_ms = _parse_ts_ms(d)
             if ts_ms is None:
                 continue
-            if d.get("isSidechain"):
+            if skip_sidechain and d.get("isSidechain"):
                 continue
             msg = d.get("message")
             if not isinstance(msg, dict):
@@ -145,6 +145,11 @@ def parse_messages(jsonl_path: Path) -> list[TimelineMessage]:
                             pending[tid] = len(messages) - 1
     messages.sort(key=lambda m: m.ts_ms)
     return messages
+
+
+def _parse_subagent_messages(sub_jsonl_path: Path) -> list[TimelineMessage]:
+    """Parse a subagent JSONL (which has isSidechain=True on every line)."""
+    return parse_messages(sub_jsonl_path, skip_sidechain=False)
 
 
 _CSS = """
@@ -261,6 +266,31 @@ _CSS += """
 .summary-table td.muted { color: var(--muted); }
 """
 
+_CSS += """
+.dispatch-row { display: flex; gap: 14px; align-items: flex-start; margin: 4px 0; }
+.dispatch-row .dispatch-bubble { flex: 0 0 40%; min-width: 0; }
+.dispatch-row .dispatch-bubble .bubble { max-width: 100%; }
+.subagent-panel {
+  flex: 1;
+  border-left: 3px solid var(--agent);
+  padding: 6px 10px;
+  background: rgba(59, 130, 246, 0.04);
+  border-radius: 0 8px 8px 0;
+  min-width: 0;
+}
+.subagent-banner { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.subagent-banner .badge {
+  background: rgba(59,130,246,0.15); color: var(--agent);
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin-right: 4px;
+}
+.subagent-banner .desc { color: var(--text); font-weight: 500; }
+.subagent-banner .meta { color: var(--muted); font-size: 10px; }
+.subagent-panel .bubble { max-width: 100%; font-size: 11px; padding: 6px 10px; }
+"""
+
 
 def _fmt_clock(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
@@ -278,7 +308,10 @@ def _fmt_date(ts_ms: int) -> str:
     return dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M")
 
 
-def _bubble_html(msg: TimelineMessage) -> str:
+def _bubble_html(
+    msg: TimelineMessage,
+    subagent_panels: dict[str, tuple[str, Path]] | None = None,
+) -> str:
     role_cls = {"user": "user", "assistant_text": "assistant", "assistant_tool": "tool"}[msg.role]
     role_label = {
         "user": "USER",
@@ -291,16 +324,39 @@ def _bubble_html(msg: TimelineMessage) -> str:
         ts_str = f"{ts_str} → {_fmt_clock(msg.end_ts_ms)} ({d_s}s)"
     end_turn = (f'<div class="end-turn">⏹ End turn: {_fmt_clock(msg.ts_ms)}</div>'
                 if msg.is_end_turn else "")
-    return (
+    bubble = (
         f'<div class="msg {role_cls}"><div class="bubble">'
         f'<div class="bubble-head"><span class="role">{html.escape(role_label)}</span>'
         f'<span class="ts">{html.escape(ts_str)}</span></div>'
         f"{html.escape(msg.text)}{end_turn}</div></div>"
     )
+    panel_data = (
+        subagent_panels.get(msg.tool_use_id)
+        if subagent_panels and msg.tool_use_id and msg.tool_name == "Agent"
+        else None
+    )
+    if panel_data is None:
+        return bubble
+    description, sub_jsonl = panel_data
+    sub_msgs = _parse_subagent_messages(sub_jsonl)
+    n = len(sub_msgs)
+    dur_s = (sub_msgs[-1].ts_ms - sub_msgs[0].ts_ms) / 1000.0 if n >= 2 else 0.0
+    panel_inner = "".join(_bubble_html(m, subagent_panels=None) for m in sub_msgs)
+    return (
+        f'<div class="dispatch-row">'
+        f'<div class="dispatch-bubble">{bubble}</div>'
+        f'<div class="subagent-panel">'
+        f'<div class="subagent-banner">'
+        f'<span class="badge">subagent</span> '
+        f'<span class="desc">{html.escape(description)}</span> '
+        f'<span class="meta">· {n} msgs · {_fmt_dur(dur_s)}</span>'
+        f"</div>{panel_inner}</div></div>"
+    )
 
 
 def render_session(jsonl_path: Path, out_path: Path) -> dict:
     events = read_events(jsonl_path)
+    subagent_panels = load_subagent_panels(jsonl_path)
     intervals = classify_intervals(events)
     turns = classify_turns(events)
     messages = parse_messages(jsonl_path)
@@ -366,7 +422,7 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
     <div class="card-section-title">Activity</div>
     <div class="card-kv"><span class="k">turns</span><span class="v">{agg['n_turns']} <span class="muted">({agg['n_hitl_turns']} HITL · {agg['n_afk_turns']} AFK)</span></span></div>
     <div class="card-kv"><span class="k">messages</span><span class="v">{len(messages)}</span></div>
-    <div class="card-kv"><span class="k">subagent tracks</span><span class="v">0</span></div>
+    <div class="card-kv"><span class="k">subagent tracks</span><span class="v">{len(subagent_panels)}</span></div>
   </div>
   <div class="card-section">
     <div class="card-section-title">Tokens</div>
@@ -430,7 +486,7 @@ def render_session(jsonl_path: Path, out_path: Path) -> dict:
             )
             for m in messages:
                 if itv.start_ts_ms <= m.ts_ms <= itv.end_ts_ms:
-                    parts.append(_bubble_html(m))
+                    parts.append(_bubble_html(m, subagent_panels=subagent_panels))
             turn_idx += 1
     if open_sid is not None:
         parts.append("</div>")

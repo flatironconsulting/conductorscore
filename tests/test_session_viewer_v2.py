@@ -7,6 +7,7 @@ from tests.fixtures.synthetic.builder import (
     build_two_turn_session,
 )
 from tests.fixtures.synthetic.builder import build_three_hitl_then_afk
+from tests.fixtures.synthetic.builder import build_session_with_one_subagent
 
 
 def test_render_session_wraps_streaks_in_streak_group(tmp_path):
@@ -70,3 +71,15 @@ def test_render_session_emits_session_card_with_afk_jump(tmp_path):
     assert 'class="summary-table"' in text
     for label in ("HITL", "AFK", "Idle", "Wallclock", "Longest streak"):
         assert label in text
+
+
+def test_render_session_inlines_subagent_panel_beside_dispatch(tmp_path):
+    """An Agent tool dispatch with a matching subagent renders in a 2-column
+    dispatch-row containing the dispatch bubble + the subagent's bubbles."""
+    jsonl = build_session_with_one_subagent(tmp_path)
+    out = tmp_path / "viewer.html"
+    render_session(jsonl, out)
+    text = out.read_text()
+    assert text.count('class="dispatch-row"') == 1
+    assert 'class="subagent-panel"' in text
+    assert "find files" in text
