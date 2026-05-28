@@ -75,3 +75,17 @@ def build_two_turn_session(tmp_path: Path) -> Path:
         _user(300, "second prompt"),
         _assistant_text(990, "Done long task.", end_turn=True),
     ])
+
+
+def build_session_with_tool_call(tmp_path: Path) -> Path:
+    """USER → ASSISTANT_TEXT → ASSISTANT_TOOL (Read) → tool_result → ASSISTANT_TEXT(end_turn).
+
+    Single ~40-second turn (HITL) demonstrating each bubble role.
+    """
+    return write_jsonl(tmp_path / "tool_call.jsonl", [
+        _user(0, "list the readme"),
+        _assistant_text(2, "I'll read it."),
+        _assistant_tool(5, "Read", "toolu_r1", {"file_path": "/tmp/README.md"}),
+        _tool_result(8, "toolu_r1", content="readme contents"),
+        _assistant_text(40, "Done reading.", end_turn=True),
+    ])
