@@ -97,3 +97,36 @@ def test_classify_intervals_no_zero_width_idle_for_adjacent_turns(tmp_path):
 def test_classify_intervals_empty_events_returns_empty():
     """classify_intervals must return [] for empty input, not raise."""
     assert classify_intervals([]) == []
+
+
+from scripts.timeline_classifier import derive_streaks
+from tests.fixtures.synthetic.builder import build_three_hitl_then_afk
+
+
+def test_derive_streaks_groups_consecutive_same_label_turns(tmp_path):
+    """Three HITL turns with brief Idle (<30 min) → one HITL streak.
+    The AFK turn at the end is its own streak."""
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    events = read_events(jsonl)
+    turns = classify_turns(events)
+    hitl_streaks, afk_streaks = derive_streaks(turns)
+    assert len(hitl_streaks) == 1
+    assert len(hitl_streaks[0]) == 3
+    assert len(afk_streaks) == 1
+    assert len(afk_streaks[0]) == 1
+
+
+def test_derive_streaks_splits_on_long_idle(tmp_path):
+    """If Idle between same-label turns exceeds K_BRIDGE_IDLE (default 30 min),
+    the streak splits."""
+    p = write_jsonl(tmp_path / "long_idle.jsonl", [
+        _user(0, "q1"),
+        _assistant_text(30, "a1", end_turn=True),
+        _user(30 + 31 * 60, "q2"),
+        _assistant_text(30 + 31 * 60 + 30, "a2", end_turn=True),
+    ])
+    events = read_events(p)
+    turns = classify_turns(events)
+    hitl_streaks, _ = derive_streaks(turns)
+    assert len(hitl_streaks) == 2
+    assert all(len(s) == 1 for s in hitl_streaks)

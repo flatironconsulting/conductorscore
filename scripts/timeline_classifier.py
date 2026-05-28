@@ -131,3 +131,38 @@ def classify_intervals(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS
     if cursor < session_end:
         intervals.append(Interval(cursor, session_end, "Idle"))
     return intervals
+
+
+K_BRIDGE_IDLE_SECONDS = 1800  # 30 min — Idle longer than this splits a streak
+
+
+def derive_streaks(
+    turns: list[Turn],
+    k_bridge_idle_seconds: int = K_BRIDGE_IDLE_SECONDS,
+) -> tuple[list[list[Turn]], list[list[Turn]]]:
+    """Group consecutive same-label turns into streaks.
+
+    Two things break a streak:
+      1. An opposite-label turn appearing between them.
+      2. An Idle gap > k_bridge_idle_seconds between two same-label turns.
+    """
+    hitl_streaks: list[list[Turn]] = []
+    afk_streaks: list[list[Turn]] = []
+    current: list[Turn] = []
+    current_label: str | None = None
+    for t in turns:
+        if current and current_label == t.label:
+            idle_gap_s = (t.start_ts_ms - current[-1].end_ts_ms) / 1000.0
+            if idle_gap_s > k_bridge_idle_seconds:
+                (hitl_streaks if current_label == "HITL" else afk_streaks).append(current)
+                current = [t]
+            else:
+                current.append(t)
+        else:
+            if current and current_label is not None:
+                (hitl_streaks if current_label == "HITL" else afk_streaks).append(current)
+            current = [t]
+            current_label = t.label
+    if current and current_label is not None:
+        (hitl_streaks if current_label == "HITL" else afk_streaks).append(current)
+    return hitl_streaks, afk_streaks
