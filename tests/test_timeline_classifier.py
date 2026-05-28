@@ -130,3 +130,17 @@ def test_derive_streaks_splits_on_long_idle(tmp_path):
     hitl_streaks, _ = derive_streaks(turns)
     assert len(hitl_streaks) == 2
     assert all(len(s) == 1 for s in hitl_streaks)
+
+
+from scripts.timeline_classifier import aggregates
+
+
+def test_aggregates_sums_to_session_duration(tmp_path):
+    """Sum of HITL + AFK + Idle wallclock seconds equals the session span."""
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    events = read_events(jsonl)
+    agg = aggregates(events)
+    session_s = (max(e.timestamp_ms for e in events) - min(e.timestamp_ms for e in events)) / 1000.0
+    assert agg["hitl_s"] + agg["afk_s"] + agg["idle_s"] == pytest.approx(session_s, abs=0.5)
+    assert agg["hitl_s"] > 0
+    assert agg["afk_s"] > 0

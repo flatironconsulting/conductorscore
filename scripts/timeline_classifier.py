@@ -166,3 +166,30 @@ def derive_streaks(
     if current and current_label is not None:
         (hitl_streaks if current_label == "HITL" else afk_streaks).append(current)
     return hitl_streaks, afk_streaks
+
+
+def aggregates(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) -> dict:
+    """Return per-label wallclock sums and other top-line stats."""
+    intervals = classify_intervals(events, k_turn_seconds=k_turn_seconds)
+    turns = classify_turns(events, k_turn_seconds=k_turn_seconds)
+    hitl_streaks, afk_streaks = derive_streaks(turns)
+    sum_by_label = {"HITL": 0.0, "AFK": 0.0, "Idle": 0.0}
+    for itv in intervals:
+        sum_by_label[itv.label] += (itv.end_ts_ms - itv.start_ts_ms) / 1000.0
+
+    def _longest_streak_sum(streaks: list[list[Turn]]) -> float:
+        if not streaks:
+            return 0.0
+        return max(sum((t.end_ts_ms - t.start_ts_ms) / 1000.0 for t in s) for s in streaks)
+
+    return {
+        "hitl_s": sum_by_label["HITL"],
+        "afk_s": sum_by_label["AFK"],
+        "idle_s": sum_by_label["Idle"],
+        "session_s": sum(sum_by_label.values()),
+        "n_turns": len(turns),
+        "n_hitl_turns": sum(1 for t in turns if t.label == "HITL"),
+        "n_afk_turns": sum(1 for t in turns if t.label == "AFK"),
+        "longest_hitl_streak_s": _longest_streak_sum(hitl_streaks),
+        "longest_afk_streak_s": _longest_streak_sum(afk_streaks),
+    }
