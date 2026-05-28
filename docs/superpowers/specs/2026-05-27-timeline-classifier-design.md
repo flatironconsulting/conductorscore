@@ -79,7 +79,10 @@ Tool execution intervals are used only in the optional sub-label below (`Agent-t
 
 A turn is a span where the agent is responsible:
 
-- **Turn starts** at a human event.
+- **Starts at** any of:
+  - A real `USER` event.
+  - An `AskUserQuestion` tool_result (soft-USER).
+  - An assistant event (`ASSISTANT_TEXT`, `ASSISTANT_TOOL`, `ASSISTANT_THINKING`) when no turn is currently open. This is an **autonomous-continuation turn** — Claude Code resuming work after `end_turn` (or at session start) without an intervening USER. Triggered by hooks, scheduled wakeups, auto-compaction recovery, or other automated paths.
 - **Turn ends** at the FIRST of:
   - An assistant message with `stop_reason: "end_turn"`.
   - An `AskUserQuestion` dispatch (soft-end_turn — agent asked the human).
@@ -100,9 +103,10 @@ Every moment in a session falls into exactly one of three categories.
 |---|---|---|---|
 | **HITL** | A human event (real `USER`, or `AskUserQuestion`'s `tool_result`) opens a turn whose total duration ≤ `K_TURN` (default 5 min) | The turn's ending event: `end_turn`, `AskUserQuestion` dispatch, next human event, or session end | The turn is short enough that the user is presumed at the keyboard throughout. *Interactive work.* |
 | **AFK** | A human event opens a turn whose total duration > `K_TURN` | Same turn-ending events | The turn is too long for the user to have plausibly stayed at the keyboard the whole time. *Batch work.* |
+| **AFK (continuation)** | A turn opened by autonomous assistant activity (no `USER` event signalled the human's presence) | Same turn-ending events | No USER signal — we cannot presume the human is at the keyboard. *Always classified as AFK regardless of duration.* |
 | **Idle** | A turn-ending event: `end_turn`, OR `AskUserQuestion` dispatch | A turn-starting event: real `USER`, OR `AskUserQuestion`'s `tool_result`, OR session end | Between turns. Neither HITL nor AFK. |
 
-**Precedence**: each moment is either inside a turn or outside. If inside a turn, the turn's total duration decides HITL vs AFK. If outside, it's Idle.
+**Precedence**: each moment is either inside a turn or outside. If inside a turn, the turn's total duration decides HITL vs AFK. If outside, it's Idle. Continuation turns (those opened by assistant activity rather than a human event) bypass the duration threshold and are always labeled AFK — the duration rule only applies to human-opened turns.
 
 A turn that ends because the next human event interrupted it (no `end_turn` fired) transitions directly to the next turn at the same moment — there's no Idle interval between back-to-back turns.
 
@@ -395,6 +399,22 @@ Turn duration uses `session_end_ts - turn_start_ts`. Apply the 5-min rule normal
 - `total_leverage` = `wallclock_leverage + parallel_leverage` = **19.7×**.
 - AFK streak max (single AFK turn here): 11 min 30 s.
 - HITL streak max: 35 s.
+
+### Worked example — autonomous continuation
+
+```
+USER@0 → assistant tool_use Bash@5 → tool_result@7 → assistant text(end_turn)@10
+   (no USER — continuation begins)
+assistant text@15 → assistant tool_use Read@20 → tool_result@22 → assistant text(end_turn)@40
+USER@500 → ... (next human-anchored turn)
+```
+
+Three turns:
+- `[0, 10]` — HITL (USER-opened, 10 sec ≤ K_TURN).
+- `[15, 40]` — **AFK (continuation)**, 25 sec. Continuation turns are always AFK even when short.
+- `[500, ...]` — HITL or AFK depending on its own duration.
+
+The 5-sec gap between `end_turn@10` and the first continuation event at `t=15` is `Idle` (no turn open between the close and the next assistant event).
 
 ## Session viewer (HTML)
 

@@ -673,3 +673,66 @@ def test_read_events_and_text_returns_empty_map_for_no_users(isolated_claude_hom
     events, text_map = read_events_and_text(proj_dir / "s.jsonl")
     assert text_map == {}
 
+
+def test_event_has_stop_reason_and_tool_use_id():
+    """Event must expose stop_reason (for end_turn detection) and tool_use_id
+    (for matching to subagents)."""
+    from scripts.events import Event, EventKind
+    e = Event(
+        kind=EventKind.ASSISTANT_TEXT,
+        session_id="s",
+        timestamp_ms=1,
+        stop_reason="end_turn",
+        tool_use_id="toolu_abc",
+    )
+    assert e.stop_reason == "end_turn"
+    assert e.tool_use_id == "toolu_abc"
+
+
+def test_read_events_populates_stop_reason_and_tool_use_id(tmp_path):
+    """read_events should pull stop_reason from the assistant message and
+    tool_use_id from each tool_use / tool_result block."""
+    import json
+    from scripts.events import read_events, EventKind
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join([
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "tool_use", "name": "Read", "id": "toolu_1", "input": {}},
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "stop_reason": "end_turn",
+            },
+        }),
+        json.dumps({
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": False}],
+            },
+        }),
+    ]) + "\n")
+    events = read_events(p)
+    texts = [e for e in events if e.kind == EventKind.ASSISTANT_TEXT]
+    tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
+    results = [e for e in events if e.kind == EventKind.TOOL_RESULT]
+    assert len(texts) == 1 and texts[0].stop_reason == "end_turn"
+    assert len(tools) == 1 and tools[0].tool_use_id == "toolu_1"
+    assert len(results) == 1 and results[0].tool_use_id == "toolu_1"
+
+
+def test_load_subagent_panels_pairs_tool_use_ids(tmp_path):
+    from scripts.events import load_subagent_panels
+    from tests.fixtures.synthetic.builder import build_session_with_one_subagent
+    main = build_session_with_one_subagent(tmp_path)
+    panels = load_subagent_panels(main)
+    assert "toolu_a1" in panels
+    description, sub_jsonl_path = panels["toolu_a1"]
+    assert description == "find files"
+    assert sub_jsonl_path.exists()
