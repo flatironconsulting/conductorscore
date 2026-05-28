@@ -22,6 +22,7 @@ class Turn:
     end_ts_ms: int
     end_reason: str  # 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'
     label: str = ""  # 'HITL' or 'AFK' — set by classify_turns
+    is_continuation: bool = False  # True if turn opened by autonomous assistant activity (no USER), labeled AFK
 
     @property
     def duration_s(self) -> float:
