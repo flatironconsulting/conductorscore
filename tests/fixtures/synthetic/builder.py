@@ -89,3 +89,20 @@ def build_session_with_tool_call(tmp_path: Path) -> Path:
         _tool_result(8, "toolu_r1", content="readme contents"),
         _assistant_text(40, "Done reading.", end_turn=True),
     ])
+
+
+def build_three_hitl_then_afk(tmp_path: Path) -> Path:
+    """Three short HITL turns (each ~30 sec, ≤ 30-sec Idle between), then a single AFK turn.
+
+    Expect: one HITL streak (3 turns bridged), one AFK streak (1 turn).
+    """
+    return write_jsonl(tmp_path / "3hitl_afk.jsonl", [
+        _user(0, "q1"),
+        _assistant_text(30, "a1", end_turn=True),
+        _user(60, "q2"),
+        _assistant_text(90, "a2", end_turn=True),
+        _user(120, "q3"),
+        _assistant_text(150, "a3", end_turn=True),
+        _user(200, "big task"),
+        _assistant_text(900, "done after 700s", end_turn=True),  # AFK (700 s > 300)
+    ])
