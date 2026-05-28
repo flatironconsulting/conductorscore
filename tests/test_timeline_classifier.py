@@ -144,3 +144,42 @@ def test_aggregates_sums_to_session_duration(tmp_path):
     assert agg["hitl_s"] + agg["afk_s"] + agg["idle_s"] == pytest.approx(session_s, abs=0.5)
     assert agg["hitl_s"] > 0
     assert agg["afk_s"] > 0
+
+
+import math
+from scripts.timeline_classifier import wallclock_leverage, parallel_leverage_seconds, total_leverage_seconds
+
+
+def test_wallclock_leverage_afk_over_hitl(tmp_path):
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    events = read_events(jsonl)
+    lev = wallclock_leverage(events)
+    # 3 HITL turns × 30 sec = 90 s HITL. 1 AFK turn of 700 s.
+    assert lev == pytest.approx(700.0 / 90.0, rel=0.05)
+
+
+def test_wallclock_leverage_infinity_when_no_hitl(tmp_path):
+    p = write_jsonl(tmp_path / "only_afk.jsonl", [
+        _user(0, "big task"),
+        _assistant_text(700, "done", end_turn=True),
+    ])
+    events = read_events(p)
+    lev = wallclock_leverage(events)
+    assert math.isinf(lev)
+
+
+def test_parallel_leverage_intersects_subagent_with_afk(tmp_path):
+    """A subagent active during an AFK turn contributes to the intersection.
+    The Slice 6 single-subagent fixture's turn is HITL (≤ 22 s ≤ 300 s),
+    so the subagent contributes 0 to AFK overlap."""
+    from tests.fixtures.synthetic.builder import build_session_with_one_subagent
+    main = build_session_with_one_subagent(tmp_path)
+    assert parallel_leverage_seconds(main) == 0.0
+
+
+def test_total_leverage_sums(tmp_path):
+    """total_leverage = (AFK + parallel) / HITL (in seconds)."""
+    jsonl = build_three_hitl_then_afk(tmp_path)
+    events = read_events(jsonl)
+    # No subagents here; total = wallclock
+    assert total_leverage_seconds(jsonl, events) == pytest.approx(wallclock_leverage(events), rel=0.001)

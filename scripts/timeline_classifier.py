@@ -7,8 +7,9 @@ HITL/AFK determined by total turn duration vs K_TURN_SECONDS (default 5 min).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
-from scripts.events import Event, EventKind
+from scripts.events import Event, EventKind, read_events
 
 
 K_TURN_SECONDS = 300  # 5 min — turn-duration threshold separating HITL from AFK
@@ -193,3 +194,54 @@ def aggregates(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) -> dic
         "longest_hitl_streak_s": _longest_streak_sum(hitl_streaks),
         "longest_afk_streak_s": _longest_streak_sum(afk_streaks),
     }
+
+
+def wallclock_leverage(events: list[Event], k_turn_seconds: int = K_TURN_SECONDS) -> float:
+    """``AFK_wallclock_seconds / HITL_wallclock_seconds`` (∞ if HITL=0)."""
+    agg = aggregates(events, k_turn_seconds=k_turn_seconds)
+    if agg["hitl_s"] == 0:
+        return float("inf")
+    return agg["afk_s"] / agg["hitl_s"]
+
+
+def parallel_leverage_seconds(
+    jsonl_path: Path,
+    k_turn_seconds: int = K_TURN_SECONDS,
+) -> float:
+    """Per-second intersection of each subagent's active interval with each AFK turn.
+
+    Subagents discovered from the ``<session>/subagents/`` subdirectory.
+    """
+    from scripts.events import load_subagent_panels
+    events = read_events(jsonl_path)
+    turns = classify_turns(events, k_turn_seconds=k_turn_seconds)
+    afk_turns = [t for t in turns if t.label == "AFK"]
+    if not afk_turns:
+        return 0.0
+    panels = load_subagent_panels(jsonl_path)
+    total = 0.0
+    for _tool_use_id, (_description, sub_jsonl) in panels.items():
+        sub_events = read_events(sub_jsonl)
+        if not sub_events:
+            continue
+        sub_start = min(e.timestamp_ms for e in sub_events)
+        sub_end = max(e.timestamp_ms for e in sub_events)
+        for turn in afk_turns:
+            overlap_start = max(sub_start, turn.start_ts_ms)
+            overlap_end = min(sub_end, turn.end_ts_ms)
+            if overlap_end > overlap_start:
+                total += (overlap_end - overlap_start) / 1000.0
+    return total
+
+
+def total_leverage_seconds(
+    jsonl_path: Path,
+    events: list[Event],
+    k_turn_seconds: int = K_TURN_SECONDS,
+) -> float:
+    """``(AFK + parallel_AFK_subagents) / HITL`` (∞ if HITL=0)."""
+    agg = aggregates(events, k_turn_seconds=k_turn_seconds)
+    if agg["hitl_s"] == 0:
+        return float("inf")
+    parallel = parallel_leverage_seconds(jsonl_path, k_turn_seconds=k_turn_seconds)
+    return (agg["afk_s"] + parallel) / agg["hitl_s"]
