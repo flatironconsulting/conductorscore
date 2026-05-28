@@ -607,6 +607,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         continue
                     if block.get("type") != "tool_result":
                         continue
+                    _tu_id = block.get("tool_use_id")
                     events.append(
                         Event(
                             kind=EventKind.TOOL_RESULT,
@@ -618,6 +619,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             is_error=bool(block.get("is_error")),
                             is_sidechain=is_sidechain,
                             subagent_id=subagent_id,
+                            tool_use_id=_tu_id if isinstance(_tu_id, str) else None,
                         )
                     )
             continue
@@ -635,6 +637,10 @@ def read_events(jsonl_path: Path) -> list[Event]:
             input_tokens, output_tokens = _usage_tokens(message or {})
             cache_hit_tokens, cache_creation_tokens = _usage_cache_tokens(
                 message or {}
+            )
+            _stop_reason_raw = message.get("stop_reason") if message else None
+            stop_reason_val = (
+                _stop_reason_raw if isinstance(_stop_reason_raw, str) else None
             )
 
             if isinstance(content, list):
@@ -686,6 +692,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             cache_creation_input_tokens=cache_creation_tokens
                             if first_text
                             else 0,
+                            stop_reason=stop_reason_val,
                         )
                     )
                     first_text = False
@@ -695,6 +702,10 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         block.get("name")
                         if isinstance(block.get("name"), str)
                         else None
+                    )
+                    _block_id = block.get("id")
+                    tool_use_id_val = (
+                        _block_id if isinstance(_block_id, str) else None
                     )
                     inp = block.get("input") if isinstance(block.get("input"), dict) else {}
                     # Default-safe v0.4 plan/edit flags.
@@ -750,6 +761,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             edit_line_count=edit_line_count_val,
                             is_excluded_edit_path=is_excluded_edit_path_val,
                             raw_input=raw_input_val,
+                            stop_reason=stop_reason_val,
+                            tool_use_id=tool_use_id_val,
                         )
                     )
             elif isinstance(content, str):
@@ -765,6 +778,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         output_tokens=output_tokens,
                         cache_input_tokens=cache_hit_tokens,
                         cache_creation_input_tokens=cache_creation_tokens,
+                        stop_reason=stop_reason_val,
                     )
                 )
             continue

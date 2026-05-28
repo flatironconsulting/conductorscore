@@ -687,3 +687,41 @@ def test_event_has_stop_reason_and_tool_use_id():
     )
     assert e.stop_reason == "end_turn"
     assert e.tool_use_id == "toolu_abc"
+
+
+def test_read_events_populates_stop_reason_and_tool_use_id(tmp_path):
+    """read_events should pull stop_reason from the assistant message and
+    tool_use_id from each tool_use / tool_result block."""
+    import json
+    from scripts.events import read_events, EventKind
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join([
+        json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "tool_use", "name": "Read", "id": "toolu_1", "input": {}},
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "stop_reason": "end_turn",
+            },
+        }),
+        json.dumps({
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": False}],
+            },
+        }),
+    ]) + "\n")
+    events = read_events(p)
+    texts = [e for e in events if e.kind == EventKind.ASSISTANT_TEXT]
+    tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
+    results = [e for e in events if e.kind == EventKind.TOOL_RESULT]
+    assert len(texts) == 1 and texts[0].stop_reason == "end_turn"
+    assert len(tools) == 1 and tools[0].tool_use_id == "toolu_1"
+    assert len(results) == 1 and results[0].tool_use_id == "toolu_1"
