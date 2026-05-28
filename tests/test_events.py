@@ -725,3 +725,14 @@ def test_read_events_populates_stop_reason_and_tool_use_id(tmp_path):
     assert len(texts) == 1 and texts[0].stop_reason == "end_turn"
     assert len(tools) == 1 and tools[0].tool_use_id == "toolu_1"
     assert len(results) == 1 and results[0].tool_use_id == "toolu_1"
+
+
+def test_load_subagent_panels_pairs_tool_use_ids(tmp_path):
+    from scripts.events import load_subagent_panels
+    from tests.fixtures.synthetic.builder import build_session_with_one_subagent
+    main = build_session_with_one_subagent(tmp_path)
+    panels = load_subagent_panels(main)
+    assert "toolu_a1" in panels
+    description, sub_jsonl_path = panels["toolu_a1"]
+    assert description == "find files"
+    assert sub_jsonl_path.exists()

@@ -861,12 +861,46 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
     return events, text_map
 
 
+def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
+    """Return ``{parent_tool_use_id: (description, sub_jsonl_path)}``.
+
+    Subagent transcripts live alongside the parent JSONL at
+    ``<jsonl_path.stem>/subagents/agent-<sid>.jsonl`` with a sibling
+    ``agent-<sid>.meta.json`` whose ``toolUseId`` field links back to the
+    parent's ``Agent`` tool_use call.
+
+    Returns an empty dict if the ``subagents/`` directory doesn't exist.
+
+    The caller parses the sub_jsonl_path on demand (we return the path,
+    not parsed messages, to avoid a circular import with session_viewer_v2).
+    """
+    sub_dir = Path(jsonl_path).parent / Path(jsonl_path).stem / "subagents"
+    if not sub_dir.is_dir():
+        return {}
+    panels: dict[str, tuple[str, Path]] = {}
+    for meta_path in sub_dir.glob("agent-*.meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        tool_use_id = meta.get("toolUseId")
+        description = meta.get("description") or meta.get("agentType") or "subagent"
+        if not isinstance(tool_use_id, str):
+            continue
+        sub_jsonl = sub_dir / (meta_path.stem.removesuffix(".meta") + ".jsonl")
+        if not sub_jsonl.exists():
+            continue
+        panels[tool_use_id] = (description, sub_jsonl)
+    return panels
+
+
 __all__ = [
     "Event",
     "EventKind",
     "SessionMeta",
     "claude_home",
     "find_sessions",
+    "load_subagent_panels",
     "read_events",
     "read_events_and_text",
 ]
