@@ -19,3 +19,12 @@ def test_classify_turns_segments_two_turns(tmp_path):
     assert turns[0].end_reason == "end_turn"
     assert turns[1].duration_s == pytest.approx(690, abs=0.5)
     assert turns[1].end_reason == "end_turn"
+
+
+def test_classify_turns_labels_by_duration(tmp_path):
+    """Turn ≤ 5 min → HITL. Turn > 5 min → AFK."""
+    jsonl = build_two_turn_session(tmp_path)
+    events = read_events(jsonl)
+    turns = classify_turns(events)
+    assert turns[0].label == "HITL"
+    assert turns[1].label == "AFK"
