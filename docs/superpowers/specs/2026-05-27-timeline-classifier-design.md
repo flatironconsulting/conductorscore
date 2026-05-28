@@ -396,29 +396,121 @@ Turn duration uses `session_end_ts - turn_start_ts`. Apply the 5-min rule normal
 - AFK streak max (single AFK turn here): 11 min 30 s.
 - HITL streak max: 35 s.
 
-## Implementation plan (sketch for writing-plans)
+## Session viewer (HTML)
 
-1. **Extend `Event` dataclass** — add `stop_reason` (for `ASSISTANT_TEXT`), expose `tool_use_id` linkage.
-2. **Update `scripts/events.py`** — populate `stop_reason` from JSONL on assistant message events; expose tool-use → tool-result pairing helper.
-3. **New module `scripts/timeline_classifier.py`** with:
-   - `classify_session(events) -> list[ClassifiedTurn]`
-   - `ClassifiedTurn = {start_ts_ms, end_ts_ms, duration_s, label: 'HITL' | 'AFK', end_reason: 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'}`
-   - `classify_timeline(events) -> list[Interval]` where `Interval = {start_ts_ms, end_ts_ms, label: 'HITL' | 'AFK' | 'Idle'}`
-   - `hitl_streaks(turns)`, `afk_streaks(turns)`
-   - `wallclock_leverage(intervals) = AFK / HITL` (returns ∞ if HITL=0)
-   - `parallel_leverage(events, turns, jsonl_path)` — per-second-precise intersection of each subagent's active interval with each AFK turn, divided by HITL.
-   - `total_leverage = wallclock_leverage + parallel_leverage`
-   - `tokens_by_label(jsonl_path, turns)` — main agent's usage attributed to its message's turn label.
-   - `subagent_tokens_by_label(jsonl_path, turns)` — each subagent's usage attributed to the turn its first event sits in.
-   - `token_leverage(...)` — same shape, computed on output tokens.
-4. **Update `scripts/session_viewer.py`** — render using the new top-level classification; keep the sub-label rendering for visual richness.
-5. **Update `notebooks/per-metric/agentMaxRuntime.ipynb`** — switch to `AFK streak max` headline; show old-rule vs new-rule comparison across sessions.
-6. **Tests** — unit tests for each rule (HITL/AFK threshold, turn boundaries, edge cases); integration tests against real session JSONL fixtures; tests that the partition is MECE.
-7. **Migration of production metrics** — opt-in per metric. Order: `agentMaxRuntime` first (clear analog), then `agentParallelism` (denominator changes), then any others case-by-case.
+A standalone HTML viewer was prototyped at `server/notebooks/render_megarun_v2.py` and validated against real sessions. The production version should ship the same visual model. Key design decisions, all validated:
+
+### Color scheme
+
+Three families, no purple:
+
+| Family | Used for |
+|---|---|
+| **Green** (`#22c55e`, dark-bg `#0f2a1c`) | Human side — `USER` bubble backgrounds, HITL turn/streak vertical rails |
+| **Blue** (`#3b82f6`, dark-bg `#172554` / `#1e293b`) | Agent side — `ASSISTANT_TEXT` and `ASSISTANT_TOOL` bubble backgrounds (two distinct shades), AFK turn/streak vertical rails |
+| **Gray** (`#4b5563`) | Idle (between turns) |
+
+### Rail style — turn vs streak
+
+| Element | Style | Color |
+|---|---|---|
+| HITL turn | **dashed** 3px | green |
+| HITL streak | **solid** 4px | green |
+| AFK turn | **dashed** 3px | blue |
+| AFK streak | **solid** 4px | blue |
+
+Streak rails wrap their turns + bridged Idle gaps. Turn rails sit inside, one per turn. Visually: outer solid + inner dashed.
+
+### Session card (header)
+
+A unified 4-column card at the top:
+
+| Section | Contents |
+|---|---|
+| Session | jsonl filename · start time · session duration |
+| Activity | turns (with HITL/AFK counts) · messages · subagent tracks |
+| Tokens | cache hit · cache miss · subagent share of output |
+| Jump to | `↓ Longest AFK streak (N min)` link → `#streak-{id}` anchor |
+
+Plus two summary tables (time & tokens) sharing the `HITL × AFK × Idle` layout (see Metrics section).
+
+### Subagent rendering — to the right of the dispatch
+
+When the main agent calls the `Agent` tool, the subagent's full conversation renders **alongside** its dispatch bubble.
+
+**Sequential subagents (each dispatch finishes before the next starts):** two-column `dispatch-row`:
+- **Left** (40%): the parent's `Agent` tool_use bubble
+- **Right** (60%): the subagent's mini-conversation panel (USER prompt + assistant text/tool/result), wrapped in its own blue left-rail, with bubble font scaled down to 11px
+
+**Parallel subagents (consecutive dispatches with overlapping execution intervals):** N-column `dispatch-row-parallel`:
+- Each column has its own dispatch bubble at top, subagent banner, and subagent conversation below
+- The grouping rule: a new Agent dispatch's `ts_ms ≤ running group's max execution end`. (Execution end = `tool_result_ts` of the dispatch's tool_use_id, falling back to the subagent's last event ts.)
+- Catches the case where Claude Code emits parallel dispatches as 2–3 separate assistant messages a few seconds apart that all overlap in execution.
+
+**Validation:** on the test session `1ba9ca36-…` (3 subagents fired in quick succession via `dispatching-parallel-agents`), all 3 group into one 3-column row. On the megarun (`2b05b7a7-…`, 44 sequential subagents, 0 overlapping pairs), each renders as a 2-column row — no false grouping.
+
+### Streak grouping in the viewer
+
+`derive_streaks` honors the 30-min `K_BRIDGE_IDLE` rule. Each streak becomes a `<div class="streak-group hitl|afk">` wrapping all its turns plus bridged Idle markers. Idle that splits streaks (different label, or > 30 min) renders OUTSIDE the wrapper.
+
+## Implementation plan (handed off to writing-plans)
+
+This section outlines the scope. The writing-plans skill produces the actual phased plan.
+
+**In-scope for v1:**
+
+1. Extend `scripts/events.py`:
+   - Add `stop_reason` to the `Event` dataclass (populated from JSONL on `ASSISTANT_TEXT`/`ASSISTANT_TOOL`).
+   - Add `tool_use_id` to ASSISTANT_TOOL events and TOOL_RESULT events.
+   - Scan `<session-id>/subagents/agent-*.jsonl` when reading the main session; emit subagent events with their own `subagent_id` and `isSidechain: true`.
+
+2. New module `scripts/timeline_classifier.py`:
+   - `classify_turns(events) -> list[Turn]` — splits the session at human/end_turn/AskUserQuestion/next-human/session-end boundaries.
+   - `classify_intervals(events) -> list[Interval]` — every moment in `{HITL, AFK, Idle}` per the turn-duration rule.
+   - `hitl_streaks(turns)`, `afk_streaks(turns)` — runs with 30-min Idle bridge.
+   - `wallclock_leverage(intervals) = AFK / HITL` (∞ when HITL=0).
+   - `parallel_leverage(events, turns, jsonl_path)` — per-second-precise intersection of each subagent's active interval with each AFK turn / HITL.
+   - `total_leverage = wallclock + parallel`.
+   - `tokens_by_label(jsonl_path, turns)` for main + each subagent.
+   - All functions accept a `K_TURN_SECONDS` (default 300) and `K_BRIDGE_IDLE_SECONDS` (default 1800) for tunable thresholds.
+
+3. New module `scripts/session_viewer_v2.py` (replaces existing `session_viewer.py` for HITL/AFK metrics):
+   - Renders the session as the HTML viewer described above.
+   - Subagent panels (single-dispatch 2-column + parallel-dispatch N-column grouping).
+   - Streak grouping with solid/dashed rail styling.
+   - Unified session card with summary tables and AFK-streak anchor.
+   - Color scheme: green = human, blue = agent, gray = idle.
+
+4. Update `notebooks/per-metric/agentMaxRuntime.ipynb`:
+   - Replace `afk_max_streak_minutes` (per-minute-bucket rule) with `max(afk_streak.duration)` from the new classifier.
+   - Show side-by-side: old-rule headline vs new-rule headline per session, sorted by delta.
+
+5. Update `notebooks/per-metric/agentParallelism.ipynb`:
+   - Replace the existing parallelism formula with `parallel_leverage` / `total_leverage`.
+   - Show subagent contribution explicitly.
+
+6. Tests:
+   - Unit tests for each classifier function with synthetic event fixtures (mocked JSONLs).
+   - Integration tests against real session JSONL fixtures (test session 1ba9ca36 + a HITL-heavy session + an AFK-heavy session + a session with subagents).
+   - MECE assertion: for every test session, `Σ(HITL) + Σ(AFK) + Σ(Idle) == session_duration`.
+   - Per-second-precise parallel_leverage test using the spec's 5-min/10-min subagent example.
+   - HTML rendering tests: validate produced HTML against expected structure (counts of streak-groups, turn-groups, dispatch-rows, parallel rows).
+   - Browser-based regression test using Playwright MCP: render a known session, screenshot the viewer, assert key elements (jump link works, streak rails present, subagent panels positioned to the right of dispatches).
+
+7. Production metric migration (deferred to follow-on spec):
+   - `agentMaxRuntime` → switch to `max(afk_streak.duration)`.
+   - `agentParallelism` → switch to `parallel_leverage`.
+   - `costAggregate` / `tokensAggregate` → fix to include subagent JSONL totals.
+
+**Out of scope for v1 (separate specs):**
+
+- Cross-session multitask leverage (requires server-side correlation by `device_id`).
+- Asymmetric K_BRIDGE_IDLE values for HITL vs AFK streaks.
+- Sub-label visibility (Agent-working / Agent-tool-working / Agent-silent) in the viewer — these are a viewer concern; the top-level metric uses turn-duration only.
 
 ## Open questions
 
 - **K_TURN = 5 min** confirmed; would A/B against 7 min or 10 min reveal a more intuitive threshold on real session data? Defer to post-implementation analysis.
-- **K_BRIDGE_IDLE = 30 min** for streak Idle tolerance: confirm value, or leave as a no-bridge model (any Idle splits the streak).
-- **Sub-label visibility in the spec.** The sub-labels (Agent-working / Agent-tool-working / Agent-silent) are useful for the viewer but aren't part of the top-level rule. Keep them in the spec as a viewer concern, or move to the viewer's own doc?
+- **K_BRIDGE_IDLE = 30 min** for streak Idle tolerance: confirmed for symmetric HITL+AFK; asymmetric values can be revisited later.
+- **Token leverage column** dropped from the v1 viewer (per-second token rates differ between HITL/AFK in ways that make the ratio less informative than the wallclock-time ratio). Tokens table shows raw counts per HITL/AFK/Idle bucket only.
 - **Cross-session aggregation** belongs in a separate spec once needed.
