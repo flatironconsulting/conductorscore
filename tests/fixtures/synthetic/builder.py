@@ -164,34 +164,48 @@ def build_session_with_one_subagent(tmp_path: Path) -> Path:
 
 
 def build_session_with_parallel_subagents_in_afk(tmp_path: Path) -> Path:
-    """Three Agent dispatches at t=2/4/6, results at t=400/410/420.
+    """A short HITL turn followed by an AFK turn with 3 parallel Agent dispatches.
 
-    The turn is 420 s > 300 s → AFK. Subagents overlap heavily:
-      - t in [2, 4): 1 sub active (extra = 0)
-      - t in [4, 6): 2 subs active (extra = 2 per sec)
-      - t in [6, 400): 3 subs active (extra = 3 per sec)
-      - t in [400, 410): 2 subs active (extra = 2 per sec)
-      - t in [410, 420): 1 sub active (extra = 0)
+    Timeline:
+      - USER@0 → assistant_text(end_turn)@100              → HITL turn [0, 100] = 100 s
+      - 100 s Idle gap
+      - USER@200 → 3 Agent dispatches @ 202/204/206
+        → tool_results @ 600/610/620 → assistant_text(end_turn)@625
+                                                          → AFK turn [200, 625] = 425 s
+
+    Subagent execution windows: Sub 1 [202, 600], Sub 2 [204, 610], Sub 3 [206, 620].
+    Concurrency inside the AFK turn:
+      - t in [202, 204): N=1 → extra=0
+      - t in [204, 206): N=2 → extra=2 per sec
+      - t in [206, 600): N=3 → extra=3 per sec
+      - t in [600, 610): N=2 → extra=2 per sec
+      - t in [610, 620): N=1 → extra=0
 
     Expected parallel_leverage_seconds = 0*2 + 2*2 + 3*394 + 2*10 + 0*10 = 1206 s.
+
+    Leverage (with the HITL turn for a non-∞ denominator):
+      - wallclock_leverage = 425/100  = 4.25×
+      - total_leverage     = (425+1206)/100 = 16.31×
     """
     main_path = tmp_path / "parallel_afk.jsonl"
     write_jsonl(main_path, [
-        _user(0, "do three big things"),
-        _assistant_tool(2, "Agent", "toolu_pa1", {"description": "big 1"}),
-        _assistant_tool(4, "Agent", "toolu_pa2", {"description": "big 2"}),
-        _assistant_tool(6, "Agent", "toolu_pa3", {"description": "big 3"}),
-        _tool_result(400, "toolu_pa1"),
-        _tool_result(410, "toolu_pa2"),
-        _tool_result(420, "toolu_pa3"),
-        _assistant_text(425, "All done.", end_turn=True),
+        _user(0, "quick question"),
+        _assistant_text(100, "Here's the quick answer.", end_turn=True),
+        _user(200, "now do three big things in parallel"),
+        _assistant_tool(202, "Agent", "toolu_pa1", {"description": "big 1"}),
+        _assistant_tool(204, "Agent", "toolu_pa2", {"description": "big 2"}),
+        _assistant_tool(206, "Agent", "toolu_pa3", {"description": "big 3"}),
+        _tool_result(600, "toolu_pa1"),
+        _tool_result(610, "toolu_pa2"),
+        _tool_result(620, "toolu_pa3"),
+        _assistant_text(625, "All done.", end_turn=True),
     ])
     sub_dir = tmp_path / main_path.stem / "subagents"
     sub_dir.mkdir(parents=True, exist_ok=True)
     for tid, desc, start, end in [
-        ("toolu_pa1", "big 1", 2, 400),
-        ("toolu_pa2", "big 2", 4, 410),
-        ("toolu_pa3", "big 3", 6, 420),
+        ("toolu_pa1", "big 1", 202, 600),
+        ("toolu_pa2", "big 2", 204, 610),
+        ("toolu_pa3", "big 3", 206, 620),
     ]:
         sid = f"agent-{tid}"
         (sub_dir / f"{sid}.jsonl").write_text("\n".join([
