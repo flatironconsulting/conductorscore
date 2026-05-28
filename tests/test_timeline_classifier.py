@@ -28,3 +28,25 @@ def test_classify_turns_labels_by_duration(tmp_path):
     turns = classify_turns(events)
     assert turns[0].label == "HITL"
     assert turns[1].label == "AFK"
+
+
+from tests.fixtures.synthetic.builder import (
+    write_jsonl, _user, _assistant_text, _assistant_tool, _tool_result,
+)
+
+
+def test_classify_turns_ask_user_question_is_soft_boundary(tmp_path):
+    """AskUserQuestion dispatch ends a turn; its tool_result opens a new one."""
+    p = write_jsonl(tmp_path / "auq.jsonl", [
+        _user(0, "first prompt"),
+        _assistant_tool(10, "AskUserQuestion", "toolu_q", {"questions": [{"q": "?"}]}),
+        _tool_result(100, "toolu_q", content="answer"),
+        _assistant_text(120, "Done.", end_turn=True),
+    ])
+    events = read_events(p)
+    turns = classify_turns(events)
+    assert len(turns) == 2
+    assert turns[0].end_reason == "ask_user_question"
+    assert turns[0].duration_s == pytest.approx(10, abs=0.5)
+    assert turns[1].end_reason == "end_turn"
+    assert turns[1].duration_s == pytest.approx(20, abs=0.5)
