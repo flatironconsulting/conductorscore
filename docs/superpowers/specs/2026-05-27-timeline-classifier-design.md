@@ -18,29 +18,29 @@ A continuous, turn-anchored model with a small fixed event-classification rule r
 
 ## Goals
 
-1. Every moment of a session is classified into exactly one of `{Agent-working, Agent-tool-working, Agent-silent, Idle}` (MECE).
-2. Classifications are derived from observable JSONL events without per-minute forward-extension biases.
-3. Streaks (longest contiguous AGENT runs, HITL engagement periods, AFK runs) are built as derived layers, not as separate per-minute calculations.
-4. Edge cases — abandoned tools, synthetic injections, AskUserQuestion, session crashes — produce defensible (or at least honestly tagged) attribution.
+1. Partition every moment of a session into exactly one of `{HITL, AFK, Idle}` (MECE) — three top-level categories aligned with the user-facing concepts of *interactive work* vs *batch work* vs *nothing happening*.
+2. Classifications derived from observable JSONL events without per-minute forward-extension biases.
+3. Streaks (HITL streaks, AFK streaks) and metrics (wallclock leverage, agent parallelism) build directly on the base classification.
+4. Edge cases — abandoned tools, synthetic injections, AskUserQuestion, session crashes — produce defensible (or honestly tagged) attribution.
 
 ## Non-goals
 
 - Replacing the production wire-format aggregates in one shot. The new classifier ships as a new module (`scripts/timeline_classifier.py`) and is opted into by metrics one at a time.
-- Online classification. The lookahead nature of the rules requires the full session in memory. That's fine for batch metric computation.
+- Online classification. The rules require the full session in memory (we use the entire turn's duration to classify it). That's fine for batch metric computation.
 - Per-second precision below the resolution of JSONL timestamps. JSONL timestamps are millisecond-resolved; we use those directly.
 
 ## Inputs
 
 The classifier consumes the existing `Event` list produced by `scripts.events.read_events`, after the recent fixes:
 
-- `USER` events are emitted only for `role: "user"` messages that carry **real user text** AND lack `isMeta` / `sourceToolUseID` (skill content, hook outputs, IDE context wrappers are filtered out).
+- `USER` events are emitted only for `role: "user"` messages with **real user text** AND lacking `isMeta` / `sourceToolUseID` (skill content, hook outputs, IDE context wrappers are filtered).
 - `TOOL_RESULT` events are emitted for tool-result blocks regardless of wrapper.
 - `ASSISTANT_TEXT`, `ASSISTANT_TOOL`, `ASSISTANT_THINKING` are emitted as today.
 
 Additional fields required:
 
 - `stop_reason` on assistant messages (currently NOT on the `Event` dataclass — must be added). Used to detect `end_turn`.
-- `tool_use_id` on `ASSISTANT_TOOL` and `tool_result_id` linkage on `TOOL_RESULT` (already extracted, used to pair tool execution intervals).
+- `tool_use_id` on `ASSISTANT_TOOL` and `tool_result_id` linkage on `TOOL_RESULT` (already paired in session_viewer; needs to be exposed on the `Event` dataclass or computed via a helper).
 - `tool_name` (already present) — used to special-case `AskUserQuestion` and the `Task` dispatcher.
 
 ## Definitions
@@ -48,11 +48,13 @@ Additional fields required:
 ### Event categories
 
 - **Agent event:** `ASSISTANT_TEXT`, `ASSISTANT_TOOL` (excluding the `Task` dispatcher), `ASSISTANT_THINKING`, or `TOOL_RESULT`.
-- **Human event:** real `USER` message, OR the `tool_result` matching an `AskUserQuestion` tool_use (soft-USER — see edge cases).
+- **Human event:** real `USER` message, OR the `tool_result` matching an `AskUserQuestion` tool_use (soft-USER — agent asked, human answered).
 
-### Tool execution intervals
+### Tool execution intervals (internal sub-classification only)
 
 For each `ASSISTANT_TOOL` paired with a `TOOL_RESULT` by `tool_use_id`, the closed interval `[tool_use_ts, tool_result_ts]` is a **tool execution interval** — **except** when the tool is `AskUserQuestion`, which is treated as a soft turn-boundary rather than a tool execution (the wait is for the human, not for compute).
+
+Tool execution intervals are used only in the optional sub-label below (`Agent-tool-working`), not in the top-level HITL/AFK/Idle classification.
 
 ### Turn
 
@@ -65,147 +67,185 @@ A turn is a span where the agent is responsible:
   - The next human event (interrupts the current turn).
   - Session end (fallback for crashed sessions).
 
-The turn-ending event is the boundary; `end_turn` and `AskUserQuestion` belong to the closing turn, the next human event starts the next turn.
+The turn-ending event is the boundary; `end_turn` and `AskUserQuestion` belong to the closing turn; the next human event starts the next turn.
 
-## Classification rules
+### Turn duration
 
-Each interval (between two consecutive events) gets exactly one label. Labels are mutually exclusive and partition the full session timeline.
+`turn_duration = turn_end_ts - turn_start_ts` in seconds.
 
-| Label | Starts with (previous message) | Ends with (next message) | Notes |
+## Top-level classification rules
+
+Every moment in a session falls into exactly one of three categories.
+
+| Label | Starts with (previous event) | Ends with (next event) | Notes |
 |---|---|---|---|
-| **Agent-working** | Any event inside the turn — the human event that opened the turn, or any agent event continuing the turn | The next event in the timeline, when the gap from previous event ≤ 5 min — could be another agent event, `end_turn`, `AskUserQuestion` dispatch, or the next human event | Short-gap default inside a turn |
-| **Agent-tool-working** | `ASSISTANT_TOOL` dispatch (excluding `AskUserQuestion` and the `Task` dispatcher) | The matching `TOOL_RESULT` for that `tool_use_id` | Bracketed by exactly these two events. Overrides duration-based classification — the interval is Agent-tool-working regardless of how long it is. |
-| **Agent-silent** | Any event inside the turn | The next event in the timeline, when the gap from previous event > 5 min — could be an agent event, `end_turn`, `AskUserQuestion` dispatch, or the next human event | Long-gap pause inside a turn. Could be deep thinking, queued API, or stalled. |
-| **Idle** | A turn-ending event: assistant message with `stop_reason: end_turn`, OR an `AskUserQuestion` dispatch | A turn-starting event: real `USER` message, OR `AskUserQuestion`'s `tool_result`, OR session end | Outside any turn. **Idle appears only when end_turn or AskUserQuestion fires.** If a turn ends because the next human event arrived (without end_turn first), the next turn starts at the same moment with no Idle between. |
+| **HITL** | A human event (real `USER`, or `AskUserQuestion`'s `tool_result`) opens a turn whose total duration ≤ `K_TURN` (default 5 min) | The turn's ending event: `end_turn`, `AskUserQuestion` dispatch, next human event, or session end | The turn is short enough that the user is presumed at the keyboard throughout. *Interactive work.* |
+| **AFK** | A human event opens a turn whose total duration > `K_TURN` | Same turn-ending events | The turn is too long for the user to have plausibly stayed at the keyboard the whole time. *Batch work.* |
+| **Idle** | A turn-ending event: `end_turn`, OR `AskUserQuestion` dispatch | A turn-starting event: real `USER`, OR `AskUserQuestion`'s `tool_result`, OR session end | Between turns. Neither HITL nor AFK. |
 
-### Precedence
+**Precedence**: each moment is either inside a turn or outside. If inside a turn, the turn's total duration decides HITL vs AFK. If outside, it's Idle.
 
-For any given interval, resolve in this order:
-
-1. If the previous event opens a tool execution interval that the next event closes → **Agent-tool-working**.
-2. Otherwise, if we are **outside any turn** (after `end_turn` / `AskUserQuestion`, before next human event) → **Idle**.
-3. Otherwise we are **inside a turn**:
-   - Gap ≤ 5 min → **Agent-working**.
-   - Gap > 5 min → **Agent-silent**.
+A turn that ends because the next human event interrupted it (no `end_turn` fired) transitions directly to the next turn at the same moment — there's no Idle interval between back-to-back turns.
 
 ### Constants
 
 | Name | Value | Used for |
 |---|---|---|
-| `SILENCE_THRESHOLD_SECONDS` | 300 (5 min) | Splits Agent-working from Agent-silent |
+| `K_TURN` | 300 (5 min) | Threshold separating HITL turns from AFK turns |
+| `K_BRIDGE_IDLE` | 1800 (30 min) | Optional: Idle longer than this splits a streak; shorter Idle bridges. See "Streaks" below. |
 
-The threshold is configurable but defaults to 5 min. Most legitimate agent latency (streaming, thinking, queued API) is well under 5 min; longer gaps are usefully flagged as "silent" so downstream metrics can choose to include or exclude them.
+5 min matches the existing silence threshold used in the base classifier; reusing it keeps tunables minimal.
+
+## Sub-labels (optional, for the visualization)
+
+The top-level HITL/AFK/Idle is sufficient for metrics. The viewer also exposes finer sub-labels within turns, useful for the session-viewer HTML rendering:
+
+| Sub-label | Definition |
+|---|---|
+| `Agent-working` | Inside a turn, gap between consecutive events ≤ 5 min |
+| `Agent-tool-working` | Inside a turn, inside a tool execution interval (overrides duration-based sub-labels) |
+| `Agent-silent` | Inside a turn, gap between consecutive events > 5 min |
+
+These don't affect HITL/AFK classification (which is purely turn-duration-based) — they're for the visualization to show *what* the agent was doing within a turn, not just *whether* the turn was HITL or AFK.
+
+## Streaks
+
+| Streak | Definition |
+|---|---|
+| **HITL streak** | Maximal run of consecutive HITL turns with no AFK turn between. Idle gaps between turns are tolerated up to `K_BRIDGE_IDLE` (default 30 min); longer Idle splits the streak. |
+| **AFK streak** | Maximal run of consecutive AFK turns with no HITL turn between, with the same Idle-tolerance rule. |
+
+Each streak exposes two duration measures:
+
+- **Wall-clock span:** from start of first turn in the streak to end of last turn in the streak, including any (bridged) Idle gaps within.
+- **Sum of turn durations:** total time across just the HITL (or AFK) turns themselves; excludes Idle.
+
+Useful derived numbers:
+- `AFK streak max` (the longest contiguous batch run) replaces the existing `agentMaxRuntime` metric's primary signal.
+- `HITL streak max` (the longest contiguous interactive run) is a useful "flow state" metric we don't have today.
+
+## Metrics built on the classifier
+
+### Wallclock leverage (single session)
+
+```
+wallclock_leverage = total_AFK_seconds / total_session_seconds
+```
+
+A 1.0 means every wall-clock second was AFK (impossible in practice). A 0.0 means no batch work happened. Skill = high leverage with low typing.
+
+### Agent parallelism (single session)
+
+For each second of AFK time, count the number of **concurrent agent tracks** active in that second:
+
+- Main agent track (always 1 if the main agent emitted any event in the second's surrounding K-min window)
+- Each sidechain subagent track (counted per `subagent_id`)
+
+```
+parallel_AFK_track_seconds = sum over each AFK second of active_tracks(second)
+agent_parallelism = parallel_AFK_track_seconds / total_session_seconds
+```
+
+The denominator is the same wall-clock denominator as wallclock_leverage, so the two are comparable. A parallelism of 2.0 means on average two agent tracks were running during AFK time relative to session length.
+
+### Cross-session aggregation (multi-session, out of scope for v1)
+
+When a user runs multiple Claude Code sessions concurrently (different terminals), each session has its own per-session leverage. A cross-session metric would aggregate:
+
+- **Cross-session HITL** at wall-clock minute `m`: ANY session was HITL at `m` → globally HITL
+- **Cross-session AFK** at `m`: no session was HITL AND at least one session was AFK at `m`
+- **Cross-session Idle** at `m`: all sessions Idle at `m`
+
+```
+cross_session_leverage = cross_session_AFK / unique_wall_clock_seconds_covered
+cross_session_parallelism = sum_over_cross_session_AFK_seconds(total_tracks_across_sessions(s)) / unique_wall_clock_seconds_covered
+```
+
+The cross-session aggregation belongs in a separate spec — it requires per-device session correlation that the current wire format doesn't carry. v1 of this classifier ships per-session.
 
 ## Gray areas & edge cases
 
-1. **Agent-silent vs Idle.** Both are silent gaps; the distinguishing rule is the turn boundary. Inside an open turn → Agent-silent. After a turn-ending event → Idle. A stalled session (agent's last message had `stop_reason != end_turn`, then nothing for 2 hours, then user typed) counts as **Agent-silent for the whole 2 hours**, not Idle. The Agent-silent tag is the handle for filtering out suspect attribution downstream.
+1. **HITL vs AFK on a turn that's right at the 5-min boundary.**
+The cutoff is sharp. A 4-min 59-sec turn is HITL; a 5-min 1-sec turn is AFK. If you want, soften with a transition zone (e.g., turns 4–6 min get a weighted attribution), but it adds complexity for marginal accuracy. Recommend the sharp cutoff.
 
-2. **Session crashes mid-turn.** No `end_turn` fires, no next human event arrives. The turn extends to session end as the fallback closer. The trailing sub-interval inside the turn is Agent-silent (if > 5 min) or Agent-working (if ≤ 5 min). After session end, no further classification.
+2. **Mixed-content turn (short Q&A then long tool).**
+The whole turn is one classification by total duration. A 30-second initial response followed by a 30-min Bash counts as one 30.5-min AFK turn. The 30 sec of plausibly-interactive time is folded into AFK. Trade-off for simplicity.
 
-3. **Pre-USER agent activity (resumed sessions).** Some sessions start with agent events before any human event (`claude --resume`, hooks). With no human event opening a turn, this leading time is **Idle by default**. The alternative — synthesizing a session-start soft-USER — hides the resumed-session signal.
+3. **Long agent thinking that the user actually watched.**
+A 10-min thinking session where the user actually sat at the keyboard becomes AFK by this rule. The user's actual presence isn't observable. Acceptable: turn the metric reads as "the agent could have run unattended" rather than "the agent definitely ran unattended."
 
-4. **Concurrent tools (sidechain / subagent).** A `Task`-dispatched subagent runs in parallel; its events have `isSidechain: true`. Sidechain agent events count as agent events (continue the parent turn). Sidechain tool executions create their own tool execution intervals. **Agent-tool-working takes precedence for any moment inside ANY active tool interval** (parent or sidechain).
+4. **Session crashes mid-turn.**
+The turn-end falls back to **session end**. The turn duration is `session_end_ts - turn_start_ts`. If > 5 min, AFK; else HITL.
 
-5. **`AskUserQuestion` with no answering `tool_result`.** Agent asked, session ended before the user replied. The turn ends at the AskUserQuestion dispatch. Idle starts, ends at session end (no soft-USER ever fires).
+5. **Pre-USER agent activity (resumed sessions).**
+Some sessions start with agent events before any human event. With no human event opening a turn, this leading time is **Idle** by default. The alternative (synthetic session-start as a soft-USER) hides the resumed-session signal.
 
-6. **`end_turn` followed by more agent activity (no new human event).** Shouldn't happen in normal JSONL. If observed: treat as a session-state anomaly — classify the orphan time as Idle until the next human event.
+6. **Concurrent tools (sidechain / subagent).**
+Sidechain events live in the same JSONL with `isSidechain: true`. They don't open new turns — they're part of the main agent's turn. For parallelism, they contribute additional tracks during AFK time.
 
-7. **`TOOL_RESULT` with no preceding `ASSISTANT_TOOL` (orphan).** Shouldn't happen. If observed: treat as an agent event for turn membership; it doesn't open a tool execution interval.
+7. **`AskUserQuestion` with no answering `tool_result`.**
+Agent asked, session ended before the user replied. The turn ends at the AskUserQuestion dispatch. Idle starts and continues to session end.
 
-8. **Zero-duration intervals.** Two events at the same timestamp. Duration is 0; doesn't contribute to any sum. Safely ignored.
+8. **Zero-duration turns.**
+A turn that opens and closes at the same timestamp (e.g., synthetic edge case). Duration 0 → HITL by the rule. Contributes nothing to any sum.
 
-9. **Turn ends at session_end (rather than an event).** For the last sub-interval inside the turn, "ends with (next message)" is **session end (no message)**. Classify Agent-working/silent by `session_end_ts - last_event_ts`.
+9. **Turn ends at session_end (rather than an event).**
+Turn duration uses `session_end_ts - turn_start_ts`. Apply the 5-min rule normally.
 
 ## Worked example
 
 ```
-10:00:00  USER
+10:00:00  USER (Turn 1 starts)
 10:00:05  ASSISTANT_TEXT
 10:00:20  ASSISTANT_TOOL (Bash, tu_1)
 10:03:20  TOOL_RESULT (tu_1)
 10:03:25  ASSISTANT_TEXT
-10:11:25  ASSISTANT_TEXT             ← 8-min silent gap before this
-10:11:30  ASSISTANT_TEXT (end_turn)
-10:30:00  USER (next turn)
+10:11:25  ASSISTANT_TEXT
+10:11:30  ASSISTANT_TEXT (end_turn)        ← Turn 1 ends
+10:30:00  USER (Turn 2 starts)
+10:30:30  ASSISTANT_TEXT
+10:30:35  ASSISTANT_TEXT (end_turn)        ← Turn 2 ends
+10:35:00  Session end
 ```
 
-| Interval (duration) | Starts with (previous message) | Ends with (next message) | Label | Reason |
-|---|---|---|---|---|
-| 10:00:00 → 10:00:05 (5s) | `USER` @ 10:00:00 | `ASSISTANT_TEXT` @ 10:00:05 | **Agent-working** | Inside turn, gap ≤ 5 min |
-| 10:00:05 → 10:00:20 (15s) | `ASSISTANT_TEXT` @ 10:00:05 | `ASSISTANT_TOOL` @ 10:00:20 | **Agent-working** | Inside turn, gap ≤ 5 min |
-| 10:00:20 → 10:03:20 (3 min) | `ASSISTANT_TOOL` (Bash) @ 10:00:20 | `TOOL_RESULT` (tu_1) @ 10:03:20 | **Agent-tool-working** | Tool execution interval |
-| 10:03:20 → 10:03:25 (5s) | `TOOL_RESULT` @ 10:03:20 | `ASSISTANT_TEXT` @ 10:03:25 | **Agent-working** | Inside turn, gap ≤ 5 min |
-| 10:03:25 → 10:11:25 (8 min) | `ASSISTANT_TEXT` @ 10:03:25 | `ASSISTANT_TEXT` @ 10:11:25 | **Agent-silent** | Inside turn, gap > 5 min |
-| 10:11:25 → 10:11:30 (5s) | `ASSISTANT_TEXT` @ 10:11:25 | `ASSISTANT_TEXT (end_turn)` @ 10:11:30 | **Agent-working** | Inside turn, gap ≤ 5 min; ends at turn-ender |
-| 10:11:30 → 10:30:00 (18.5 min) | `ASSISTANT_TEXT (end_turn)` @ 10:11:30 | `USER` @ 10:30:00 | **Idle** | Between turns |
+**Top-level classification:**
 
-**Totals (30 min wall clock):**
-- Agent-working: 30 sec
-- Agent-tool-working: 3 min
-- Agent-silent: 8 min
-- Idle: 18.5 min
-- **Sum: 30 min ✓**
-
-## Higher-level streaks (derived layer)
-
-The four base labels partition the timeline; streak concepts are computed from them.
-
-### HITL streak
-
-A HITL streak captures a contiguous engagement period — the user is presumed present throughout.
-
-- **Starts with (previous message):** A human event (real `USER` or `AskUserQuestion` `tool_result`).
-- **Ends with (next message):** The transition into an Idle interval (i.e., the moment the first Idle starts after this streak began). Equivalently: the streak ends at the timestamp of the turn-ending event that triggered the Idle (an `end_turn` assistant message or an `AskUserQuestion` dispatch).
-- **Spans:** one or more back-to-back turns (when turns are connected by next-human-event without Idle in between, the HITL streak continues across them).
-
-Examples:
-- `USER → end_turn → USER → end_turn`: two HITL streaks (separated by Idle intervals).
-- `USER → next USER (no end_turn) → end_turn`: one HITL streak spanning both turns; ends at the end_turn.
-- `USER → AskUserQuestion dispatch`: HITL streak ends at the AskUserQuestion dispatch.
-
-### AFK streak (proposed — needs confirmation)
-
-AFK ("Away From Keyboard") is meant to surface time the **agent worked while the human was not actively engaged**. In the new model the human is presumed engaged for the entire HITL streak by definition, so AFK has to be defined as a sub-layer.
-
-Proposed: **AFK streak = a contiguous run of `Agent-tool-working` and/or `Agent-silent` intervals inside a HITL streak, with no `Agent-working` interval breaking it.**
-
-Rationale: when the agent is producing rapid back-and-forth output (`Agent-working`), the user is plausibly watching. When the agent is running a tool or silent for > 5 min, the user has plausibly stepped away. AFK measures the latter.
-
-| Label | Starts with | Ends with | Notes |
+| Span | Duration | Label | Reason |
 |---|---|---|---|
-| **HITL streak** | Human event | Start of next Idle (or session end) | Engagement period |
-| **AFK streak** | First `Agent-tool-working` or `Agent-silent` interval inside a HITL streak (after any `Agent-working` segment) | First `Agent-working` interval that follows (returning to active back-and-forth), OR end of the enclosing HITL streak | Sub-layer of HITL; captures "agent solo" presumed time |
+| 10:00:00 → 10:11:30 | 11 min 30 s | **AFK** | Turn 1, total duration > 5 min |
+| 10:11:30 → 10:30:00 | 18 min 30 s | **Idle** | Between Turn 1 and Turn 2 |
+| 10:30:00 → 10:30:35 | 35 s | **HITL** | Turn 2, total duration ≤ 5 min |
+| 10:30:35 → 10:35:00 | 4 min 25 s | **Idle** | After Turn 2 to session end |
 
-This definition is **not yet confirmed** by the user. Alternative interpretations include:
-- AFK = the complement of HITL (i.e., Idle periods). Simple but conflates "user took a break between turns" with "user walked away while agent worked."
-- AFK = only `Agent-silent` (excluding tool execution). Tighter but excludes long Bash sessions from the AFK count.
+**Totals (35 min wall clock):**
+- HITL: 35 s
+- AFK: 11 min 30 s
+- Idle: 22 min 55 s
+- **Sum: 35 min ✓**
 
-## Implementation plan (sketch)
+**Metrics:**
+- `wallclock_leverage` = (11 min 30 s) / (35 min) = **0.329** (33% AFK)
+- AFK streak max (single AFK turn here): 11.5 min wall-clock
+- HITL streak max: 35 s
 
-To be expanded by the writing-plans skill in the next step.
+## Implementation plan (sketch for writing-plans)
 
-1. **Extend `Event` dataclass** — add `stop_reason` and (if not present) `tool_use_id`.
-2. **Update `scripts/events.py`** — populate `stop_reason` from JSONL for assistant messages; pair `tool_use_id` to `tool_result_id` already done.
-3. **New module `scripts/timeline_classifier.py`** —
-   - `classify_session(events) -> list[ClassifiedInterval]`
-   - `ClassifiedInterval = {start_ts_ms, end_ts_ms, label, prev_event, next_event}`
-   - Helper: `tool_execution_intervals(events)`
-   - Helper: `turns(events)` — returns list of `(start_ts, end_ts, reason_for_end)`
-4. **Streak helpers** —
-   - `hitl_streaks(intervals) -> list[Streak]`
-   - `afk_streaks(intervals, hitl_streaks) -> list[Streak]` (depends on confirmed AFK definition)
-   - `agent_runs(intervals) -> list[Streak]` — contiguous AGENT (any sub-label) intervals
-5. **Update `scripts/session_viewer.py`** — render using the new classifier (replace `_gap_minute_counts` + `afk_streak_v2`).
-6. **Update `notebooks/per-metric/agentMaxRuntime.ipynb`** — show old vs new headline numbers across all sessions.
-7. **Tests** — unit tests for each rule, plus integration tests against real session JSONL fixtures.
-8. **Migration path for production metrics** — opt-in per metric:
-   - `agentMaxRuntime` → switch to `max(agent_run.duration)`.
-   - `agentParallelism` numerator → uses HITL/AFK split (TBD when AFK is locked).
-   - Other metrics — review case-by-case in writing-plans.
+1. **Extend `Event` dataclass** — add `stop_reason` (for `ASSISTANT_TEXT`), expose `tool_use_id` linkage.
+2. **Update `scripts/events.py`** — populate `stop_reason` from JSONL on assistant message events; expose tool-use → tool-result pairing helper.
+3. **New module `scripts/timeline_classifier.py`** with:
+   - `classify_session(events) -> list[ClassifiedTurn]`
+   - `ClassifiedTurn = {start_ts_ms, end_ts_ms, duration_s, label: 'HITL' | 'AFK', end_reason: 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'}`
+   - `classify_timeline(events) -> list[Interval]` where `Interval = {start_ts_ms, end_ts_ms, label: 'HITL' | 'AFK' | 'Idle'}`
+   - `hitl_streaks(turns)`, `afk_streaks(turns)`
+   - `wallclock_leverage(intervals)`, `agent_parallelism(events, intervals)`
+4. **Update `scripts/session_viewer.py`** — render using the new top-level classification; keep the sub-label rendering for visual richness.
+5. **Update `notebooks/per-metric/agentMaxRuntime.ipynb`** — switch to `AFK streak max` headline; show old-rule vs new-rule comparison across sessions.
+6. **Tests** — unit tests for each rule (HITL/AFK threshold, turn boundaries, edge cases); integration tests against real session JSONL fixtures; tests that the partition is MECE.
+7. **Migration of production metrics** — opt-in per metric. Order: `agentMaxRuntime` first (clear analog), then `agentParallelism` (denominator changes), then any others case-by-case.
 
 ## Open questions
 
-- **AFK definition.** Confirm the proposed sub-layer rule above, or pick an alternative.
-- **Silence threshold.** Default 5 min. Worth A/B against 3 min on real sessions to see which produces more intuitive `Agent-silent` boundaries.
-- **HITL streak boundaries on back-to-back turns.** Confirmed by the user that consecutive turns without Idle between them collapse into one HITL streak.
-- **Production wire-format impact.** Replacing the per-minute classifier changes `afk_minutes`, `hitl_minutes`, `afk_max_streak_minutes`. Migration order TBD.
+- **K_TURN = 5 min** confirmed; would A/B against 7 min or 10 min reveal a more intuitive threshold on real session data? Defer to post-implementation analysis.
+- **K_BRIDGE_IDLE = 30 min** for streak Idle tolerance: confirm value, or leave as a no-bridge model (any Idle splits the streak).
+- **Sub-label visibility in the spec.** The sub-labels (Agent-working / Agent-tool-working / Agent-silent) are useful for the viewer but aren't part of the top-level rule. Keep them in the spec as a viewer concern, or move to the viewer's own doc?
+- **Cross-session aggregation** belongs in a separate spec once needed.
