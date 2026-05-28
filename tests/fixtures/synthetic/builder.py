@@ -106,3 +106,58 @@ def build_three_hitl_then_afk(tmp_path: Path) -> Path:
         _user(200, "big task"),
         _assistant_text(900, "done after 700s", end_turn=True),  # AFK (700 s > 300)
     ])
+
+
+def build_session_with_one_subagent(tmp_path: Path) -> Path:
+    """Main session with an Agent tool dispatch + its subagent transcript file.
+
+    Returns the main JSONL path. The subagent files live in
+    ``<main.stem>/subagents/agent-<sid>.{jsonl,meta.json}`` next to it.
+    """
+    main_path = tmp_path / "with_subagent.jsonl"
+    write_jsonl(main_path, [
+        _user(0, "find files"),
+        _assistant_text(2, "I'll search."),
+        _assistant_tool(5, "Agent", "toolu_a1", {"description": "find files"}),
+        _tool_result(20, "toolu_a1", content="found 3"),
+        _assistant_text(22, "Done.", end_turn=True),
+    ])
+    sub_dir = tmp_path / main_path.stem / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    sid = "agent-deadbeefcafe"
+    sub_path = sub_dir / f"{sid}.jsonl"
+    meta_path = sub_dir / f"{sid}.meta.json"
+    sub_path.write_text("\n".join([
+        json.dumps({
+            "type": "user", "timestamp": _ts(6), "isSidechain": True,
+            "message": {"role": "user", "content": "find files in /tmp"},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": _ts(10), "isSidechain": True,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Bash", "id": "toolu_b1", "input": {"command": "ls"}}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 5},
+            },
+        }),
+        json.dumps({
+            "type": "user", "timestamp": _ts(15), "isSidechain": True,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_b1", "content": "file1\nfile2"}]},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": _ts(19), "isSidechain": True,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "found 2 files"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 10},
+            },
+        }),
+    ]) + "\n")
+    meta_path.write_text(json.dumps({
+        "agentType": "general-purpose",
+        "description": "find files",
+        "toolUseId": "toolu_a1",
+    }))
+    return main_path
