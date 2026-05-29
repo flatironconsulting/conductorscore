@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.9"
+SCHEMA_VERSION = "0.10"
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,22 @@ class AfkInterval:
 
 
 @dataclass(frozen=True)
+class AfkStreakWire:
+    """A single AFK streak emitted on the wire for the "Longest agent run"
+    L4 top-N table.
+
+    ``active_minutes`` is the per-streak engaged time (intra-turn idle
+    > 5 min excluded). ``start_ts_ms``/``end_ts_ms`` give the wallclock
+    range used to render the "2026-05-26 17:36 — 19:00" cell.
+    """
+
+    start_ts_ms: int
+    end_ts_ms: int
+    active_minutes: int
+    turn_count: int
+
+
+@dataclass(frozen=True)
 class PerSession:
     session_hash: str
     project_hash: str
@@ -62,6 +78,9 @@ class PerSession:
     cron_parallel_minutes: int = 0
     afk_max_streak_minutes: int = 0
     afk_intervals: tuple[AfkInterval, ...] = field(default_factory=tuple)
+    # v0.10 — top-5 AFK streaks per session (descending by active_minutes),
+    # for the dashboard's "Longest agent run" L4 table.
+    top_afk_streaks: tuple[AfkStreakWire, ...] = field(default_factory=tuple)
     # v0.4 — coding-without-a-plan (Feature 6)
     strong_plan_signals: tuple[str, ...] = field(default_factory=tuple)
     weak_plan_signals: tuple[str, ...] = field(default_factory=tuple)
@@ -152,6 +171,15 @@ class ExtractorOutput:
                             "is_cron": ivl.is_cron,
                         }
                         for ivl in s.afk_intervals
+                    ],
+                    "top_afk_streaks": [
+                        {
+                            "start_ts_ms": st.start_ts_ms,
+                            "end_ts_ms": st.end_ts_ms,
+                            "active_minutes": st.active_minutes,
+                            "turn_count": st.turn_count,
+                        }
+                        for st in s.top_afk_streaks
                     ],
                     "strong_plan_signals": list(s.strong_plan_signals),
                     "weak_plan_signals": list(s.weak_plan_signals),

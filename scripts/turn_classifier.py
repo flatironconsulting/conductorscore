@@ -61,9 +61,22 @@ ASK_USER_QUESTION_TOOL = "AskUserQuestion"
 
 @dataclass
 class Turn:
+    """A turn between two human handoff points.
+
+    ``duration_s`` is the wallclock span (start → end). ``active_seconds``
+    is the *engaged* time within the turn — gaps > K_BRIDGE_IDLE_SECONDS
+    between consecutive main-thread events count as Idle and are
+    excluded. The label (HITL vs AFK) and all leverage math use
+    ``active_seconds``; ``duration_s`` is informational only.
+
+    This is what stops "user opened Claude, walked away overnight, came
+    back next morning" from showing up as an 18-hour autonomous run.
+    """
+
     start_ts_ms: int
     end_ts_ms: int
     end_reason: str  # 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'
+    active_seconds: float = 0.0  # engaged time within the turn
     label: str = ""  # 'HITL' | 'AFK', filled after classification
 
     @property
@@ -168,9 +181,61 @@ def segment_turns(events: list[Event]) -> list[Turn]:
             )
         )
 
+    # Compute active_seconds per turn: walk main-thread events that fall
+    # within [start, end], sum consecutive-event gaps ≤ K_BRIDGE. Anything
+    # longer is Idle and gets excluded. Label by active_seconds so a turn
+    # the user left open overnight doesn't masquerade as autonomous work.
+    _compute_active_seconds(turns, main_events)
     for t in turns:
-        t.label = "HITL" if t.duration_s <= K_TURN_SECONDS else "AFK"
+        t.label = "HITL" if t.active_seconds <= K_TURN_SECONDS else "AFK"
     return turns
+
+
+def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None:
+    """Populate ``turn.active_seconds`` for each turn in place.
+
+    Within a turn ``[start, end]``, sum consecutive-event gaps. Each
+    gap longer than ``K_TURN_SECONDS`` (5 min) is treated as Idle and
+    excluded entirely — not clipped. Rationale: legitimate tool calls
+    (long bash, big file read) take seconds-to-minutes; > 5 min without
+    a single event in a session means nothing was happening, regardless
+    of how long the turn formally remained open. This is what stops a
+    session you left open overnight from counting an entire 18-hour
+    idle gap (or even the streak-bridge 30 min of it) as autonomous
+    work.
+    """
+    if not turns or not main_events:
+        return
+    # main_events is already chronologically sorted by the caller.
+    i = 0
+    n = len(main_events)
+    for t in turns:
+        # Walk to the first event ≥ start.
+        while i < n and main_events[i].timestamp_ms < t.start_ts_ms:
+            i += 1
+        # Collect event timestamps inside [start, end], plus implicit
+        # boundaries at start and end so we can sum gap-by-gap.
+        boundary_ts: list[int] = [t.start_ts_ms]
+        j = i
+        while j < n and main_events[j].timestamp_ms <= t.end_ts_ms:
+            ts = main_events[j].timestamp_ms
+            if ts != boundary_ts[-1]:
+                boundary_ts.append(ts)
+            j += 1
+        if boundary_ts[-1] != t.end_ts_ms:
+            boundary_ts.append(t.end_ts_ms)
+        # Sum gaps; each gap is clipped at K_TURN_SECONDS (5 min). A
+        # legitimate long-running tool call (a Bash that takes 8 min)
+        # contributes its first 5 min as active; the rest is treated as
+        # Idle. Overnight gaps of any length cap at 5 min — so a session
+        # left open for 18 hours contributes at most 5 min per gap, not
+        # 18 hours.
+        active = 0.0
+        for k in range(len(boundary_ts) - 1):
+            gap_s = (boundary_ts[k + 1] - boundary_ts[k]) / 1000.0
+            if gap_s > 0:
+                active += min(gap_s, K_TURN_SECONDS)
+        t.active_seconds = active
 
 
 # ---------------------------------------------------------------------------
@@ -304,36 +369,80 @@ def afk_parallel_subagent_seconds(
 # ---------------------------------------------------------------------------
 
 
-def longest_afk_streak_seconds(turns: list[Turn]) -> float:
-    """Longest contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS idle.
+@dataclass(frozen=True)
+class AfkStreak:
+    """A contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS idle.
 
-    Two adjacent AFK turns are part of the same streak if the idle gap
-    between them is ≤ 30 min. The returned value sums *turn durations
-    only* — bridging idle gaps are not counted, matching the megarun's
-    ``sum(t.duration_s for t in streak)`` rule.
+    ``active_seconds`` is the sum of ``turn.active_seconds`` across the
+    streak — what the dashboard's "Longest agent run" L4 surfaces.
+    ``start_ts_ms``/``end_ts_ms`` give the wallclock range for the L4
+    top-N table.
     """
-    if not turns:
-        return 0.0
-    best = 0.0
-    cur = 0.0
+
+    start_ts_ms: int
+    end_ts_ms: int
+    active_seconds: float
+    turn_count: int
+
+
+def afk_streaks(turns: list[Turn]) -> list[AfkStreak]:
+    """Group consecutive AFK turns into streaks (bridged by ≤ 30 min idle).
+
+    Sums ``turn.active_seconds`` across each streak — idle stretches
+    inside an open turn are already excluded by ``segment_turns``.
+    """
+    out: list[AfkStreak] = []
+    cur_start: int | None = None
+    cur_end: int | None = None
+    cur_active = 0.0
+    cur_count = 0
     prev: Turn | None = None
     for t in turns:
         if t.label != "AFK":
+            if cur_start is not None and cur_end is not None:
+                out.append(
+                    AfkStreak(cur_start, cur_end, cur_active, cur_count)
+                )
+            cur_start = cur_end = None
+            cur_active = 0.0
+            cur_count = 0
             prev = t
-            cur = 0.0
             continue
-        if prev is None or prev.label != "AFK":
-            cur = t.duration_s
+        bridged = (
+            prev is not None
+            and prev.label == "AFK"
+            and (t.start_ts_ms - prev.end_ts_ms) / 1000.0 <= K_BRIDGE_IDLE_SECONDS
+        )
+        if cur_start is None or not bridged:
+            if cur_start is not None and cur_end is not None:
+                out.append(
+                    AfkStreak(cur_start, cur_end, cur_active, cur_count)
+                )
+            cur_start = t.start_ts_ms
+            cur_end = t.end_ts_ms
+            cur_active = t.active_seconds
+            cur_count = 1
         else:
-            gap_s = (t.start_ts_ms - prev.end_ts_ms) / 1000.0
-            if gap_s <= K_BRIDGE_IDLE_SECONDS:
-                cur += t.duration_s
-            else:
-                cur = t.duration_s
-        if cur > best:
-            best = cur
+            cur_end = t.end_ts_ms
+            cur_active += t.active_seconds
+            cur_count += 1
         prev = t
-    return best
+    if cur_start is not None and cur_end is not None:
+        out.append(AfkStreak(cur_start, cur_end, cur_active, cur_count))
+    return out
+
+
+def longest_afk_streak_seconds(turns: list[Turn]) -> float:
+    """Longest single AFK streak in active-seconds (idle excluded)."""
+    streaks = afk_streaks(turns)
+    return max((s.active_seconds for s in streaks), default=0.0)
+
+
+def top_afk_streaks(turns: list[Turn], n: int = 5) -> list[AfkStreak]:
+    """Top-N AFK streaks by active_seconds, descending."""
+    streaks = afk_streaks(turns)
+    streaks.sort(key=lambda s: s.active_seconds, reverse=True)
+    return streaks[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +464,7 @@ class TurnAggregates:
     afk_parallel_minutes_foreground: int
     afk_max_streak_minutes: int
     turns: tuple[Turn, ...]
+    top_afk_streaks: tuple[AfkStreak, ...]  # top 5 by active_seconds, descending
 
 
 def compute_turn_aggregates(
@@ -363,22 +473,30 @@ def compute_turn_aggregates(
 ) -> TurnAggregates:
     """Compute the live card's leverage inputs.
 
+    HITL/AFK minute counts and the longest-streak number are derived
+    from per-turn ``active_seconds`` (intra-turn idle > 30 min is
+    excluded), so a session left open overnight doesn't inflate the
+    "longest agent run". ``top_afk_streaks`` carries the L4 top-N
+    table's per-streak rows.
+
     When ``jsonl_path`` is provided, the on-disk subagent transcripts
     next to it are read and folded into ``afk_parallel_minutes_foreground``.
     Production extractor MUST pass it; unit tests can omit it.
     """
     turns = segment_turns(events)
-    hitl_s = sum(t.duration_s for t in turns if t.label == "HITL")
-    afk_s = sum(t.duration_s for t in turns if t.label == "AFK")
+    hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
+    afk_s = sum(t.active_seconds for t in turns if t.label == "AFK")
     extra_spans = subagent_spans_from_disk(jsonl_path) if jsonl_path else None
     parallel_s = afk_parallel_subagent_seconds(turns, events, extra_spans)
-    streak_s = longest_afk_streak_seconds(turns)
+    streaks = top_afk_streaks(turns, n=5)
+    streak_s = streaks[0].active_seconds if streaks else 0.0
     return TurnAggregates(
         hitl_minutes=round(hitl_s / 60),
         afk_minutes=round(afk_s / 60),
         afk_parallel_minutes_foreground=round(parallel_s / 60),
         afk_max_streak_minutes=round(streak_s / 60),
         turns=tuple(turns),
+        top_afk_streaks=tuple(streaks),
     )
 
 
@@ -446,15 +564,18 @@ __all__ = [
     "DISPATCH_TOOLS",
     "K_BRIDGE_IDLE_SECONDS",
     "K_TURN_SECONDS",
+    "AfkStreak",
     "MinuteBucket",
     "Turn",
     "TurnAggregates",
     "afk_intervals",
     "afk_parallel_subagent_seconds",
+    "afk_streaks",
     "classify_minutes",
     "compute_turn_aggregates",
     "hitl_minute_set",
     "longest_afk_streak_seconds",
     "segment_turns",
     "subagent_intervals",
+    "top_afk_streaks",
 ]

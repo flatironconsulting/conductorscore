@@ -24,6 +24,7 @@ from scripts.turn_classifier import (
 )
 from scripts.output_schema import (
     AfkInterval,
+    AfkStreakWire,
     ConfigCounts,
     DeviceMeta,
     ExtractorOutput,
@@ -168,6 +169,7 @@ def extract(
         afk_parallel_fg = 0
         afk_max_streak = 0
         intervals: list[AfkInterval] = []
+        top_streaks: list[AfkStreakWire] = []
         hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
 
         if window is not None:
@@ -185,6 +187,15 @@ def extract(
                         start_minute=start,
                         end_minute_exclusive=end_excl,
                         is_cron=False,
+                    )
+                )
+            for st in agg.top_afk_streaks:
+                top_streaks.append(
+                    AfkStreakWire(
+                        start_ts_ms=st.start_ts_ms,
+                        end_ts_ms=st.end_ts_ms,
+                        active_minutes=round(st.active_seconds / 60),
+                        turn_count=st.turn_count,
                     )
                 )
 
@@ -303,6 +314,7 @@ def extract(
                 cron_parallel_minutes=cron_parallel,
                 afk_max_streak_minutes=afk_max_streak,
                 afk_intervals=tuple(intervals),
+                top_afk_streaks=tuple(top_streaks),
                 strong_plan_signals=plan.strong,
                 weak_plan_signals=plan.weak,
                 is_planned=plan.is_planned,
