@@ -16,6 +16,6 @@ dev = ["pytest>=8", "pytest-cov>=5", "pytest-httpserver>=1.0"]
 [tool.setuptools.packages.find]
 exclude = ["tests*"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# Tests for this package live in the sibling server repo, under
+# server/tests/client/. To run them:
+#   cd ../server && uv run pytest tests/client/
