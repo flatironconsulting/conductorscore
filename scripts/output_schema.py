@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.8"
+SCHEMA_VERSION = "0.9"
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ class PerSession:
     distinct_skills: tuple[str, ...] = ()
     distinct_mcp_tools: tuple[str, ...] = ()
     distinct_builtin_tools: tuple[str, ...] = ()
-    # v0.3 — time partition + AFK leverage
+    # v0.9 — turn-rule HITL/AFK partition (replaces v0.3 minute rule)
     hitl_minutes: int = 0
     afk_minutes: int = 0
     idle_minutes: int = 0

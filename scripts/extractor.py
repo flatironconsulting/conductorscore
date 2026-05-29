@@ -13,14 +13,14 @@ from scripts.events import (
     read_events_and_text,
 )
 from scripts.frustration_detector import detect_rage_quit
-from scripts.minute_classifier import (
-    MinuteBucket,
-    afk_intervals,
-    afk_max_streak_minutes,
-    afk_parallel_minutes_foreground,
-    classify_minutes,
+from scripts.cron_classifier import (
     cron_intervals,
     cron_parallel_minutes,
+)
+from scripts.turn_classifier import (
+    afk_intervals,
+    compute_turn_aggregates,
+    hitl_minute_set as _hitl_minute_set_from_turns,
 )
 from scripts.output_schema import (
     AfkInterval,
@@ -158,8 +158,9 @@ def extract(
             plugin_invocations = 0
             distinct_plugins = ()
 
-        # v0.3 — time partition.
-        # A foreground session has a window; a Cron-only session does not.
+        # v0.4 — turn-based time partition (replaces v0.3 minute rule).
+        # Foreground sessions get a window so we know whether to compute
+        # turns; Cron-only sessions skip turn segmentation entirely.
         window = compute_window(events)
         hitl_minutes = 0
         afk_minutes = 0
@@ -170,18 +171,15 @@ def extract(
         hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
 
         if window is not None:
-            buckets = classify_minutes(events, window)
-            for m, b in buckets.items():
-                if b == MinuteBucket.HITL:
-                    hitl_minutes += 1
-                    hitl_minute_set.add(m)
-                elif b == MinuteBucket.AFK:
-                    afk_minutes += 1
-                else:
-                    idle_minutes += 1
-            afk_parallel_fg = afk_parallel_minutes_foreground(events, buckets)
-            afk_max_streak = afk_max_streak_minutes(buckets)
-            for start, end_excl in afk_intervals(buckets):
+            agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
+            hitl_minutes = agg.hitl_minutes
+            afk_minutes = agg.afk_minutes
+            afk_parallel_fg = agg.afk_parallel_minutes_foreground
+            afk_max_streak = agg.afk_max_streak_minutes
+            window_minutes = max(0, window[1] - window[0])
+            idle_minutes = max(0, window_minutes - hitl_minutes - afk_minutes)
+            hitl_minute_set = _hitl_minute_set_from_turns(agg.turns)
+            for start, end_excl in afk_intervals(agg.turns):
                 intervals.append(
                     AfkInterval(
                         start_minute=start,

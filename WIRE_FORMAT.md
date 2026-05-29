@@ -20,6 +20,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.6 | Feature 8 — fluency + informational | `sessions[].{assistant_msgs_by_model, user_skill_invocations, hitl_mcp_invocations}` |
 | 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, distinct_plugins, agent_dispatches}`, `config.{plugin_count, distinct_installed_plugins}` |
 | 0.8 | Cost-modal precision — precise per-(model, leg) token split | `sessions[].tokens_by_model` (map of `model_id → {input_miss, input_hit, output}`) |
+| 0.9 | Turn-rule classifier — replaces v0.3 minute rule | `sessions[].{hitl_minutes, afk_minutes, idle_minutes, afk_parallel_minutes_foreground, afk_max_streak_minutes, afk_intervals}` now derived from **turn segmentation** (turn ≤ 5 min → HITL, else AFK), matching the megarun renderer. Field shapes unchanged; semantics shift. |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
