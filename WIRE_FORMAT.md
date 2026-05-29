@@ -23,6 +23,20 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
+### Skill-score redesign — no wire bump
+
+The 2026-05-28 skill-score redesign (server-side composite reshape into
+five anchored L2 components — see [server spec](https://github.com/flatironconsulting/csserver/blob/main/docs/superpowers/specs/2026-05-28-skill-score-redesign-design.md))
+does **not** bump the schema. Every score input comes from the existing
+v0.8 payload: classifier output drives Leverage, the v0.5 anti-pattern
+cluster drives Craft, v0.2 + v0.7 invocation counts drive Customization,
+v0.8 tokens drive Efficiency.
+
+The only new ingest-side dependency is the GitHub fetcher (server-side)
+pulling per-commit `additions` / `deletions` / `files[]` for the
+lines-changed sub-metric. That call is server-only and adds no client
+fields.
+
 ## Current schema
 
 Skeleton — fleshed out per feature as fields are added.
