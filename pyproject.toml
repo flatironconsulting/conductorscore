@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "conductorscore"
 version = "0.1.0"
-description = "Local extractor + uploader for ConductorScore (privacy-load-bearing)"
+description = "ConductorScore Client"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = []  # stdlib only — privacy + portability

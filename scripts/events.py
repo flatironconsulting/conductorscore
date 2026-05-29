@@ -871,8 +871,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 
     Returns an empty dict if the ``subagents/`` directory doesn't exist.
 
-    The caller parses the sub_jsonl_path on demand (we return the path,
-    not parsed messages, to avoid a circular import with session_viewer_v2).
+    The caller parses the sub_jsonl_path on demand.
     """
     sub_dir = Path(jsonl_path).parent / Path(jsonl_path).stem / "subagents"
     if not sub_dir.is_dir():
