@@ -1,60 +1,34 @@
-"""Approval-signature counter — detects redundant approval requests.
+"""Approval-FRICTION counter — counts genuine tool-use denials.
 
-Anchors:
-- ``plans/003_outline.md`` § "redundant approvals" anti-pattern.
-- ``plans/004_wave1_implementation.md`` § Task 7.5.
+The ``redundantApprovals`` craft signal measures approval friction: how
+often a tool call was DENIED. A denial is the only data-grounded friction
+signal in a transcript — grants are never logged, so "approvals that
+should've been auto-allowed" cannot be measured. Denials are detected in
+the reader (``events.py``) and surfaced as ``Event.is_denied`` on
+TOOL_RESULT events (auto-mode classifier denial, user rejection, or user
+interrupt mid-tool).
 
-Each tool call that requires user approval is grouped by a *signature*
-that captures "would the user expect to re-approve this if asked
-again":
+Each denial is grouped by a *signature* that captures "which tool/arg got
+denied":
 
 - ``Bash``: ``("Bash", <first token of command>)``.
-- ``Edit`` / ``Write`` / ``MultiEdit``: ``("Edit", <top-level dir>)``.
+- ``Edit`` / ``Write`` / ``MultiEdit``: ``("Edit", <hashed top-level dir>)``.
 
-Destructive Bash patterns (``rm -rf``, ``git reset --hard``,
-``git push --force``, ``git clean -f``, ``DROP TABLE/DATABASE``) are
-ALWAYS exempt — those deserve a fresh approval every time even when
-repeated.
+Every denial is friction — there is NO threshold and NO destructive-exempt
+carve-out. The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
+per-signature denial COUNT (≥1 for any signature that saw a denial).
 
-The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
-OVERFLOW count (uses beyond ``APPROVAL_THRESHOLD``). Signatures with
-counts at or below the threshold are omitted entirely.
-
-Privacy: only the first token of a Bash command (e.g. ``"ls"``,
-``"git"``) and the top-level path component (e.g. ``"repo"``,
-``"home"``) cross the wire. Full commands and full paths are consumed
-in-memory.
+Privacy: only the first token of a Bash command (e.g. ``"ls"``, ``"git"``)
+and the hashed top-level path component cross the wire. Full commands and
+full paths are consumed in-memory; the denial result text never leaves the
+reader (only the ``is_denied`` boolean does).
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
-
-# Patterns that mark a Bash command as destructive — these are exempt
-# from redundant-approval counting because a fresh approval is genuinely
-# warranted every time.
-DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\brm\s+-rf?\b"),
-    re.compile(r"\bgit\s+reset\s+--hard\b"),
-    re.compile(r"\bgit\s+push\s+--force\b|\bgit\s+push\s+-f\b"),
-    re.compile(r"\bgit\s+clean\s+-f"),
-    re.compile(r"\bdrop\s+(?:table|database)\b", re.IGNORECASE),
-)
-
-APPROVAL_THRESHOLD = 5
 
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
-
-
-def is_destructive_exempt(tool: str, raw_input_str: str) -> bool:
-    """Return True iff ``raw_input_str`` for ``tool`` matches a destructive
-    pattern. Only Bash commands are evaluated (non-Bash always False)."""
-    if tool != "Bash":
-        return False
-    if not isinstance(raw_input_str, str):
-        return False
-    return any(p.search(raw_input_str) for p in DESTRUCTIVE_PATTERNS)
 
 
 def signature_for_bash(cmd: str) -> tuple[str, str]:
@@ -92,9 +66,13 @@ def signature_for_edit(file_path: str) -> tuple[str, str]:
 
 
 def signature_for_event(event) -> tuple[str, str] | None:
-    """Return the approval signature for ``event`` or None if the event
-    is not a Bash/Edit/Write/MultiEdit tool call (or is a destructive
-    Bash command exempt from counting)."""
+    """Return the approval signature for ``event`` or None if the event is
+    not a Bash/Edit/Write/MultiEdit tool call.
+
+    Unlike the old throughput counter, ALL Bash commands (including
+    destructive ones) get a signature — a denied destructive command is
+    still friction worth counting.
+    """
     if event.kind.name != "ASSISTANT_TOOL":
         return None
     raw = getattr(event, "raw_input", None) or {}
@@ -104,8 +82,6 @@ def signature_for_event(event) -> tuple[str, str] | None:
         cmd = raw.get("command", "")
         if not isinstance(cmd, str):
             return None
-        if is_destructive_exempt("Bash", cmd):
-            return None
         return signature_for_bash(cmd)
     if event.tool_name in _EDIT_TOOL_NAMES:
         path = raw.get("file_path", "")
@@ -114,28 +90,48 @@ def signature_for_event(event) -> tuple[str, str] | None:
 
 
 def count_redundant_approvals(events) -> dict[str, int]:
-    """Return ``{"<Tool>::<arg>": overflow_count}`` for each signature
-    used more than ``APPROVAL_THRESHOLD`` times. Signatures at or under
-    the threshold are omitted entirely.
+    """Return ``{"<Tool>::<arg>": denial_count}`` for every signature that
+    saw at least one tool-use DENIAL.
+
+    A denial is a TOOL_RESULT event with ``is_denied=True`` (set by the
+    reader when the result text matched a denial marker). Each denial is
+    resolved to its dispatching ASSISTANT_TOOL's signature via
+    ``tool_use_id``; when no match exists the denied result falls back to a
+    ``"<tool_name>::"`` signature (``"unknown::"`` if no tool name). There
+    is no threshold — every denial is friction.
     """
-    sig_counts: dict[tuple[str, str], int] = {}
+    # Map each ASSISTANT_TOOL dispatch id to its signature string.
+    id_to_sig: dict[str, str] = {}
     for e in events:
-        sig = signature_for_event(e)
-        if sig is None:
+        if e.kind.name != "ASSISTANT_TOOL":
             continue
-        sig_counts[sig] = sig_counts.get(sig, 0) + 1
-    return {
-        f"{t}::{a}": count - APPROVAL_THRESHOLD
-        for (t, a), count in sig_counts.items()
-        if count > APPROVAL_THRESHOLD
-    }
+        tu_id = getattr(e, "tool_use_id", None)
+        if not tu_id:
+            continue
+        sig = signature_for_event(e)
+        if sig is not None:
+            id_to_sig[tu_id] = f"{sig[0]}::{sig[1]}"
+        else:
+            # Bash/Edit with an unusable arg (e.g. non-str command): fall
+            # back to a tool-name signature so its denial still counts.
+            id_to_sig[tu_id] = f"{e.tool_name or 'unknown'}::"
+
+    counts: dict[str, int] = {}
+    for e in events:
+        if e.kind.name != "TOOL_RESULT":
+            continue
+        if not getattr(e, "is_denied", False):
+            continue
+        tu_id = getattr(e, "tool_use_id", None)
+        sig = id_to_sig.get(tu_id) if tu_id else None
+        if sig is None:
+            sig = f"{e.tool_name or 'unknown'}::"
+        counts[sig] = counts.get(sig, 0) + 1
+    return counts
 
 
 __all__ = [
-    "APPROVAL_THRESHOLD",
-    "DESTRUCTIVE_PATTERNS",
     "count_redundant_approvals",
-    "is_destructive_exempt",
     "signature_for_bash",
     "signature_for_edit",
     "signature_for_event",

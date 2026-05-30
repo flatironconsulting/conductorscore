@@ -113,6 +113,14 @@ class Event:
     is_auto_compaction_marker: bool = False
     stop_reason: str | None = None        # ASSISTANT_TEXT/TOOL: 'end_turn' | 'tool_use' | 'stop_sequence' | 'max_tokens' | None
     tool_use_id: str | None = None        # ASSISTANT_TOOL: dispatch id; TOOL_RESULT: matching id
+    # TOOL_RESULT: True iff the result text matched a tool-use DENIAL marker
+    # (auto-mode classifier denial, user rejection, or user interrupt
+    # mid-tool). This is the ONLY approval-friction signal in the transcript
+    # — grants are never logged. Privacy: only the boolean is stored; the
+    # result text that triggered detection is computed in the reader and
+    # discarded there (the privacy-invariant test pins that no raw text
+    # lives on the Event).
+    is_denied: bool = False
 
 
 def _parse_ts_ms(line) -> int | None:
@@ -337,6 +345,46 @@ _SYNTHETIC_SENTINELS = (
     "[Request interrupted by user]",
     "[Request interrupted by user for tool use]",
 )
+
+# Markers that identify a tool_result block as a tool-use DENIAL. These are
+# the only data-grounded approval-friction signals: grants are never logged.
+# Matched case-insensitively as substrings of the (in-memory) result text.
+#   - auto-mode classifier denial
+#   - user rejection (two phrasings)
+#   - user interrupt mid-tool
+_DENIAL_MARKERS: tuple[str, ...] = (
+    "permission for this action was denied",
+    "tool use was rejected",
+    "doesn't want to proceed with this tool use",
+    "request interrupted by user for tool use",
+)
+
+
+def _is_denial_text(text: str) -> bool:
+    """Return True iff ``text`` contains any denial marker (case-insensitive
+    substring). The text itself is never stored — only this boolean."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(marker in low for marker in _DENIAL_MARKERS)
+
+
+def _tool_result_text(block: dict) -> str:
+    """Flatten a tool_result block's ``content`` (str OR list of
+    ``{"type":"text","text":...}`` dicts) to a flat string for denial
+    detection. The returned string never escapes the reader."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                t = item.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return " ".join(parts)
+    return ""
 
 
 def _strip_synthetic_content(text: str) -> str:
@@ -608,6 +656,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     if block.get("type") != "tool_result":
                         continue
                     _tu_id = block.get("tool_use_id")
+                    # Denial detection: flatten the result text in-memory,
+                    # test it against the markers, keep ONLY the boolean.
+                    _is_denied = _is_denial_text(_tool_result_text(block))
                     events.append(
                         Event(
                             kind=EventKind.TOOL_RESULT,
@@ -620,6 +671,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             is_sidechain=is_sidechain,
                             subagent_id=subagent_id,
                             tool_use_id=_tu_id if isinstance(_tu_id, str) else None,
+                            is_denied=_is_denied,
                         )
                     )
             continue
