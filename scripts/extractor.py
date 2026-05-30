@@ -40,8 +40,10 @@ from scripts.session_window import compute_window
 from scripts.tool_counter import (
     count_compaction_and_tokens,
     count_hitl_mcp_invocations,
+    count_hitl_mcp_invocations_by_name,
     count_tools,
     count_user_skill_invocations,
+    count_user_skill_invocations_by_name,
 )
 
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -150,6 +152,7 @@ def extract(
             agent_dispatches = tc.agent_dispatches
             plugin_invocations = tc.plugin_invocations
             distinct_plugins = tuple(tc.distinct_plugins)
+            plugin_invocations_by_name = dict(tc.plugin_invocations_by_name)
         else:
             distinct_skills = ()
             distinct_mcp_tools = ()
@@ -158,6 +161,7 @@ def extract(
             agent_dispatches = 0
             plugin_invocations = 0
             distinct_plugins = ()
+            plugin_invocations_by_name = {}
 
         # v0.4 — turn-based time partition (replaces v0.3 minute rule).
         # Foreground sessions get a window so we know whether to compute
@@ -271,6 +275,14 @@ def extract(
         hitl_mcp_invocations = count_hitl_mcp_invocations(
             events, hitl_minute_set
         )
+        # v0.11 — per-name versions of the same two counters (plugin map
+        # comes from `tc` above). Each sums to its scalar counterpart.
+        skill_invocations_by_name = count_user_skill_invocations_by_name(
+            events, text_map
+        )
+        mcp_invocations_by_name = count_hitl_mcp_invocations_by_name(
+            events, hitl_minute_set
+        )
 
         # v0.8 — precise per-model token split. Only assistant events
         # carry a model id and usage counts; the reader only sets
@@ -342,6 +354,11 @@ def extract(
                 agent_dispatches=agent_dispatches,
                 # v0.8 — precise per-(model, leg) token split.
                 tokens_by_model=tokens_by_model,
+                # v0.11 — per-name invocation maps for the Top by
+                # invocations table.
+                skill_invocations_by_name=skill_invocations_by_name,
+                mcp_invocations_by_name=mcp_invocations_by_name,
+                plugin_invocations_by_name=plugin_invocations_by_name,
             )
         )
     return ExtractorOutput(

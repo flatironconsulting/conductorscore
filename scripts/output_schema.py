@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = "0.10"
+SCHEMA_VERSION = "0.11"
 
 
 @dataclass(frozen=True)
@@ -128,6 +128,14 @@ class PerSession:
     # appeared (e.g. cron-only sessions). Drives the Cost Breakdown
     # modal's per-(model, leg) rows without server-side approximation.
     tokens_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
+    # v0.11 — per-name invocation maps for the Customization "Top by
+    # invocations" table. Each map sums to its existing scalar total
+    # (skill→user_skill_invocations, mcp→hitl_mcp_invocations,
+    # plugin→plugin_invocations). Plugin keys are RAW names (uploaded for
+    # the owner's private dashboard; the public route masks them).
+    skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    mcp_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -212,6 +220,13 @@ class ExtractorOutput:
                     "tokens_by_model": {
                         m: dict(v) for m, v in s.tokens_by_model.items()
                     },
+                    "skill_invocations_by_name": dict(
+                        s.skill_invocations_by_name
+                    ),
+                    "mcp_invocations_by_name": dict(s.mcp_invocations_by_name),
+                    "plugin_invocations_by_name": dict(
+                        s.plugin_invocations_by_name
+                    ),
                 }
                 for s in self.sessions
             ],
