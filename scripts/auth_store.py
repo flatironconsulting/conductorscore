@@ -39,6 +39,7 @@ def load_or_create_device_id() -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     new_id = str(uuid.uuid4())
     p.write_text(new_id)
+    os.chmod(p, 0o600)
     return new_id
 
 
@@ -85,8 +86,7 @@ def _write_store(store: dict) -> None:
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(store, indent=2))
     os.chmod(tmp, 0o600)
-    tmp.replace(p)  # atomic on POSIX
-    os.chmod(p, 0o600)
+    tmp.replace(p)  # atomic on POSIX; preserves the tmp file's 0600 mode
 
 
 def load_auth(api_base: str) -> dict | None:
