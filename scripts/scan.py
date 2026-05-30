@@ -110,31 +110,39 @@ def main() -> int:
 
     # ExtractorOutput.to_json() serialises via to_dict() — use it rather than
     # json.dumps(features) which would fail on the dataclass object.
-    req = urllib.request.Request(
-        f"{API_BASE}/api/ingest",
-        method="POST",
-        data=features.to_json().encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "authorization": f"Bearer {auth['device_token']}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            resp = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") or "{}"
-        if e.code == 401:
-            # Non-destructive: a 401 may be wrong-environment or transient.
-            # Keep the credential; surface a re-auth signal instead of deleting.
+    features_json = features.to_json()
+    kind, payload = _upload(features_json, auth["device_token"])
+
+    # On a 401 the stored token is rejected. Attempt ONE silent re-auth (no
+    # browser) + retry — never delete the credential (non-destructive, D8).
+    if kind == "http" and payload[0] == 401:
+        try:
+            import scripts.reauth as reauth
+            auth = reauth.resolve_auth(
+                API_BASE,
+                interactive=False,
+                allow_gh=reauth.gh_consent_given(),
+                force_refresh=True,
+            )
+        except Exception:
+            sw.write(phase="error", message="reauth_needed: token rejected (401)")
+            print("reauth_needed: 401", file=sys.stderr)
+            return 1
+        kind, payload = _upload(features_json, auth["device_token"])
+
+    if kind == "ok":
+        resp = payload
+    elif kind == "http":
+        code, body = payload
+        if code == 401:
             sw.write(phase="error", message="reauth_needed: token rejected (401)")
         else:
-            sw.write(phase="error", message=f"upload_failed: HTTP {e.code} {body}")
-        print(f"upload_failed: HTTP {e.code}", file=sys.stderr)
+            sw.write(phase="error", message=f"upload_failed: HTTP {code} {body}")
+        print(f"upload_failed: HTTP {code}", file=sys.stderr)
         return 1
-    except urllib.error.URLError as e:
-        sw.write(phase="error", message=f"network_unreachable: {e.reason}")
-        print(f"network_unreachable: {e.reason}", file=sys.stderr)
+    else:  # neterr
+        sw.write(phase="error", message=f"network_unreachable: {payload}")
+        print(f"network_unreachable: {payload}", file=sys.stderr)
         return 1
 
     sw.write(
