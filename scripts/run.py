@@ -46,12 +46,48 @@ def _scan_cmd() -> list[str]:
     return [sys.executable, str(here / "scan.py")]
 
 
+def _login(opts: list[str]) -> int:
+    """Explicit `/conductorscore login [--switch] [--gh]`.
+
+    Runs the interactive re-auth ladder (device flow allowed). `--switch` forces
+    a new identity by clearing the current base's entry first. `--gh` records
+    one-time consent for the GitHub-CLI shortcut (spec D5).
+    """
+    import scripts.reauth as reauth
+
+    if "--switch" in opts:
+        auth_store.clear_auth(API_BASE)
+    use_gh = reauth.gh_consent_given()
+    if "--gh" in opts:
+        reauth.record_gh_consent()
+        use_gh = True
+    try:
+        entry = reauth.resolve_auth(API_BASE, interactive=True, allow_gh=use_gh)
+    except reauth.ReauthRequired as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    who = entry.get("github_username") or "you"
+    print(f"✓ Logged in as @{who}")
+    return 0
+
+
 def main() -> int:
     auth_store.ensure_migrated()
+    args = sys.argv[1:]
+    if args and args[0] == "login":
+        return _login(args[1:])
+
     if auth_store.load_auth(API_BASE) is None:
-        print("Not paired yet.")
-        print(f"Visit {PAIR_URL} to get a personalized install URL.")
-        return 0
+        # Auto path: only the SILENT gh shortcut may fire here (interactive=False),
+        # so a bare `/conductorscore` never springs a browser device flow. If it
+        # can't resolve, point the user at the explicit login / pair flow.
+        import scripts.reauth as reauth
+        try:
+            reauth.resolve_auth(API_BASE, interactive=False, allow_gh=reauth.gh_consent_given())
+        except reauth.ReauthRequired:
+            print("Not paired yet.")
+            print(f"Run /conductorscore login to authenticate, or visit {PAIR_URL}.")
+            return 0
 
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
