@@ -3,12 +3,12 @@
 
 Usage: pair.py <pairing_code>
 
-Writes ~/.config/conductorscore/auth.json with the device token and
-the user's identity on success. Always performs the exchange — each
-install snippet carries a fresh single-use code, so re-running with
-a new code is the intended way to switch identities or refresh the
-device token. Accidental double-paste of the SAME code surfaces as a
-409 (code_already_used) from the server.
+Writes ~/.config/conductorscore/auth.json (env-keyed v2 store) with
+the device token and the user's identity on success. Always performs
+the exchange — each install snippet carries a fresh single-use code,
+so re-running with a new code is the intended way to switch identities
+or refresh the device token. Accidental double-paste of the SAME code
+surfaces as a 409 (code_already_used) from the server.
 """
 from __future__ import annotations
 
@@ -16,37 +16,19 @@ import json
 import os
 import re
 import sys
-import uuid
 import urllib.request
 import urllib.error
-from pathlib import Path
+
+if __package__ in (None, ""):
+    import pathlib as _pathlib
+    _parent = _pathlib.Path(__file__).resolve().parent.parent
+    if str(_parent) not in sys.path:
+        sys.path.insert(0, str(_parent))
+
+import scripts.auth_store as auth_store
 
 PAIRING_CODE_RE = re.compile(r"^cs_pair_[A-Z2-7]{12}$")
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
-
-
-def _config_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "conductorscore"
-
-
-def _auth_path() -> Path:
-    return _config_dir() / "auth.json"
-
-
-def _device_id_path() -> Path:
-    return _config_dir() / "device_id"
-
-
-def _load_or_create_device_id() -> str:
-    p = _device_id_path()
-    if p.exists():
-        return p.read_text().strip()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    new_id = str(uuid.uuid4())
-    p.write_text(new_id)
-    return new_id
 
 
 def _post(url: str, payload: dict) -> tuple[int, dict]:
@@ -92,24 +74,21 @@ def main() -> int:
     # auth.json would stay stale + scans would attribute to the old identity.
     # The server's single-use-code check (409 already_used) handles the
     # accidental-double-paste case gracefully.
-    device_id = _load_or_create_device_id()
+    device_id = auth_store.load_or_create_device_id()
     status, body = _post(
         f"{API_BASE}/api/pair/exchange",
         {"pairing_code": code, "client_device_id": device_id},
     )
 
     if status == 200:
-        auth = {
+        entry = {
             "device_token": body["device_token"],
             "github_username": body.get("github_username"),
             "email": body.get("email"),
             "paired_at": body.get("paired_at") or _now_iso(),
         }
-        p = _auth_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(auth, indent=2))
-        os.chmod(p, 0o600)
-        who = auth["github_username"] or auth["email"] or "you"
+        auth_store.save_auth(API_BASE, entry)
+        who = entry["github_username"] or entry["email"] or "you"
         print(f"✓ Paired as @{who}")
         return 0
 
