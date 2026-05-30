@@ -6,7 +6,7 @@ This is the code that runs on your machine, reads your local Claude Code transcr
 
 ```
 ~/.claude/projects/**/*.jsonl   →   extractor (this repo)   →   numeric payload   →   conductorscore.com
-        (your transcripts)              (pure function)         (≈23 fields/session)        (scoring)
+        (your transcripts)              (pure function)         (≈38 fields/session)        (scoring)
 ```
 
 ## What gets uploaded
