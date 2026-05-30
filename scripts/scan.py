@@ -26,15 +26,11 @@ if __package__ in (None, ""):
     if str(_parent) not in sys.path:
         sys.path.insert(0, str(_parent))
 
+import scripts.auth_store as auth_store
 from scripts.extractor import extract
 from scripts.status_writer import StatusWriter
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
-
-
-def _config_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "conductorscore"
 
 
 def _cache_dir() -> Path:
@@ -47,10 +43,10 @@ def _status_path() -> Path:
 
 
 def _load_auth() -> dict:
-    auth_path = _config_dir() / "auth.json"
-    if not auth_path.exists():
-        raise SystemExit("auth.json missing; run pair.py first")
-    return json.loads(auth_path.read_text())
+    entry = auth_store.load_auth(API_BASE)
+    if entry is None:
+        raise SystemExit("not paired for this server; run /conductorscore")
+    return entry
 
 
 def _profile_url(auth: dict) -> str:
@@ -62,7 +58,7 @@ def main() -> int:
     sw = StatusWriter(_status_path())
     sw.write(phase="starting")
     auth = _load_auth()
-    device_id = (_config_dir() / "device_id").read_text().strip()
+    device_id = auth_store.load_or_create_device_id()
 
     last_emit = 0.0
     last_progress = {"current": 0, "total": 0}
@@ -106,11 +102,9 @@ def main() -> int:
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") or "{}"
         if e.code == 401:
-            try:
-                (_config_dir() / "auth.json").unlink()
-            except OSError:
-                pass
-            sw.write(phase="error", message=f"401 invalid_token: {body}")
+            # Non-destructive: a 401 may be wrong-environment or transient.
+            # Keep the credential; surface a re-auth signal instead of deleting.
+            sw.write(phase="error", message="reauth_needed: token rejected (401)")
         else:
             sw.write(phase="error", message=f"upload_failed: HTTP {e.code} {body}")
         print(f"upload_failed: HTTP {e.code}", file=sys.stderr)
