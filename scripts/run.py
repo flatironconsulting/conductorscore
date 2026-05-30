@@ -2,7 +2,7 @@
 """Orchestrator for the ConductorScore skill.
 
 Behavior:
-  * If ~/.config/conductorscore/auth.json is missing, print the pair URL and exit 0.
+  * If no auth token is stored for the configured API base, print the pair URL and exit 0.
   * Otherwise spawn scan.py (or $CONDUCTORSCORE_SCAN_CMD), poll status.json,
     print one updating line per ~3s during scan, then print a 3-line summary.
 
@@ -18,14 +18,19 @@ import sys
 import time
 from pathlib import Path
 
+if __package__ in (None, ""):
+    import pathlib as _pathlib
+    _parent = _pathlib.Path(__file__).resolve().parent.parent
+    if str(_parent) not in sys.path:
+        sys.path.insert(0, str(_parent))
+
+import scripts.auth_store as auth_store
+
+API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
+
 PAIR_URL = "https://conductorscore.com/pair"
 POLL_INTERVAL = 1.0
 LINE_INTERVAL = 3.0
-
-
-def _config_dir() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "conductorscore"
 
 
 def _cache_dir() -> Path:
@@ -42,8 +47,8 @@ def _scan_cmd() -> list[str]:
 
 
 def main() -> int:
-    auth_path = _config_dir() / "auth.json"
-    if not auth_path.exists():
+    auth_store.ensure_migrated()
+    if auth_store.load_auth(API_BASE) is None:
         print("Not paired yet.")
         print(f"Visit {PAIR_URL} to get a personalized install URL.")
         return 0
