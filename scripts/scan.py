@@ -54,6 +54,29 @@ def _profile_url(auth: dict) -> str:
     return f"{API_BASE}/u/{handle}"
 
 
+def _upload(features_json: str, device_token: str):
+    """POST the payload to /api/ingest. Returns one of:
+      ("ok", resp_dict) | ("http", (code, body)) | ("neterr", reason)
+    """
+    req = urllib.request.Request(
+        f"{API_BASE}/api/ingest",
+        method="POST",
+        data=features_json.encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {device_token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return "ok", json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8") or "{}"
+        return "http", (e.code, body)
+    except urllib.error.URLError as e:
+        return "neterr", e.reason
+
+
 def main() -> int:
     sw = StatusWriter(_status_path())
     sw.write(phase="starting")
