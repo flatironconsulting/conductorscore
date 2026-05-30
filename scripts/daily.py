@@ -25,12 +25,13 @@ def _recent(stamp: Path) -> bool:
 def main() -> int:
     if os.environ.get("CONDUCTORSCORE_NO_AUTO") == "1":
         return 0
-    stamp = _data_dir() / "last_daily"
-    if _recent(stamp):
-        return 0
-    root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parents[1]))
-    stamp.write_text(str(int(time.time())))  # stamp BEFORE spawn so a crash can't busy-loop
     try:
+        stamp = _data_dir() / "last_daily"
+        if _recent(stamp):
+            return 0
+        root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parents[1]))
+        stamp.write_text(str(int(time.time())))  # stamp BEFORE spawn so a crash can't busy-loop.
+        # No lock: two simultaneous SessionStarts may both fire once — acceptable for a score refresh.
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                       env={**os.environ, "CONDUCTORSCORE_HEADLESS": "1"})
         if os.name == "posix":
