@@ -60,6 +60,12 @@ class ToolCounts:
     agent_dispatches: int = 0
     plugin_invocations: int = 0
     distinct_plugins: list[str] = field(default_factory=list)
+    # v0.11 — RAW per-name plugin tallies for the Customization "Top by
+    # invocations" table. Summed values equal ``plugin_invocations``.
+    # Kept ALONGSIDE the hashed ``distinct_plugins`` (which still feeds
+    # the pluginUsage metric): raw names are uploaded for the owner's
+    # private dashboard; the public route masks them as "Plugin #N".
+    plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     agent_dispatches = 0
     plugin_invocations = 0
     plugins: set[str] = set()
+    plugins_by_name: dict[str, int] = {}
     try:
         raw = jsonl_path.read_text()
     except OSError:
@@ -221,6 +228,9 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     plugin_name = pm.group(1).strip()
                     if plugin_name:
                         plugins.add(hash_plugin_id(plugin_name))
+                        plugins_by_name[plugin_name] = (
+                            plugins_by_name.get(plugin_name, 0) + 1
+                        )
 
     return ToolCounts(
         distinct_skills=sorted(skills),
@@ -230,6 +240,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         agent_dispatches=agent_dispatches,
         plugin_invocations=plugin_invocations,
         distinct_plugins=sorted(plugins),
+        plugin_invocations_by_name=plugins_by_name,
     )
 
 
@@ -263,6 +274,33 @@ def count_user_skill_invocations(events, event_text_map: dict) -> int:
     return count
 
 
+def count_user_skill_invocations_by_name(
+    events, event_text_map: dict
+) -> dict[str, int]:
+    """Per-name version of :func:`count_user_skill_invocations`.
+
+    Tallies every ``SLASH_CMD_RE`` match across USER events into a
+    ``{skill_name: count}`` map (lowercased names). By construction the
+    summed values equal :func:`count_user_skill_invocations` for the same
+    inputs — the per-name breakdown that drives the Customization "Top by
+    invocations" table (v0.11).
+
+    Privacy: same memory-only ``event_text_map`` side channel; only the
+    skill tokens and their counts escape, never raw prompt text.
+    """
+    counts: dict[str, int] = {}
+    for e in events:
+        if e.kind.name != "USER":
+            continue
+        text = event_text_map.get(id(e), "")
+        if not text:
+            continue
+        for m in SLASH_CMD_RE.finditer(text):
+            name = m.group(1).lower()
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
     """Count of MCP tool calls whose timestamp falls in a HITL minute.
 
@@ -287,3 +325,26 @@ def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
         if (e.timestamp_ms // 60_000) in hitl_minutes:
             count += 1
     return count
+
+
+def count_hitl_mcp_invocations_by_name(
+    events, hitl_minutes: set[int]
+) -> dict[str, int]:
+    """Per-tool version of :func:`count_hitl_mcp_invocations`.
+
+    Tallies HITL-window ``mcp__*`` tool calls into a ``{tool_name: count}``
+    map. By construction the summed values equal
+    :func:`count_hitl_mcp_invocations` for the same inputs — the per-name
+    breakdown for the Customization "Top by invocations" table (v0.11).
+    """
+    if not hitl_minutes:
+        return {}
+    counts: dict[str, int] = {}
+    for e in events:
+        if e.kind.name != "ASSISTANT_TOOL":
+            continue
+        if not e.tool_name or not e.tool_name.startswith("mcp__"):
+            continue
+        if (e.timestamp_ms // 60_000) in hitl_minutes:
+            counts[e.tool_name] = counts.get(e.tool_name, 0) + 1
+    return counts
