@@ -21,7 +21,7 @@ where `<scripts>` is the plugin's `scripts/` dir (`${CLAUDE_PLUGIN_ROOT}/scripts
 Run `python3 <scripts>/run.py` (or `python <scripts>/run.py`). Show the score.
 
 ## 5. Report
-Tell the user: their score; that `/conductorscore` is available now or next session; that it refreshes daily; and that setting `CONDUCTORSCORE_NO_AUTO=1` disables the daily refresh.
+Tell the user: their score; that the /conductorscore command is registered now for a plugin install, or becomes available next session if the fallback skill copy was used; that it refreshes daily; and that setting `CONDUCTORSCORE_NO_AUTO=1` disables the daily refresh.
 
 ## Constraints
 - Do not request secrets, do not read unrelated files, do not run steps beyond these.
