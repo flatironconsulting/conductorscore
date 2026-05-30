@@ -115,13 +115,16 @@ def main() -> int:
 
     # On a 401 the stored token is rejected. Attempt ONE silent re-auth (no
     # browser) + retry — never delete the credential (non-destructive, D8).
+    # In headless mode (daily background run) suppress gh-cli calls too so the
+    # process can never block or open a browser.
     if kind == "http" and payload[0] == 401:
+        headless = os.environ.get("CONDUCTORSCORE_HEADLESS") == "1"
         try:
             import scripts.reauth as reauth
             auth = reauth.resolve_auth(
                 API_BASE,
                 interactive=False,
-                allow_gh=reauth.gh_consent_given(),
+                allow_gh=False if headless else reauth.gh_consent_given(),
                 force_refresh=True,
             )
         except Exception:
