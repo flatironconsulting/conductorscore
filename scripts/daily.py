@@ -7,8 +7,12 @@ from pathlib import Path
 THROTTLE_SECONDS = 20 * 3600
 
 def _data_dir() -> Path:
-    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.environ.get("XDG_CACHE_HOME")
-    base = Path(d) if d else Path.home() / ".cache" / "conductorscore"
+    d = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if d:
+        base = Path(d)
+    else:
+        cache = os.environ.get("XDG_CACHE_HOME")
+        base = (Path(cache) if cache else Path.home() / ".cache") / "conductorscore"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
