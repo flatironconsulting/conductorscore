@@ -29,8 +29,10 @@ carve-out. The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
 per-signature flow-stop COUNT. A single dispatch contributes at most once
 (a denial is not also double-counted as a wait).
 
-Privacy: only the first token of a Bash command (e.g. ``"ls"``, ``"git"``)
-and the hashed top-level path component cross the wire. Full commands and
+Privacy: only the first command token of a Bash command (e.g. ``"ls"``,
+``"git"``; leading ``NAME=value`` env assignments are skipped so a secret
+value can't ride along) and the hashed top-level path component cross the
+wire. Full commands and
 full paths are consumed in-memory; the denial result text never leaves the
 reader (only the ``is_denied`` boolean does).
 """
@@ -38,8 +40,14 @@ reader (only the ``is_denied`` boolean does).
 from __future__ import annotations
 
 import hashlib
+import re
 
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+
+# A leading shell ``NAME=value`` assignment. We skip these when deriving a
+# Bash signature so a secret VALUE (e.g. ``TOKEN=ghp_…``) can never become a
+# plaintext wire key — the categorical signature is the actual command.
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # A pause longer than this between a tool dispatch and the next event is
 # treated as "execution waited for a human approval-click." 10s by design
@@ -48,11 +56,19 @@ APPROVAL_WAIT_MS = 10_000
 
 
 def signature_for_bash(cmd: str) -> tuple[str, str]:
-    """Bash signature = first whitespace-separated token. Empty for blank
-    commands."""
+    """Bash signature = first whitespace-separated token of the *command*,
+    after skipping any leading inline ``NAME=value`` env assignments. Empty
+    for blank commands (or a bare assignment with no following command).
+
+    The skip is a privacy guard: ``TOKEN=secret ./deploy.sh`` must signature
+    as ``./deploy.sh``, never ``TOKEN=secret`` — the value could be a secret
+    and the signature is emitted raw on the wire.
+    """
     parts = cmd.strip().split()
-    first = parts[0] if parts else ""
-    return ("Bash", first)
+    i = 0
+    while i < len(parts) and _ENV_ASSIGN_RE.match(parts[i]):
+        i += 1
+    return ("Bash", parts[i] if i < len(parts) else "")
 
 
 def _sha8(s: str) -> str:

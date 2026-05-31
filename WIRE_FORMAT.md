@@ -148,7 +148,7 @@ All v0.1 fields (`session_hash`, `project_hash`, `started_at_ms`,
 
 | Field                    | Type             | Nullable | Notes                                                                                  |
 |--------------------------|------------------|----------|----------------------------------------------------------------------------------------|
-| `distinct_skills`        | array of strings | no       | Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`) that appeared in user messages (matching `(?:^|\s)/[a-z][a-z0-9_-]+\b`). Slash-command arguments are dropped. |
+| `distinct_skills`        | array of strings | no       | Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`). Read from Claude Code's structured `<command-name>…</command-name>` markers (colon-bearing names like `my-plugin:deploy` are routed to the plugin counters instead); a leading slash command at the very start of a user message is accepted as a legacy fallback. Free-prose `/word` tokens and path fragments are **never** matched. Slash-command arguments are dropped. |
 | `distinct_mcp_tools`     | array of strings | no       | Sorted, de-duplicated `tool_use` block names whose name begins with `mcp__`. Tool inputs/outputs are NOT included. |
 | `distinct_builtin_tools` | array of strings | no       | Sorted, de-duplicated `tool_use` block names that do NOT begin with `mcp__` (e.g. `Read`, `Edit`, `Bash`). |
 
@@ -481,9 +481,10 @@ existed in earlier revisions and were removed).
 
 A signature groups dispatches by tool + a privacy-safe arg:
 
-- **Bash**: `("Bash", <first whitespace-separated token of the command>)`.
-  The first token (e.g. `"ls"`, `"git"`, `"echo"`) is categorical and
-  emitted raw.
+- **Bash**: `("Bash", <first command token>)`. Any leading shell
+  `NAME=value` environment assignments are skipped first, so the token
+  is the actual command (e.g. `"ls"`, `"git"`, `"aws"`) — never a
+  `TOKEN=secret` value. The token is categorical and emitted raw.
 - **Edit / Write / MultiEdit**: `("Edit", <sha256(top_level_dir)[:8]>)`.
   The top-level path component is HASHED so directory names never
   cross the wire while still allowing grouped counting.
@@ -609,7 +610,7 @@ following are added:
 | Field                       | Type                | Nullable | Notes                                                                                                                                                                                                                                                                                                |
 |-----------------------------|---------------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `assistant_msgs_by_model`   | object<string,int>  | no       | `{ "<raw_model_id>": message_count }`. Counts assistant transcript messages (deduplicated on `(timestamp_ms, model)` so one line that fans out into text + tool_use + thinking blocks is one message). Keys are RAW Anthropic model IDs (e.g. `"claude-sonnet-4-6"`); the server applies its own tier classifier so the wire format stays stable across new model releases. Messages with no `model` field are omitted entirely. Defaults to `{}`. |
-| `user_skill_invocations`    | integer             | no       | Total count of slash-command invocations in USER messages, matching the same `(?:^|\s)/[a-z][a-z0-9_-]+\b` pattern as `distinct_skills` but **counting every occurrence** (a user message with `"/plan and /plan again"` contributes 2). Numerator of the fluency repetition metric. Defaults to `0`. |
+| `user_skill_invocations`    | integer             | no       | Total count of slash-command invocations in USER messages, from the same `<command-name>` markers as `distinct_skills` but **counting every occurrence** (two separate `/plan` invocations contribute 2). Numerator of the fluency repetition metric. Defaults to `0`. |
 | `hitl_mcp_invocations`      | integer             | no       | Count of `ASSISTANT_TOOL` events whose tool name starts with `mcp__` AND whose minute (`floor(timestamp_ms / 60_000)`) is in the session's HITL minute set (per minute classifier). MCP calls inside AFK / Idle / Cron minutes are excluded by design — the fluency metric is HITL-time-only. Defaults to `0`. |
 
 ### Privacy posture for v0.6 fields
@@ -617,10 +618,10 @@ following are added:
 - **assistant_msgs_by_model** — raw Anthropic model IDs are
   categoricals (a small, public namespace published by Anthropic);
   the dict carries integer counts only.
-- **user_skill_invocations** — the slash-command regex is applied
-  in-process to user text; only the integer escapes. Slash-command
-  arguments and surrounding prose are dropped, identical to the
-  `distinct_skills` scanner.
+- **user_skill_invocations** — counted in-process from the structured
+  `<command-name>` markers (never free prose); only the integer
+  escapes. Slash-command arguments and surrounding prose are dropped,
+  identical to the `distinct_skills` scanner.
 - **hitl_mcp_invocations** — derived from existing in-memory
   `Event` objects + the precomputed HITL minute set; no raw text is
   read.

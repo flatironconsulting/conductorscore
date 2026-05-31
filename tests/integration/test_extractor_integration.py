@@ -39,19 +39,39 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     secret_tool_input = "SECRET_TOOL_INPUT_99"
     secret_slash_arg = "SECRET_SLASH_ARG_88"
     secret_assistant_text = "SECRET_ASSISTANT_TEXT_77"
+    secret_cmd_arg = "SECRET_CMD_ARG_55"  # inside <command-args>
+    secret_env_value = "AKIA_SECRET_VALUE_66"  # inline Bash env-var value
+    secret_path_dir = "production_secrets"  # a path fragment typed in prose
 
     proj_dir = isolated_claude_home / "projects" / secret_project_dir
     _write_jsonl(
         proj_dir / f"{secret_session_id}.jsonl",
         [
+            # (a) A REAL slash command — structured <command-name> marker.
+            # Only the command token ("review") is categorical; the
+            # <command-args> payload is a secret that must never leave.
             {
                 "type": "user",
                 "timestamp": "2026-05-23T00:00:00.000Z",
                 "message": {
                     "role": "user",
                     "content": (
-                        f"please remember {secret_phrase} and also keep my path safe "
-                        f"and run /plan {secret_slash_arg}"
+                        f"<command-name>/review</command-name>\n"
+                        f"<command-args>{secret_cmd_arg}</command-args>"
+                    ),
+                },
+            },
+            # (b) PROSE that merely MENTIONS slashes — a path fragment and a
+            # mid-sentence "/plan". Neither is a real command, so neither may
+            # be captured into distinct_skills (the v0.4.0 over-capture bug).
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T00:01:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": (
+                        f"please remember {secret_phrase}, edit the file at "
+                        f"/{secret_path_dir}/keys.env, and run /plan {secret_slash_arg}"
                     ),
                 },
             },
@@ -72,6 +92,42 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
                             "name": "mcp__github__add_comment",
                             "input": {"body": secret_tool_input},
                         },
+                    ],
+                },
+            },
+            # (c) A Bash command prefixed with an inline env-var assignment.
+            # The approval signature must be the command ("aws"), never the
+            # secret VALUE. Denied so the signature lands in the wire dict.
+            {
+                "type": "assistant",
+                "timestamp": "2026-05-23T00:10:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "bash-tu-1",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    f"AWS_SECRET_ACCESS_KEY={secret_env_value} aws s3 sync"
+                                )
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T00:11:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "bash-tu-1",
+                            "content": "Permission for this action was denied",
+                        }
                     ],
                 },
             },
@@ -105,6 +161,18 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert secret_assistant_text not in js, (
         "raw assistant message text leaked into wire payload"
     )
+    assert secret_cmd_arg not in js, (
+        "<command-args> payload leaked (only the command name is categorical)"
+    )
+    # The slash-extractor must read structured <command-name> markers, NOT
+    # free prose — so a path fragment / mid-sentence slash never crosses.
+    assert secret_path_dir not in js, (
+        "a path fragment typed in prose leaked as a slash-command token"
+    )
+    # Inline env-var assignment value must never become a Bash signature key.
+    assert secret_env_value not in js, (
+        "inline Bash env-var value leaked into an approval signature key"
+    )
 
     # And the expected hash IS present
     expected_session_hash = hashlib.sha256(secret_session_id.encode()).hexdigest()[:16]
@@ -115,11 +183,18 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert len(out.sessions) == 1
     s = out.sessions[0]
     assert s.session_hash == expected_session_hash
-    # Slash command token IS allowed (categorical), arg is NOT
-    assert s.distinct_skills == ("plan",)
-    # Tool names ARE allowed (categorical), inputs are NOT
-    assert s.distinct_builtin_tools == ("Read",)
+    # The REAL command token IS captured; the prose "/plan" and the
+    # "/production_secrets" path fragment are NOT.
+    assert s.distinct_skills == ("review",)
+    assert "plan" not in s.distinct_skills
+    assert s.skill_invocations_by_name == {"review": 1}
+    # Tool names ARE allowed (categorical), inputs are NOT.
+    assert s.distinct_builtin_tools == ("Bash", "Read")
     assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
+    # The env-var-prefixed Bash command signs as its command, not the secret.
+    assert "Bash::aws" in s.redundant_approvals_per_signature, (
+        "env-var-prefixed Bash command should sign as 'aws'"
+    )
 
     # v0.7 — privacy contract for the new fields. These must all be
     # present in the wire payload as integers, never raw text. The privacy

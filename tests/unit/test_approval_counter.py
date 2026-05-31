@@ -100,6 +100,21 @@ def test_signature_for_bash_empty_command():
     assert signature_for_bash("   ") == ("Bash", "")
 
 
+def test_signature_for_bash_strips_inline_env_assignments():
+    """Inline NAME=value assignments must NOT become the signature — their
+    values can be secrets that would ride along as a plaintext wire key.
+    The signature is the actual command after any leading assignments."""
+    assert signature_for_bash(
+        "AWS_SECRET_ACCESS_KEY=AKIA_SECRET_VALUE_66 aws s3 sync"
+    ) == ("Bash", "aws")
+    assert signature_for_bash("TOKEN=ghp_deadbeef ./deploy.sh") == ("Bash", "./deploy.sh")
+    assert signature_for_bash("FOO=1 BAR=2 npm test") == ("Bash", "npm")
+    # A bare assignment with no following command yields an empty signature.
+    assert signature_for_bash("FOO=bar") == ("Bash", "")
+    # A leading "=" is not a valid assignment name, so it is left as the token.
+    assert signature_for_bash("=weird arg") == ("Bash", "=weird")
+
+
 def test_signature_for_edit_basic():
     """Top-level path component is hashed (sha256[:8]) for privacy."""
     assert signature_for_edit("/repo/src/main.py") == ("Edit", _sha8("repo"))

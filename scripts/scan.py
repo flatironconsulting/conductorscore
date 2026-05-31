@@ -121,7 +121,6 @@ def main() -> int:
             auth = reauth.resolve_auth(
                 API_BASE,
                 interactive=False,
-                allow_gh=reauth.gh_consent_given(),
                 force_refresh=True,
             )
         except Exception:

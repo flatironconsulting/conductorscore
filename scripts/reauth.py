@@ -1,5 +1,9 @@
 """The client re-auth ladder. Resolves a valid device-token entry for a given
-API base, escalating: existing entry -> gh shortcut -> device flow -> (headless) raise.
+API base, escalating: existing entry -> device flow -> (headless) raise.
+
+The ONLY GitHub auth path is the minimal-scope OAuth device flow
+(``read:user user:email`` — see ``device_flow.SCOPE``). There is no gh-CLI
+shortcut, so no broader-scoped token can ever leave the machine.
 
 Anti-impersonation (spec D10): the client never asserts identity. It only proves
 possession of a GitHub session by handing a GitHub token to OUR server's
@@ -9,39 +13,11 @@ from __future__ import annotations
 
 import scripts.auth_store as auth_store
 import scripts.device_flow as device_flow
-import scripts.gh_cli as gh_cli
 from scripts._http import get_json, post_json
 
 
 class ReauthRequired(Exception):
     pass
-
-
-# ── gh-shortcut consent (spec D5) ────────────────────────────────────────────
-# The gh shortcut sends the user's GitHub CLI token (often broader-scoped than
-# ConductorScore's own read-only device-flow app) to our server once for
-# identity. Default is the minimal-scope device flow; the gh shortcut is used
-# only after the user accepts a one-time notice, recorded as a marker file.
-GH_CONSENT_NOTICE = (
-    "Use your logged-in GitHub CLI to skip the browser? This sends your `gh` token "
-    "to conductorscore.com once to confirm your identity; it is never stored. That "
-    "token may have broader scope than ConductorScore's own read-only access.\n"
-    "Run `/conductorscore login --gh` to accept; otherwise the browser device flow is used."
-)
-
-
-def _gh_consent_path():
-    return auth_store.config_dir() / "gh-consent"
-
-
-def gh_consent_given() -> bool:
-    return _gh_consent_path().exists()
-
-
-def record_gh_consent() -> None:
-    p = _gh_consent_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("accepted\n")
 
 
 def _now_iso() -> str:
@@ -77,11 +53,11 @@ def _entry_from(body: dict) -> dict:
     }
 
 
-def resolve_auth(api_base: str, *, interactive: bool, allow_gh: bool, force_refresh: bool = False) -> dict:
+def resolve_auth(api_base: str, *, interactive: bool, force_refresh: bool = False) -> dict:
     """Resolve a valid auth entry for ``api_base``.
 
     ``force_refresh`` skips the existing-entry shortcut (rung 1) and mints a
-    fresh token via gh/device flow. Used on a 401, where the stored token is
+    fresh token via the device flow. Used on a 401, where the stored token is
     known-rejected: the old entry is left in place and only overwritten if a new
     token is successfully minted (non-destructive — spec D8).
     """
@@ -91,15 +67,7 @@ def resolve_auth(api_base: str, *, interactive: bool, allow_gh: bool, force_refr
             return existing
     device_id = auth_store.load_or_create_device_id()
 
-    # Rung 2 — gh shortcut (opt-in).
-    if allow_gh and gh_cli.gh_logged_in():
-        tok = gh_cli.gh_token()
-        if tok:
-            entry = _entry_from(exchange_github_token(api_base, tok, device_id))
-            auth_store.save_auth(api_base, entry)
-            return entry
-
-    # Rung 3 — device flow (interactive only).
+    # Rung 2 — device flow (interactive only).
     if interactive:
         cid = _device_client_id(api_base)
         flow = device_flow.start_device_flow(cid, http_post=post_json)
@@ -115,5 +83,5 @@ def resolve_auth(api_base: str, *, interactive: bool, allow_gh: bool, force_refr
         auth_store.save_auth(api_base, entry)
         return entry
 
-    # Rung 4 — headless.
+    # Rung 3 — headless.
     raise ReauthRequired("run /conductorscore to re-authenticate")

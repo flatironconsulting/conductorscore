@@ -21,18 +21,18 @@ Per Claude Code session in the last 30 days, the client emits ~38 fields ([`outp
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
 - a **boolean**, or
-- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan`, and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
 
 ## What is never uploaded
 
 - **No transcript content** — not your messages, not Claude's responses.
 - **No code** — not file contents, not diffs.
 - **No file paths** — only a hash of the project root.
-- **No tool arguments or outputs** — only tool names and counts.
+- **No tool arguments or outputs** — only tool names and counts. For the redundant-approvals signature, repeated `Bash` commands contribute their first command token (any leading `NAME=value` env assignment is stripped first, so a secret value can't ride along) and `Edit`/`Write` approvals contribute a one-way hash of the top-level directory — never the path itself.
 - **No `CLAUDE.md` content** — only the line count.
 - **No prompts or planning text** — only which structural signals fired.
 
-This invariant is enforced in CI. An integration test feeds synthetic transcripts — seeded with planted secret markers in every place content could leak (user prompts, file paths, tool inputs, slash-command arguments, assistant text) — through the real scanner, then asserts that not a single one of those bytes appears anywhere in the upload payload. A companion sweep re-runs the check for every anti-pattern detector.
+This invariant is enforced in CI on every push and pull request. An integration test feeds synthetic transcripts — seeded with planted secret markers in every place content could leak (user prompts, file paths, tool inputs, slash-command arguments, assistant text, and inline `Bash` environment variables) — through the real scanner, then asserts that none of those planted secrets appears anywhere in the upload payload. A companion sweep re-runs the check for every anti-pattern detector. (Like any sentinel test, it proves the absence of the secrets it plants rather than a mathematical impossibility — but the planting covers every field that crosses the wire, and the client is open source so you can audit the rest.)
 
 For the field-by-field schema, see [`WIRE_FORMAT.md`](WIRE_FORMAT.md). A sample payload lives at [`wire_format_sample.json`](wire_format_sample.json).
 
@@ -84,7 +84,7 @@ Calculate my ConductorScore: https://conductorscore.com/p/<code>
 
 Claude fetches the install instructions, drops this skill into `~/.claude/skills/conductorscore/`, pairs the device, scans your transcripts on-device, and uploads. First score in under 60 seconds.
 
-Pairing uses GitHub OAuth with the `read:user` and `user:email` scopes only — no `repo` scope, so the server can never read private repository contents. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
+Pairing uses GitHub's OAuth device flow, requesting the `read:user` and `user:email` scopes only — no `repo` scope, so the server can never read private repository contents. This device flow is the only GitHub authentication path: the client never requests broader scopes and never transmits any other GitHub credential (such as a local `gh` CLI token). The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
 
 ## License
 

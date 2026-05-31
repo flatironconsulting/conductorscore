@@ -42,8 +42,6 @@ from scripts.tool_counter import (
     count_hitl_mcp_invocations,
     count_hitl_mcp_invocations_by_name,
     count_tools,
-    count_user_skill_invocations,
-    count_user_skill_invocations_by_name,
 )
 
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -152,6 +150,8 @@ def extract(
             agent_dispatches = tc.agent_dispatches
             plugin_invocations = tc.plugin_invocations
             plugin_invocations_by_name = dict(tc.plugin_invocations_by_name)
+            user_skill_invocations = tc.skill_invocations
+            skill_invocations_by_name = dict(tc.skill_invocations_by_name)
         else:
             distinct_skills = ()
             distinct_mcp_tools = ()
@@ -160,6 +160,8 @@ def extract(
             agent_dispatches = 0
             plugin_invocations = 0
             plugin_invocations_by_name = {}
+            user_skill_invocations = 0
+            skill_invocations_by_name = {}
 
         # v0.4 — turn-based time partition (replaces v0.3 minute rule).
         # Foreground sessions get a window so we know whether to compute
@@ -269,15 +271,14 @@ def extract(
                 assistant_msgs_by_model.get(e.model, 0) + 1
             )
 
-        user_skill_invocations = count_user_skill_invocations(events, text_map)
+        # Skill invocation counts (total + per-name) come from `tc` above —
+        # sourced from structured <command-name> markers in count_tools, never
+        # from scanning free-prose user text.
         hitl_mcp_invocations = count_hitl_mcp_invocations(
             events, hitl_minute_set
         )
-        # v0.11 — per-name versions of the same two counters (plugin map
-        # comes from `tc` above). Each sums to its scalar counterpart.
-        skill_invocations_by_name = count_user_skill_invocations_by_name(
-            events, text_map
-        )
+        # v0.11 — per-name MCP counter (skill + plugin maps come from `tc`).
+        # Each sums to its scalar counterpart.
         mcp_invocations_by_name = count_hitl_mcp_invocations_by_name(
             events, hitl_minute_set
         )

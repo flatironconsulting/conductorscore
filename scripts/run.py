@@ -47,22 +47,17 @@ def _scan_cmd() -> list[str]:
 
 
 def _login(opts: list[str]) -> int:
-    """Explicit `/conductorscore login [--switch] [--gh]`.
+    """Explicit `/conductorscore login [--switch]`.
 
-    Runs the interactive re-auth ladder (device flow allowed). `--switch` forces
-    a new identity by clearing the current base's entry first. `--gh` records
-    one-time consent for the GitHub-CLI shortcut (spec D5).
+    Runs the interactive re-auth ladder (minimal-scope GitHub device flow).
+    `--switch` forces a new identity by clearing the current base's entry first.
     """
     import scripts.reauth as reauth
 
     if "--switch" in opts:
         auth_store.clear_auth(API_BASE)
-    use_gh = reauth.gh_consent_given()
-    if "--gh" in opts:
-        reauth.record_gh_consent()
-        use_gh = True
     try:
-        entry = reauth.resolve_auth(API_BASE, interactive=True, allow_gh=use_gh)
+        entry = reauth.resolve_auth(API_BASE, interactive=True)
     except reauth.ReauthRequired as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -78,12 +73,12 @@ def main() -> int:
         return _login(args[1:])
 
     if auth_store.load_auth(API_BASE) is None:
-        # Auto path: only the SILENT gh shortcut may fire here (interactive=False),
-        # so a bare `/conductorscore` never springs a browser device flow. If it
-        # can't resolve, point the user at the explicit login / pair flow.
+        # Auto path: non-interactive, so a bare `/conductorscore` never springs
+        # a browser device flow. With no stored token it can only raise; point
+        # the user at the explicit login / pair flow.
         import scripts.reauth as reauth
         try:
-            reauth.resolve_auth(API_BASE, interactive=False, allow_gh=reauth.gh_consent_given())
+            reauth.resolve_auth(API_BASE, interactive=False)
         except reauth.ReauthRequired:
             print("Not paired yet.")
             print(f"Run /conductorscore login to authenticate, or visit {PAIR_URL}.")

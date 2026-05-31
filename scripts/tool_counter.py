@@ -5,18 +5,53 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SLASH_CMD_RE = re.compile(r"(?:^|\s)/([a-z][a-z0-9_-]+)\b", re.IGNORECASE)
-
-# v0.7 — Plugin invocation marker.
-#
-# Claude Code's plugin runtime wraps each plugin command invocation in a
-# user message with a ``<command-name>plugin:command</command-name>``
-# block. We count the markers (invocations) and tally them by plugin name.
-# Plugin names are categorical identifiers the user configured; they cross
-# the wire in plaintext (v0.11) — never the prompt or tool input/output.
-PLUGIN_CMD_RE = re.compile(
+# Claude Code wraps every command invocation — built-in/user slash commands
+# AND plugin commands — in a ``<command-name>…</command-name>`` block in the
+# user message (e.g. ``<command-name>/model</command-name>`` or
+# ``<command-name>superpowers:tdd</command-name>``). This structured marker is
+# the ONLY authoritative source of command names; we never scan free prose for
+# ``/word`` tokens, which would over-capture directory paths and prose
+# fragments a user typed (e.g. ``/etc/passwd`` or "see /api/v2/foo") and emit
+# them plaintext on the wire.
+CMD_NAME_RE = re.compile(
     r"<command-name>\s*([^<\s]+)\s*</command-name>", re.IGNORECASE
 )
+
+# Legacy fallback ONLY: older Claude Code transcripts recorded a slash command
+# as raw text at the very START of the user message (e.g. ``/plan it out``).
+# Anchored to message start (no ``\s`` alternation, no MULTILINE) so a slash
+# appearing mid-prose or inside a path can never match. Applied only when a
+# message carries no ``<command-name>`` marker.
+LEADING_SLASH_CMD_RE = re.compile(r"^\s*/([a-z][a-z0-9_-]+)", re.IGNORECASE)
+
+
+def _commands_in_text(text: str) -> tuple[list[str], list[str]]:
+    """Return ``(skill_tokens, plugin_names)`` for one user message.
+
+    Command names are read from structured ``<command-name>`` markers and
+    routed by shape: a name containing ``:`` is a plugin command
+    (``plugin:cmd``, kept as-is); otherwise it is a slash command, normalized
+    to its lowercase token (leading ``/`` stripped). If the message carries no
+    marker, a single leading-slash command (older raw-text shape) is accepted.
+    Free-prose slashes are never matched. Lists preserve repeats so callers can
+    both de-duplicate (distinct sets) and total (invocation counts)."""
+    skills: list[str] = []
+    plugins: list[str] = []
+    matched_marker = False
+    for m in CMD_NAME_RE.finditer(text):
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        matched_marker = True
+        if ":" in raw:
+            plugins.append(raw.lstrip("/"))
+        else:
+            skills.append(raw.lstrip("/").lower())
+    if not matched_marker:
+        lm = LEADING_SLASH_CMD_RE.match(text)
+        if lm:
+            skills.append(lm.group(1).lower())
+    return skills, plugins
 
 # Marker that Claude Code prepends to a user message when the previous
 # session ran out of context and was auto-compacted. Public so the event
@@ -45,9 +80,13 @@ class ToolCounts:
       • ``agent_dispatches`` — count of ``tool_use`` blocks whose name is
         in ``_SUBAGENT_DISPATCH_NAMES`` (``Task`` historically, ``Agent``
         in newer Claude Code) — raw activity stat.
-      • ``plugin_invocations`` — count of `<command-name>` blocks in
-        user messages (Claude Code plugin commands carry the plugin
-        name in this marker).
+      • ``plugin_invocations`` — count of plugin (``plugin:cmd``)
+        ``<command-name>`` blocks in user messages.
+
+    Slash-command (skill) counts are sourced from the SAME ``<command-name>``
+    markers (the colon-free names): ``skill_invocations`` totals them and
+    ``skill_invocations_by_name`` breaks them down, so each sums to the other
+    by construction.
     """
 
     distinct_skills: list[str]
@@ -61,6 +100,12 @@ class ToolCounts:
     # names render plaintext on both the owner's dashboard and the public
     # profile (like skills and MCP tools); there is no hashed representation.
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    # Slash-command (skill) invocation totals, sourced from ``<command-name>``
+    # markers (never free prose). ``skill_invocations`` is the total count;
+    # ``skill_invocations_by_name`` is the per-token breakdown. By construction
+    # ``sum(skill_invocations_by_name.values()) == skill_invocations``.
+    skill_invocations: int = 0
+    skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -151,14 +196,16 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
       excludes ``Task`` — those are counted separately).
     - ``agent_dispatches``: count of ``tool_use`` blocks whose name is
       ``Task`` (subagent spawns).
-    - ``plugin_invocations`` / ``plugin_invocations_by_name``: parsed from
-      ``<command-name>plugin:command</command-name>`` markers embedded
-      in user-message text. Plugin names are categorical identifiers the
-      user configured and cross the wire in plaintext.
+    - ``plugin_invocations`` / ``plugin_invocations_by_name`` and
+      ``skill_invocations`` / ``skill_invocations_by_name``: both parsed from
+      ``<command-name>…</command-name>`` markers in user-message text (plugin
+      = name with ``:``, skill = colon-free slash command). Command names are
+      categorical identifiers and cross the wire in plaintext.
 
     Returns empty lists on missing/unreadable files. Malformed JSONL lines are
-    skipped. Privacy: only tool names, slash-command tokens, and plugin
-    command names are extracted — never raw prompt or tool input/output text.
+    skipped. Privacy: only tool names and command names (from structured
+    ``<command-name>`` markers, never free-prose ``/word`` tokens) are
+    extracted — never raw prompt or tool input/output text.
     """
     skills: set[str] = set()
     mcp: set[str] = set()
@@ -167,6 +214,8 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     agent_dispatches = 0
     plugin_invocations = 0
     plugins_by_name: dict[str, int] = {}
+    skill_invocations = 0
+    skills_by_name: dict[str, int] = {}
     try:
         raw = jsonl_path.read_text()
     except OSError:
@@ -211,19 +260,21 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     builtin.add(name)
                     builtin_invocations += 1
 
-        # Slash commands + plugin markers in user messages only.
+        # Slash-command (skill) + plugin invocations in user messages only,
+        # read from structured <command-name> markers (never free prose).
         if _is_user(d, msg if isinstance(msg, dict) else {}):
             text = _extract_text(content)
             if text:
-                for m in SLASH_CMD_RE.finditer(text):
-                    skills.add(m.group(1).lower())
-                for pm in PLUGIN_CMD_RE.finditer(text):
+                skill_tokens, plugin_names = _commands_in_text(text)
+                for tok in skill_tokens:
+                    skills.add(tok)
+                    skill_invocations += 1
+                    skills_by_name[tok] = skills_by_name.get(tok, 0) + 1
+                for plugin_name in plugin_names:
                     plugin_invocations += 1
-                    plugin_name = pm.group(1).strip()
-                    if plugin_name:
-                        plugins_by_name[plugin_name] = (
-                            plugins_by_name.get(plugin_name, 0) + 1
-                        )
+                    plugins_by_name[plugin_name] = (
+                        plugins_by_name.get(plugin_name, 0) + 1
+                    )
 
     return ToolCounts(
         distinct_skills=sorted(skills),
@@ -233,64 +284,14 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         agent_dispatches=agent_dispatches,
         plugin_invocations=plugin_invocations,
         plugin_invocations_by_name=plugins_by_name,
+        skill_invocations=skill_invocations,
+        skill_invocations_by_name=skills_by_name,
     )
 
 
 # ---------------------------------------------------------------------------
-# v0.6 — Task 8.1 client: HITL-window MCP counting + skill counts.
+# v0.6 — Task 8.1 client: HITL-window MCP counting.
 # ---------------------------------------------------------------------------
-
-
-def count_user_skill_invocations(events, event_text_map: dict) -> int:
-    """Total count of slash-command invocations across USER events.
-
-    Unlike :func:`count_tools` (which de-duplicates skill names into a
-    sorted set), this counts EVERY ``SLASH_CMD_RE`` match — two
-    ``/plan`` invocations contribute 2. Used as the numerator of the
-    fluency repetition metric.
-
-    Privacy: ``event_text_map`` is a memory-only ``id(event) -> text``
-    side channel produced by ``read_events_and_text``. The raw text is
-    consumed locally and never leaves this function — only the integer
-    count escapes.
-    """
-    count = 0
-    for e in events:
-        if e.kind.name != "USER":
-            continue
-        text = event_text_map.get(id(e), "")
-        if not text:
-            continue
-        for _ in SLASH_CMD_RE.finditer(text):
-            count += 1
-    return count
-
-
-def count_user_skill_invocations_by_name(
-    events, event_text_map: dict
-) -> dict[str, int]:
-    """Per-name version of :func:`count_user_skill_invocations`.
-
-    Tallies every ``SLASH_CMD_RE`` match across USER events into a
-    ``{skill_name: count}`` map (lowercased names). By construction the
-    summed values equal :func:`count_user_skill_invocations` for the same
-    inputs — the per-name breakdown that drives the Customization "Top by
-    invocations" table (v0.11).
-
-    Privacy: same memory-only ``event_text_map`` side channel; only the
-    skill tokens and their counts escape, never raw prompt text.
-    """
-    counts: dict[str, int] = {}
-    for e in events:
-        if e.kind.name != "USER":
-            continue
-        text = event_text_map.get(id(e), "")
-        if not text:
-            continue
-        for m in SLASH_CMD_RE.finditer(text):
-            name = m.group(1).lower()
-            counts[name] = counts.get(name, 0) + 1
-    return counts
 
 
 def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
