@@ -107,12 +107,39 @@ def test_signature_for_bash_strips_inline_env_assignments():
     assert signature_for_bash(
         "AWS_SECRET_ACCESS_KEY=AKIA_SECRET_VALUE_66 aws s3 sync"
     ) == ("Bash", "aws")
-    assert signature_for_bash("TOKEN=ghp_deadbeef ./deploy.sh") == ("Bash", "./deploy.sh")
+    # The env value is stripped AND the path-style command collapses to the
+    # "path" sentinel (see test_signature_for_bash_collapses_path_commands) —
+    # never the secret token, never the path.
+    assert signature_for_bash("TOKEN=ghp_deadbeef ./deploy.sh") == ("Bash", "path")
     assert signature_for_bash("FOO=1 BAR=2 npm test") == ("Bash", "npm")
     # A bare assignment with no following command yields an empty signature.
     assert signature_for_bash("FOO=bar") == ("Bash", "")
     # A leading "=" is not a valid assignment name, so it is left as the token.
     assert signature_for_bash("=weird arg") == ("Bash", "=weird")
+
+
+def test_signature_for_bash_collapses_path_commands():
+    """A command invoked BY PATH as its first token must never cross the wire
+    raw — the path can carry usernames and client/project directory names. Any
+    path-like first token (contains "/" or starts with "~") collapses to the
+    non-identifying sentinel "path", symmetric with the Edit-side hash. This
+    closes the audit finding while staying inside the disclosed signature regex
+    ``^(Bash|Edit)::[A-Za-z0-9_.-]*$``.
+    """
+    # Absolute path with username + client/project dirs — the worst case.
+    assert signature_for_bash(
+        "/Users/alon/clients/acme-corp/Q3-MERGER/deploy.sh --prod"
+    ) == ("Bash", "path")
+    # ./-relative script name, home-relative, and parent-relative all collapse.
+    assert signature_for_bash("./deploy.sh") == ("Bash", "path")
+    assert signature_for_bash("~/bin/internal-tool") == ("Bash", "path")
+    assert signature_for_bash("../secret-project/build.sh") == ("Bash", "path")
+    # Env-stripping still runs first, then the path collapses — neither the
+    # secret value nor the path survives.
+    assert signature_for_bash("TOKEN=ghp_realsecret ~/bin/tool") == ("Bash", "path")
+    # Friendly bare command names are categorical and unaffected.
+    assert signature_for_bash("git status") == ("Bash", "git")
+    assert signature_for_bash("npm run build") == ("Bash", "npm")
 
 
 def test_signature_for_edit_basic():

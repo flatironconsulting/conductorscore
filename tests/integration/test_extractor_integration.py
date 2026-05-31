@@ -42,6 +42,7 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     secret_cmd_arg = "SECRET_CMD_ARG_55"  # inside <command-args>
     secret_env_value = "AKIA_SECRET_VALUE_66"  # inline Bash env-var value
     secret_path_dir = "production_secrets"  # a path fragment typed in prose
+    secret_bash_path = "BASHPATHSECRET_44"  # a Bash command invoked BY PATH
 
     proj_dir = isolated_claude_home / "projects" / secret_project_dir
     _write_jsonl(
@@ -131,6 +132,43 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
                     ],
                 },
             },
+            # (d) A Bash command invoked BY PATH as its first token — the path
+            # carries a planted secret (a client/project directory name). The
+            # approval signature must collapse to "Bash::path", never the raw
+            # path. Denied so the signature lands in the wire dict.
+            {
+                "type": "assistant",
+                "timestamp": "2026-05-23T00:12:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "bash-tu-2",
+                            "name": "Bash",
+                            "input": {
+                                "command": (
+                                    f"/Users/alon/clients/{secret_bash_path}/deploy.sh --prod"
+                                )
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-05-23T00:13:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "bash-tu-2",
+                            "content": "Permission for this action was denied",
+                        }
+                    ],
+                },
+            },
         ],
     )
 
@@ -173,6 +211,11 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert secret_env_value not in js, (
         "inline Bash env-var value leaked into an approval signature key"
     )
+    # A Bash command invoked BY PATH must collapse to the "path" sentinel — the
+    # raw path (with its client/project directory names) must never cross.
+    assert secret_bash_path not in js, (
+        "a path-invoked Bash command leaked its path into a signature key"
+    )
 
     # And the expected hash IS present
     expected_session_hash = hashlib.sha256(secret_session_id.encode()).hexdigest()[:16]
@@ -194,6 +237,10 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     # The env-var-prefixed Bash command signs as its command, not the secret.
     assert "Bash::aws" in s.redundant_approvals_per_signature, (
         "env-var-prefixed Bash command should sign as 'aws'"
+    )
+    # The path-invoked Bash command signs as the "path" sentinel, not the path.
+    assert "Bash::path" in s.redundant_approvals_per_signature, (
+        "path-invoked Bash command should sign as the 'path' sentinel"
     )
 
     # v0.7 — privacy contract for the new fields. These must all be
