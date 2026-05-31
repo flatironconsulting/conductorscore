@@ -52,12 +52,23 @@ class AfkStreakWire:
     ``active_minutes`` is the per-streak engaged time (intra-turn idle
     > 5 min excluded). ``start_ts_ms``/``end_ts_ms`` give the wallclock
     range used to render the "2026-05-26 17:36 — 19:00" cell.
+
+    Privacy/data-minimization: ``start_ts_ms``/``end_ts_ms`` are floored to
+    the minute on construction, so only MINUTE-granularity wall-clock timing
+    crosses the wire — matching the sibling ``AfkInterval`` (minute indices)
+    and the minute-resolution dashboard render. Enforcing it here means no
+    construction path can emit finer-grained timestamps.
     """
 
     start_ts_ms: int
     end_ts_ms: int
     active_minutes: int
     turn_count: int
+
+    def __post_init__(self) -> None:
+        # frozen dataclass: floor the timestamps via object.__setattr__.
+        object.__setattr__(self, "start_ts_ms", (self.start_ts_ms // 60_000) * 60_000)
+        object.__setattr__(self, "end_ts_ms", (self.end_ts_ms // 60_000) * 60_000)
 
 
 @dataclass(frozen=True)

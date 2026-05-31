@@ -776,8 +776,8 @@ Each streak object:
 
 | Field            | Type    | Notes                                                                                  |
 |------------------|---------|----------------------------------------------------------------------------------------|
-| `start_ts_ms`    | integer | Wallclock epoch-ms start of the streak (used to render the table's time-range cell).   |
-| `end_ts_ms`      | integer | Wallclock epoch-ms end of the streak.                                                  |
+| `start_ts_ms`    | integer | Wallclock epoch-ms start of the streak, **floored to the minute** (used to render the table's time-range cell). Minute-granularity only — seconds/millis are dropped client-side before emission. |
+| `end_ts_ms`      | integer | Wallclock epoch-ms end of the streak, **floored to the minute** (seconds/millis dropped client-side).          |
 | `active_minutes` | integer | Per-streak engaged time (intra-turn idle > 5 min excluded).                            |
 | `turn_count`     | integer | Number of turns in the streak.                                                         |
 
