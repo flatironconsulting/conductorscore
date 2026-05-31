@@ -63,8 +63,8 @@ class ToolCounts:
     # v0.11 — RAW per-name plugin tallies for the Customization "Top by
     # invocations" table. Summed values equal ``plugin_invocations``.
     # Kept ALONGSIDE the hashed ``distinct_plugins`` (which still feeds
-    # the pluginUsage metric): raw names are uploaded for the owner's
-    # private dashboard; the public route masks them as "Plugin #N".
+    # the pluginUsage metric): raw names render plaintext on both the
+    # owner's dashboard and the public profile (like skills and MCP tools).
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
 

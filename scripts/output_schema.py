@@ -131,8 +131,8 @@ class PerSession:
     # v0.11 — per-name invocation maps for the Customization "Top by
     # invocations" table. Each map sums to its existing scalar total
     # (skill→user_skill_invocations, mcp→hitl_mcp_invocations,
-    # plugin→plugin_invocations). Plugin keys are RAW names (uploaded for
-    # the owner's private dashboard; the public route masks them).
+    # plugin→plugin_invocations). Plugin keys are RAW names, rendered
+    # plaintext on both the dashboard and the public profile.
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     mcp_invocations_by_name: dict[str, int] = field(default_factory=dict)
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
