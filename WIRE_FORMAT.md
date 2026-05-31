@@ -18,7 +18,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.4 | Feature 6 — coding-without-a-plan | `sessions[].{strong_plan_signals, weak_plan_signals, is_planned, files_modified, total_lines_edited, is_significant_edit_session}` |
 | 0.5 | Feature 7 — anti-pattern cluster | `sessions[].{revert_count, qualifying_pairs, repetitive_pairs, rage_quit_event, tool_error_count, auto_compaction_events, total_input_tokens, total_output_tokens, redundant_approvals_per_signature}`, `config.{global_claude_md_lines, project_claude_md_lines_avg}` |
 | 0.6 | Feature 8 — fluency + informational | `sessions[].{assistant_msgs_by_model, user_skill_invocations, hitl_mcp_invocations}` |
-| 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, distinct_plugins, agent_dispatches}`, `config.{plugin_count, distinct_installed_plugins}` |
+| 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, agent_dispatches}`, `config.plugin_count` |
 | 0.8 | Cost-modal precision — precise per-(model, leg) token split | `sessions[].tokens_by_model` (map of `model_id → {input_miss, input_hit, output}`) |
 | 0.9 | Turn-rule classifier — replaces v0.3 minute rule | `sessions[].{hitl_minutes, afk_minutes, idle_minutes, afk_parallel_minutes_foreground, afk_max_streak_minutes, afk_intervals}` now derived from **turn segmentation** (turn ≤ 5 min → HITL, else AFK), matching the megarun renderer. Field shapes unchanged; semantics shift. |
 | 0.10 | "Longest agent run" L4 table | `sessions[].top_afk_streaks` (top-5 AFK streaks per session, descending by `active_minutes`) |
@@ -459,33 +459,37 @@ are added:
 | `auto_compaction_events`             | integer             | no       | Number of auto-compaction markers in the session: SYSTEM events whose payload signals compaction (`subtype: "compact"`, `compactType: "auto"`, or `type: "auto_compact"`) PLUS USER events whose flattened text contains the Claude Code "session continued from a previous conversation that ran out of context" banner. |
 | `total_input_tokens`                 | integer             | no       | Sum of `usage.input_tokens` across all assistant message events in the session. `0` if no usage was reported. |
 | `total_output_tokens`                | integer             | no       | Sum of `usage.output_tokens` across all assistant message events in the session. `0` if no usage was reported. |
-| `redundant_approvals_per_signature`  | object<string,int>  | no       | `{ "<Tool>::<arg>": overflow_count }` for each approval signature whose use count is `> 5`. Signatures at or under the threshold are omitted entirely; absence is equivalent to overflow `0`. |
+| `redundant_approvals_per_signature`  | object<string,int>  | no       | `{ "<Tool>::<arg>": flow_stop_count }` — per-signature count of manual permission decisions (the metric semantics evolved; the wire shape did not). Absence of a signature is equivalent to `0`. See "Approval friction" below. |
 
-### Approval signatures
+### Approval friction (`redundant_approvals_per_signature`)
 
-A signature groups tool calls that the user would reasonably re-approve
-in one batch:
+The value counts **flow-stops where the human had to make a manual
+permission decision**, grouped by signature. Two signals contribute, and
+a single tool dispatch is counted at most once:
+
+1. **Denials** — a `tool_result` whose text matched a denial marker
+   (auto-mode classifier denial, user rejection, or interrupt). Only the
+   `is_denied` boolean is read; the result text never leaves the reader.
+2. **Approval-waits** — a Bash/Edit-family dispatch followed by a pause of
+   more than 10 s before the next event. Grants are never logged, so a
+   long gap before a tool's result is the only data-grounded proxy for
+   "execution waited for the human to click approve." (The gap also
+   includes the tool's own runtime, so this is directional, not exact.)
+
+There is NO use-count threshold and NO destructive-exempt carve-out (both
+existed in earlier revisions and were removed).
+
+A signature groups dispatches by tool + a privacy-safe arg:
 
 - **Bash**: `("Bash", <first whitespace-separated token of the command>)`.
   The first token (e.g. `"ls"`, `"git"`, `"echo"`) is categorical and
   emitted raw.
 - **Edit / Write / MultiEdit**: `("Edit", <sha256(top_level_dir)[:8]>)`.
   The top-level path component is HASHED so directory names never
-  cross the wire while still allowing grouped counting of repeated
-  edits to the same area. Empty / absolute-root paths produce an
-  empty arg.
+  cross the wire while still allowing grouped counting.
 
 The dict key on the wire is `"<Tool>::<arg>"` (e.g. `"Bash::git"`,
 `"Edit::3b49c75f"`).
-
-**Destructive Bash exemptions** — these patterns NEVER contribute a
-signature, since a fresh approval is genuinely warranted every time:
-
-- `rm -rf` / `rm -r`
-- `git reset --hard`
-- `git push --force` / `git push -f`
-- `git clean -f`
-- `DROP TABLE` / `DROP DATABASE` (case-insensitive)
 
 ### Privacy posture for v0.5 detectors
 

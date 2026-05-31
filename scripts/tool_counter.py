@@ -5,16 +5,15 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts._hashing import hash_plugin_id
-
 SLASH_CMD_RE = re.compile(r"(?:^|\s)/([a-z][a-z0-9_-]+)\b", re.IGNORECASE)
 
 # v0.7 — Plugin invocation marker.
 #
 # Claude Code's plugin runtime wraps each plugin command invocation in a
 # user message with a ``<command-name>plugin:command</command-name>``
-# block. We count the markers (invocations) and hash the plugin name so
-# only categorical identifiers leave the device.
+# block. We count the markers (invocations) and tally them by plugin name.
+# Plugin names are categorical identifiers the user configured; they cross
+# the wire in plaintext (v0.11) — never the prompt or tool input/output.
 PLUGIN_CMD_RE = re.compile(
     r"<command-name>\s*([^<\s]+)\s*</command-name>", re.IGNORECASE
 )
@@ -49,8 +48,6 @@ class ToolCounts:
       • ``plugin_invocations`` — count of `<command-name>` blocks in
         user messages (Claude Code plugin commands carry the plugin
         name in this marker).
-      • ``distinct_plugins`` — categorical hashed plugin identifiers
-        observed in the session (sha256(plugin_name)[:16]).
     """
 
     distinct_skills: list[str]
@@ -59,12 +56,10 @@ class ToolCounts:
     builtin_tool_invocations: int = 0
     agent_dispatches: int = 0
     plugin_invocations: int = 0
-    distinct_plugins: list[str] = field(default_factory=list)
     # v0.11 — RAW per-name plugin tallies for the Customization "Top by
-    # invocations" table. Summed values equal ``plugin_invocations``.
-    # Kept ALONGSIDE the hashed ``distinct_plugins`` (which still feeds
-    # the pluginUsage metric): raw names render plaintext on both the
-    # owner's dashboard and the public profile (like skills and MCP tools).
+    # invocations" table. Summed values equal ``plugin_invocations``. Plugin
+    # names render plaintext on both the owner's dashboard and the public
+    # profile (like skills and MCP tools); there is no hashed representation.
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
 
@@ -156,14 +151,14 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
       excludes ``Task`` — those are counted separately).
     - ``agent_dispatches``: count of ``tool_use`` blocks whose name is
       ``Task`` (subagent spawns).
-    - ``plugin_invocations`` / ``distinct_plugins``: parsed from
+    - ``plugin_invocations`` / ``plugin_invocations_by_name``: parsed from
       ``<command-name>plugin:command</command-name>`` markers embedded
-      in user-message text. Plugin identifiers are hashed before they
-      leave the function.
+      in user-message text. Plugin names are categorical identifiers the
+      user configured and cross the wire in plaintext.
 
     Returns empty lists on missing/unreadable files. Malformed JSONL lines are
-    skipped. Privacy: only tool names, slash command tokens, and HASHED
-    plugin identifiers are extracted — never raw prompt or tool input/output text.
+    skipped. Privacy: only tool names, slash-command tokens, and plugin
+    command names are extracted — never raw prompt or tool input/output text.
     """
     skills: set[str] = set()
     mcp: set[str] = set()
@@ -171,7 +166,6 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     builtin_invocations = 0
     agent_dispatches = 0
     plugin_invocations = 0
-    plugins: set[str] = set()
     plugins_by_name: dict[str, int] = {}
     try:
         raw = jsonl_path.read_text()
@@ -227,7 +221,6 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     plugin_invocations += 1
                     plugin_name = pm.group(1).strip()
                     if plugin_name:
-                        plugins.add(hash_plugin_id(plugin_name))
                         plugins_by_name[plugin_name] = (
                             plugins_by_name.get(plugin_name, 0) + 1
                         )
@@ -239,7 +232,6 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         builtin_tool_invocations=builtin_invocations,
         agent_dispatches=agent_dispatches,
         plugin_invocations=plugin_invocations,
-        distinct_plugins=sorted(plugins),
         plugin_invocations_by_name=plugins_by_name,
     )
 

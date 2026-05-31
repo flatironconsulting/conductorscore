@@ -1,21 +1,22 @@
-"""Tests for scripts.approval_counter — approval-friction (denial) counter.
+"""Tests for scripts.approval_counter — approval-friction counter.
 
-The ``redundantApprovals`` craft signal counts genuine approval FRICTION:
-tool-use DENIALS recorded in the transcript. Grants are never logged, so
-the only data-grounded friction signal is a ``tool_result`` whose text
-matches a denial marker (auto-mode classifier denial, user rejection, or
-user interrupt mid-tool).
+The ``redundantApprovals`` craft signal counts flow-stops where the human
+had to make a manual permission decision. Two signals contribute:
+- **Denials** — a ``tool_result`` whose text matched a denial marker
+  (auto-mode classifier denial, user rejection, interrupt).
+- **Approval-waits** — a Bash/Edit-family dispatch followed by a pause of
+  more than ``APPROVAL_WAIT_MS`` before the next event (the only proxy for
+  a manual approve-click, since grants are never logged).
 
-A denial is grouped by a *signature* that captures "which tool/arg got
-denied":
+A flow-stop is grouped by a *signature* that captures "which tool/arg":
 - Bash: first token of the command (e.g. "ls", "git") — categorical and
   safe to emit raw.
 - Edit/Write/MultiEdit: HASH (sha256[:8]) of the top-level directory
   component of the file path — kept short to group, never to identify.
 
-Every denial is friction; there is NO threshold and NO destructive-exempt
-carve-out. The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
-per-signature denial COUNT.
+A single dispatch is counted at most once (denial takes precedence over a
+wait). The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
+per-signature flow-stop COUNT.
 
 Privacy: only the denial BOOLEAN crosses module boundaries — the result
 text that triggered detection is never stored on the Event nor serialized.
@@ -406,3 +407,88 @@ def test_parser_to_counter_end_to_end(tmp_path):
     )
     events = read_events(p)
     assert count_redundant_approvals(events) == {"Bash::git": 1}
+
+
+# ---------------------------------------------------------------------------
+# count_redundant_approvals — approval-wait heuristic (>10s pause = a manual
+# approve-click waited for the human).
+# ---------------------------------------------------------------------------
+
+from scripts.approval_counter import APPROVAL_WAIT_MS
+
+
+def test_approval_wait_counts_when_gap_exceeds_threshold():
+    """A granted Bash whose result arrives >APPROVAL_WAIT_MS later is read
+    as 'execution waited for the human to click approve.'"""
+    events = [
+        _bash(0, "git push origin main", tool_use_id="tu_1"),
+        _result(APPROVAL_WAIT_MS + 1, tool_use_id="tu_1", is_denied=False),
+    ]
+    assert count_redundant_approvals(events) == {"Bash::git": 1}
+
+
+def test_fast_grant_below_threshold_does_not_count():
+    """A quick auto-allowed call (gap <= threshold) is not friction."""
+    events = [
+        _bash(0, "git push", tool_use_id="tu_1"),
+        _result(500, tool_use_id="tu_1", is_denied=False),
+    ]
+    assert count_redundant_approvals(events) == {}
+
+
+def test_approval_wait_threshold_is_strict():
+    """Gap exactly at the threshold does NOT count (strictly greater-than)."""
+    events = [
+        _bash(0, "git push", tool_use_id="tu_1"),
+        _result(APPROVAL_WAIT_MS, tool_use_id="tu_1", is_denied=False),
+    ]
+    assert count_redundant_approvals(events) == {}
+
+
+def test_approval_wait_edit_maps_to_hashed_dir():
+    events = [
+        _edit(0, "/repo/src/main.py", tool="Edit", tool_use_id="tu_1"),
+        _result(APPROVAL_WAIT_MS + 5, tool_use_id="tu_1", is_denied=False),
+    ]
+    assert count_redundant_approvals(events) == {f"Edit::{_sha8('repo')}": 1}
+
+
+def test_denied_call_with_long_gap_counts_once_not_twice():
+    """A denial that also took >threshold is a single flow-stop, not two."""
+    events = [
+        _bash(0, "git push", tool_use_id="tu_1"),
+        _result(APPROVAL_WAIT_MS + 1, tool_use_id="tu_1", is_denied=True),
+    ]
+    assert count_redundant_approvals(events) == {"Bash::git": 1}
+
+
+def test_long_gap_on_non_signature_tool_does_not_count():
+    """Only Bash/Edit-family dispatches get wait-counting; a slow Read is
+    not an approval-wait."""
+    read_ev = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="s",
+        timestamp_ms=0,
+        tool_name="Read",
+        tool_use_id="tu_1",
+    )
+    events = [read_ev, _result(APPROVAL_WAIT_MS + 1, tool_use_id="tu_1")]
+    assert count_redundant_approvals(events) == {}
+
+
+def test_final_dispatch_with_no_next_event_is_not_counted():
+    """The last event has no successor to measure a wait against."""
+    events = [_bash(0, "git push", tool_use_id="tu_1")]
+    assert count_redundant_approvals(events) == {}
+
+
+def test_denials_and_waits_combine_per_signature():
+    events = [
+        # denied git
+        _bash(0, "git push", tool_use_id="tu_1"),
+        _result(2, tool_use_id="tu_1", is_denied=True),
+        # granted-but-waited git (different command, same signature)
+        _bash(10, "git rebase -i", tool_use_id="tu_2"),
+        _result(10 + APPROVAL_WAIT_MS + 1, tool_use_id="tu_2", is_denied=False),
+    ]
+    assert count_redundant_approvals(events) == {"Bash::git": 2}

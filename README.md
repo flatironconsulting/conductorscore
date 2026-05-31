@@ -62,12 +62,12 @@ If you're here to verify the data path before installing, these are the files th
 
 | File                                                   | What to check                                                                        |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| [`scripts/scanner.py`](scripts/scanner.py)             | Top-level entry point. Reads JSONL, builds the payload. Everything else is a helper. |
+| [`scripts/scanner.py`](scripts/scanner.py)             | Top-level extractor. Reads JSONL, builds the payload, and hashes the session id + project root (`sha256[:16]`, no salts, not reversible). |
 | [`scripts/output_schema.py`](scripts/output_schema.py) | The exact shape of the upload payload. Every field is named here.                    |
 | [`scripts/events.py`](scripts/events.py)               | JSONL event parsing — what the client reads off disk.                                |
-| [`scripts/_hashing.py`](scripts/_hashing.py)           | The hashing helper. 16-char SHA-256 prefix, no salts, no reversibility.              |
-| [`scripts/scan.py`](scripts/scan.py)                   | Filesystem traversal — which files are read.                                         |
-| [`scripts/run.py`](scripts/run.py)                     | HTTP upload. The only network call this client makes.                                |
+| [`scripts/scan.py`](scripts/scan.py)                   | Runs the scan and uploads the payload — the score upload (`POST /api/ingest`) is here. |
+| [`scripts/run.py`](scripts/run.py)                     | CLI orchestrator: spawns `scan.py`, polls a local status file, prints the summary.   |
+| [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py), [`scripts/pair.py`](scripts/pair.py) | Pairing / GitHub OAuth network calls — identity only, separate from the score upload. |
 | [`WIRE_FORMAT.md`](WIRE_FORMAT.md)                     | Versioned schema, including a per-version changelog.                                 |
 
 Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is under 4k lines of Python.

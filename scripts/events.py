@@ -155,7 +155,7 @@ def _project_root_from_dir(dir_name: str) -> str:
 
     Claude Code stores transcripts under `~/.claude/projects/<dir>` where
     `<dir>` is the absolute project root with `/` replaced by `-`. So
-    `-home-alonb-conductorscore-client` -> `/home/alonb/conductorscore/client`.
+    `-home-dev-conductorscore-client` -> `/home/dev/conductorscore/client`.
 
     Note: this mapping is lossy (original `-` chars become `/`) but that is
     acceptable because the value is hashed before transmission.

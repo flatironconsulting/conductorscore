@@ -257,7 +257,6 @@ def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
         "global_claude_md_lines",
         "project_claude_md_lines_avg",
         "plugin_count",
-        "distinct_installed_plugins",
     }
 
 
@@ -900,8 +899,10 @@ def test_extract_v0_5_revert_count_populated(isolated_claude_home):
 
 
 def test_extract_v0_5_redundant_approvals_populated(isolated_claude_home):
-    """Denial-based friction: only DENIED tool results count. Two denied
-    `git` Bash calls accumulate; a granted (non-denied) `ls` does not."""
+    """Friction tally: two DENIED `git` Bash calls accumulate; a granted
+    (non-denied) `ls` whose result returns quickly (gap < the approval-wait
+    threshold) does NOT count. The >10s approval-wait dimension is exercised
+    directly in test_approval_counter.py."""
     base_min = 27_810_000
     base_ms = base_min * 60_000
     lines = [
@@ -913,9 +914,11 @@ def test_extract_v0_5_redundant_approvals_populated(isolated_claude_home):
     ]
 
     def _tool_use(i, cmd, tu_id):
+        # Pairs are spaced 2 min apart; each result lands 1s after its own
+        # tool_use so a granted call reads as a fast (auto-allowed) grant.
         return {
             "type": "assistant",
-            "timestamp": _iso(base_ms + (1 + 2 * i) * 60_000),
+            "timestamp": _iso(base_ms + (1 + i) * 120_000),
             "message": {
                 "role": "assistant",
                 "content": [
@@ -932,7 +935,7 @@ def test_extract_v0_5_redundant_approvals_populated(isolated_claude_home):
     def _tool_result(i, tu_id, text, is_error):
         return {
             "type": "user",
-            "timestamp": _iso(base_ms + (2 + 2 * i) * 60_000),
+            "timestamp": _iso(base_ms + (1 + i) * 120_000 + 1_000),
             "message": {
                 "role": "user",
                 "content": [

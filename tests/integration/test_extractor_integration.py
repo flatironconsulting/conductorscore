@@ -122,9 +122,9 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
     assert s.distinct_mcp_tools == ("mcp__github__add_comment",)
 
     # v0.7 — privacy contract for the new fields. These must all be
-    # present in the wire payload as integers / hashes / lists-of-hashes,
-    # never raw text. The privacy assertions above are the inclusive
-    # contract; this block pins the field set.
+    # present in the wire payload as integers, never raw text. The privacy
+    # assertions above are the inclusive contract; this block pins the
+    # field set.
     parsed_payload = json.loads(js)
     s_d = parsed_payload["sessions"][0]
     for k in (
@@ -135,16 +135,13 @@ def test_extracted_json_contains_no_session_content(isolated_claude_home):
         "agent_dispatches",
     ):
         assert isinstance(s_d[k], int), f"{k} must be an int"
-    assert isinstance(s_d["distinct_plugins"], list)
-    for entry in s_d["distinct_plugins"]:
-        # Every plugin id is sha256 first 16 hex chars — categorical only.
-        assert isinstance(entry, str) and len(entry) == 16
-    # config-level plugin counts are also wire-safe.
+    # There is no hashed plugin representation on the wire anymore — plugin
+    # names ship plaintext in plugin_invocations_by_name (intentional, and
+    # excluded from the no-leak assertions above). config carries only a count.
+    assert "distinct_plugins" not in s_d
     cfg = parsed_payload["config"]
     assert isinstance(cfg["plugin_count"], int)
-    assert isinstance(cfg["distinct_installed_plugins"], list)
-    for entry in cfg["distinct_installed_plugins"]:
-        assert isinstance(entry, str) and len(entry) == 16
+    assert "distinct_installed_plugins" not in cfg
 
 
 def test_v0_5_privacy_invariant_holds_for_all_new_detectors(

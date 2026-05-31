@@ -151,7 +151,6 @@ def extract(
             builtin_tool_invocations = tc.builtin_tool_invocations
             agent_dispatches = tc.agent_dispatches
             plugin_invocations = tc.plugin_invocations
-            distinct_plugins = tuple(tc.distinct_plugins)
             plugin_invocations_by_name = dict(tc.plugin_invocations_by_name)
         else:
             distinct_skills = ()
@@ -160,7 +159,6 @@ def extract(
             builtin_tool_invocations = 0
             agent_dispatches = 0
             plugin_invocations = 0
-            distinct_plugins = ()
             plugin_invocations_by_name = {}
 
         # v0.4 — turn-based time partition (replaces v0.3 minute rule).
@@ -350,7 +348,6 @@ def extract(
                 cache_creation_input_tokens=compaction.cache_creation_input_tokens,
                 builtin_tool_invocations=builtin_tool_invocations,
                 plugin_invocations=plugin_invocations,
-                distinct_plugins=distinct_plugins,
                 agent_dispatches=agent_dispatches,
                 # v0.8 — precise per-(model, leg) token split.
                 tokens_by_model=tokens_by_model,

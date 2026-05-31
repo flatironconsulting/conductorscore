@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts._hashing import hash_plugin_id
 from scripts.output_schema import ConfigCounts
 
 __all__ = [
@@ -15,7 +14,7 @@ __all__ = [
 
 
 def read_installed_plugins(home: Path) -> list[str]:
-    """Return a sorted list of HASHED installed-plugin identifiers.
+    """Return a sorted list of installed-plugin names.
 
     Source of truth: ``<home>/.claude/plugins/config.json`` (the
     upstream Claude Code plugin-runtime manifest). Falls back to scanning
@@ -25,8 +24,9 @@ def read_installed_plugins(home: Path) -> list[str]:
     Returns an empty list on any read error or when the directory is
     missing — older Claude Code installs predate the plugin runtime.
 
-    Privacy: only hashed identifiers leave this helper; raw plugin names
-    never leave the device.
+    Only the COUNT of these names crosses the wire (``config.plugin_count``);
+    the list itself stays local. Per-session plugin names that DO cross the
+    wire are carried plaintext in ``plugin_invocations_by_name``.
     """
     plugins_dir = home / ".claude" / "plugins"
     names: set[str] = set()
@@ -70,7 +70,7 @@ def read_installed_plugins(home: Path) -> list[str]:
         except OSError:
             pass
 
-    return sorted(hash_plugin_id(n) for n in names)
+    return sorted(names)
 
 
 def count_claude_md_lines(path: Path) -> int:
@@ -168,7 +168,7 @@ def scan_config(
         existing = [c for c in counts if c > 0]
         if existing:
             project_avg = sum(existing) // len(existing)
-    # v0.7 — installed plugins.
+    # v0.7 — installed plugins. Only the count crosses the wire.
     installed_plugins = read_installed_plugins(home)
     return ConfigCounts(
         mcp_servers=_count_mcp_servers(home),
@@ -177,5 +177,4 @@ def scan_config(
         global_claude_md_lines=global_md,
         project_claude_md_lines_avg=project_avg,
         plugin_count=len(installed_plugins),
-        distinct_installed_plugins=tuple(installed_plugins),
     )

@@ -1,22 +1,33 @@
-"""Approval-FRICTION counter — counts genuine tool-use denials.
+"""Approval-FRICTION counter — counts flow-stops where the human had to click.
 
 The ``redundantApprovals`` craft signal measures approval friction: how
-often a tool call was DENIED. A denial is the only data-grounded friction
-signal in a transcript — grants are never logged, so "approvals that
-should've been auto-allowed" cannot be measured. Denials are detected in
-the reader (``events.py``) and surfaced as ``Event.is_denied`` on
-TOOL_RESULT events (auto-mode classifier denial, user rejection, or user
-interrupt mid-tool).
+often the agent's flow stopped for a manual permission decision. Two
+data-grounded signals are counted, grouped by signature:
 
-Each denial is grouped by a *signature* that captures "which tool/arg got
-denied":
+1. **Denials** — a ``tool_result`` whose text matched a denial marker
+   (auto-mode classifier denial, user rejection, or user interrupt
+   mid-tool), surfaced by the reader as ``Event.is_denied``.
+2. **Approval-waits** — a Bash/Edit-family tool call followed by a pause
+   of more than ``APPROVAL_WAIT_MS`` before the next event. Grants are
+   never logged, so a long gap between dispatching a tool and its result
+   is the only data-grounded proxy for "execution waited for the human
+   to click approve."
+
+   CAVEAT: that gap also contains the tool's own execution time, so a
+   genuinely slow command (a long build, a subagent) can look like an
+   approval-wait. The heuristic is most reliable for fast tools (Edit,
+   small Bash) and noisier for long-running ones. We accept that — it is
+   directionally right for "the human is gating the flow."
+
+Each flow-stop is grouped by a *signature*:
 
 - ``Bash``: ``("Bash", <first token of command>)``.
 - ``Edit`` / ``Write`` / ``MultiEdit``: ``("Edit", <hashed top-level dir>)``.
 
-Every denial is friction — there is NO threshold and NO destructive-exempt
+There is NO threshold beyond the wait gate and NO destructive-exempt
 carve-out. The wire output is a dict keyed by ``"<Tool>::<arg>"`` with the
-per-signature denial COUNT (≥1 for any signature that saw a denial).
+per-signature flow-stop COUNT. A single dispatch contributes at most once
+(a denial is not also double-counted as a wait).
 
 Privacy: only the first token of a Bash command (e.g. ``"ls"``, ``"git"``)
 and the hashed top-level path component cross the wire. Full commands and
@@ -29,6 +40,11 @@ from __future__ import annotations
 import hashlib
 
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+
+# A pause longer than this between a tool dispatch and the next event is
+# treated as "execution waited for a human approval-click." 10s by design
+# (see the module docstring's caveat on execution-time conflation).
+APPROVAL_WAIT_MS = 10_000
 
 
 def signature_for_bash(cmd: str) -> tuple[str, str]:
@@ -90,16 +106,25 @@ def signature_for_event(event) -> tuple[str, str] | None:
 
 
 def count_redundant_approvals(events) -> dict[str, int]:
-    """Return ``{"<Tool>::<arg>": denial_count}`` for every signature that
-    saw at least one tool-use DENIAL.
+    """Return ``{"<Tool>::<arg>": flow_stop_count}`` — manual permission
+    decisions (denials + approval-waits) grouped by signature.
 
-    A denial is a TOOL_RESULT event with ``is_denied=True`` (set by the
-    reader when the result text matched a denial marker). Each denial is
-    resolved to its dispatching ASSISTANT_TOOL's signature via
-    ``tool_use_id``; when no match exists the denied result falls back to a
-    ``"<tool_name>::"`` signature (``"unknown::"`` if no tool name). There
-    is no threshold — every denial is friction.
+    Two signals contribute (see the module docstring):
+
+    1. **Denials** — a TOOL_RESULT with ``is_denied=True``, resolved to its
+       dispatching ASSISTANT_TOOL's signature via ``tool_use_id`` (falling
+       back to ``"<tool_name>::"`` / ``"unknown::"`` when no dispatch
+       matches). Every tool's denials count.
+    2. **Approval-waits** — a Bash/Edit-family dispatch whose gap to the
+       next chronological event exceeds ``APPROVAL_WAIT_MS`` and that was
+       NOT already denied. ``events`` is consumed in read (chronological)
+       order, so the next event is ``events[i + 1]``.
+
+    A single dispatch is counted at most once (denial takes precedence).
     """
+    events = list(events)
+    n = len(events)
+
     # Map each ASSISTANT_TOOL dispatch id to its signature string.
     id_to_sig: dict[str, str] = {}
     for e in events:
@@ -117,6 +142,10 @@ def count_redundant_approvals(events) -> dict[str, int]:
             id_to_sig[tu_id] = f"{e.tool_name or 'unknown'}::"
 
     counts: dict[str, int] = {}
+
+    # (1) Denials — any tool. Track which dispatches were denied so the
+    # wait pass doesn't double-count them.
+    denied_dispatch: set[str] = set()
     for e in events:
         if e.kind.name != "TOOL_RESULT":
             continue
@@ -127,6 +156,27 @@ def count_redundant_approvals(events) -> dict[str, int]:
         if sig is None:
             sig = f"{e.tool_name or 'unknown'}::"
         counts[sig] = counts.get(sig, 0) + 1
+        if tu_id:
+            denied_dispatch.add(tu_id)
+
+    # (2) Approval-waits — Bash/Edit-family dispatch with a >threshold pause
+    # before the next event (and not already counted as a denial).
+    for i, e in enumerate(events):
+        if e.kind.name != "ASSISTANT_TOOL":
+            continue
+        if i + 1 >= n:
+            continue  # no next event to measure the wait against
+        tu_id = getattr(e, "tool_use_id", None)
+        if tu_id and tu_id in denied_dispatch:
+            continue
+        sig = signature_for_event(e)
+        if sig is None:
+            continue  # only Bash/Edit-family dispatches get wait-counting
+        gap = events[i + 1].timestamp_ms - e.timestamp_ms
+        if gap > APPROVAL_WAIT_MS:
+            counts[f"{sig[0]}::{sig[1]}"] = (
+                counts.get(f"{sig[0]}::{sig[1]}", 0) + 1
+            )
     return counts
 
 

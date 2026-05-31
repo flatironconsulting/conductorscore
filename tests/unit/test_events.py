@@ -111,7 +111,7 @@ def test_find_sessions_skips_files_with_no_valid_timestamp(isolated_claude_home)
 def test_find_sessions_reconstructs_project_root_with_multiple_segments(
     isolated_claude_home,
 ):
-    proj_dir = isolated_claude_home / "projects" / "-home-alonb-conductorscore-client"
+    proj_dir = isolated_claude_home / "projects" / "-home-dev-conductorscore-client"
     _write_jsonl(
         proj_dir / "abc.jsonl",
         [
@@ -121,7 +121,7 @@ def test_find_sessions_reconstructs_project_root_with_multiple_segments(
     )
     sessions = find_sessions()
     assert len(sessions) == 1
-    assert sessions[0].project_root == "/home/alonb/conductorscore/client"
+    assert sessions[0].project_root == "/home/dev/conductorscore/client"
 
 
 def test_find_sessions_multiple_projects_and_files(isolated_claude_home):

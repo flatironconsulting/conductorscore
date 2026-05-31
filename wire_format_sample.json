@@ -15,14 +15,7 @@
     "hooks": 2,
     "mcp_servers": 9,
     "project_claude_md_lines_avg": 270,
-    "plugin_count": 5,
-    "distinct_installed_plugins": [
-      "1111111111111111",
-      "2222222222222222",
-      "3333333333333333",
-      "4444444444444444",
-      "5555555555555555"
-    ]
+    "plugin_count": 5
   },
 
   "sessions": [
@@ -83,7 +76,6 @@
       "cache_creation_input_tokens": 42220,
       "builtin_tool_invocations": 218,
       "plugin_invocations": 2,
-      "distinct_plugins": ["1111111111111111", "3333333333333333"],
       "agent_dispatches": 12,
 
       "tokens_by_model": {
@@ -143,7 +135,6 @@
       "cache_creation_input_tokens": 4420,
       "builtin_tool_invocations": 18,
       "plugin_invocations": 0,
-      "distinct_plugins": [],
       "agent_dispatches": 0,
 
       "tokens_by_model": {
@@ -209,7 +200,6 @@
       "cache_creation_input_tokens": 86100,
       "builtin_tool_invocations": 612,
       "plugin_invocations": 1,
-      "distinct_plugins": ["2222222222222222"],
       "agent_dispatches": 8,
 
       "tokens_by_model": {
@@ -274,7 +264,6 @@
       "cache_creation_input_tokens": 79400,
       "builtin_tool_invocations": 144,
       "plugin_invocations": 0,
-      "distinct_plugins": [],
       "agent_dispatches": 9,
 
       "tokens_by_model": {
