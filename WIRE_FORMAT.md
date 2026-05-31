@@ -148,7 +148,7 @@ All v0.1 fields (`session_hash`, `project_hash`, `started_at_ms`,
 
 | Field                    | Type             | Nullable | Notes                                                                                  |
 |--------------------------|------------------|----------|----------------------------------------------------------------------------------------|
-| `distinct_skills`        | array of strings | no       | Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`). Read from Claude Code's structured `<command-name>…</command-name>` markers (colon-bearing names like `my-plugin:deploy` are routed to the plugin counters instead); a leading slash command at the very start of a user message is accepted as a legacy fallback. Free-prose `/word` tokens and path fragments are **never** matched. Slash-command arguments are dropped. |
+| `distinct_skills`        | array of strings | no       | **These are slash-command names** (the field is named `distinct_skills` for historical reasons). Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`). Read from Claude Code's structured `<command-name>…</command-name>` markers (colon-bearing names like `my-plugin:deploy` are routed to the plugin counters instead); a leading slash command at the very start of a user message is accepted as a legacy fallback. Free-prose `/word` tokens and path fragments are **never** matched. Slash-command arguments are dropped. |
 | `distinct_mcp_tools`     | array of strings | no       | Sorted, de-duplicated `tool_use` block names whose name begins with `mcp__`. Tool inputs/outputs are NOT included. |
 | `distinct_builtin_tools` | array of strings | no       | Sorted, de-duplicated `tool_use` block names that do NOT begin with `mcp__` (e.g. `Read`, `Edit`, `Bash`). |
 
@@ -484,7 +484,11 @@ A signature groups dispatches by tool + a privacy-safe arg:
 - **Bash**: `("Bash", <first command token>)`. Any leading shell
   `NAME=value` environment assignments are skipped first, so the token
   is the actual command (e.g. `"ls"`, `"git"`, `"aws"`) — never a
-  `TOKEN=secret` value. The token is categorical and emitted raw.
+  `TOKEN=secret` value. If that token is itself a path (it contains `/`
+  or starts with `~` — e.g. `./deploy.sh`, `/Users/you/clients/acme/run.sh`,
+  `~/bin/tool`), it collapses to the literal sentinel `"path"`, so the path
+  never crosses the wire — symmetric with the Edit hash below. The token is
+  categorical and emitted raw.
 - **Edit / Write / MultiEdit**: `("Edit", <sha256(top_level_dir)[:8]>)`.
   The top-level path component is HASHED so directory names never
   cross the wire while still allowing grouped counting.
@@ -581,8 +585,9 @@ only counts / booleans / hashed grouping keys:
   identically.
 - Approval-signature dict keys MUST match the pattern
   `^(Bash|Edit)::[A-Za-z0-9_.-]*$`. The Bash arg is a categorical
-  first-token string; the Edit arg is an 8-char lowercase hex sha256
-  prefix (or empty).
+  first-token string (a path-style token is collapsed to the literal
+  `path` before emission, so no separators or `~` ever appear); the Edit
+  arg is an 8-char lowercase hex sha256 prefix (or empty).
 - The frustration regex is intentionally not part of the wire contract
   — only the resulting `rage_quit_event` boolean is. Clients may
   tune the regex without bumping the schema version.

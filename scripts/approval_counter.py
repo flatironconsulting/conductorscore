@@ -21,7 +21,8 @@ data-grounded signals are counted, grouped by signature:
 
 Each flow-stop is grouped by a *signature*:
 
-- ``Bash``: ``("Bash", <first token of command>)``.
+- ``Bash``: ``("Bash", <first token of command>)`` — a path-style first token
+  collapses to the ``"path"`` sentinel so paths never cross the wire.
 - ``Edit`` / ``Write`` / ``MultiEdit``: ``("Edit", <hashed top-level dir>)``.
 
 There is NO threshold beyond the wait gate and NO destructive-exempt
@@ -30,11 +31,13 @@ per-signature flow-stop COUNT. A single dispatch contributes at most once
 (a denial is not also double-counted as a wait).
 
 Privacy: only the first command token of a Bash command (e.g. ``"ls"``,
-``"git"``; leading ``NAME=value`` env assignments are skipped so a secret
-value can't ride along) and the hashed top-level path component cross the
-wire. Full commands and
-full paths are consumed in-memory; the denial result text never leaves the
-reader (only the ``is_denied`` boolean does).
+``"git"``) and the hashed top-level path component cross the wire. Two guards
+protect the Bash token: leading ``NAME=value`` env assignments are skipped so a
+secret value can't ride along, and a first token that is itself a path
+(``./deploy.sh``, ``/abs/path``, ``~/bin/tool``) collapses to the ``"path"``
+sentinel so directory names never cross — symmetric with the Edit-side hash.
+Full commands and full paths are consumed in-memory; the denial result text
+never leaves the reader (only the ``is_denied`` boolean does).
 """
 
 from __future__ import annotations
@@ -49,6 +52,16 @@ _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
 # plaintext wire key — the categorical signature is the actual command.
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# A path-like first token: contains a path separator or is home-relative.
+# Such a token IS the command path and could carry usernames or client /
+# project directory names (e.g. ``/Users/alon/clients/acme/deploy.sh``,
+# ``./deploy.sh``, ``~/bin/tool``, ``../x/build.sh``). It must not cross the
+# wire raw, so we collapse it to the ``_PATH_SENTINEL`` bucket — the same
+# spirit as the Edit-side directory hash. This also keeps the signature inside
+# the disclosed key regex ``^(Bash|Edit)::[A-Za-z0-9_.-]*$``.
+_PATH_LIKE_RE = re.compile(r"[/]|^~")
+_PATH_SENTINEL = "path"
+
 # A pause longer than this between a tool dispatch and the next event is
 # treated as "execution waited for a human approval-click." 10s by design
 # (see the module docstring's caveat on execution-time conflation).
@@ -60,15 +73,24 @@ def signature_for_bash(cmd: str) -> tuple[str, str]:
     after skipping any leading inline ``NAME=value`` env assignments. Empty
     for blank commands (or a bare assignment with no following command).
 
-    The skip is a privacy guard: ``TOKEN=secret ./deploy.sh`` must signature
-    as ``./deploy.sh``, never ``TOKEN=secret`` — the value could be a secret
-    and the signature is emitted raw on the wire.
+    Two privacy guards, both emitting raw on the wire only what is categorical:
+
+    1. The env-assignment skip: ``TOKEN=secret some-cmd`` must signature as
+       ``some-cmd``, never ``TOKEN=secret`` — the value could be a secret.
+    2. The path collapse: when the resulting first token is itself a path
+       (``./deploy.sh``, ``/Users/alon/clients/acme/run.sh``, ``~/bin/tool``,
+       ``../x/build.sh``), it collapses to the ``path`` sentinel so the path —
+       which can carry usernames and client/project directory names — never
+       crosses the wire. Friendly bare names (``git``, ``npm``) are unaffected.
     """
     parts = cmd.strip().split()
     i = 0
     while i < len(parts) and _ENV_ASSIGN_RE.match(parts[i]):
         i += 1
-    return ("Bash", parts[i] if i < len(parts) else "")
+    token = parts[i] if i < len(parts) else ""
+    if token and _PATH_LIKE_RE.search(token):
+        token = _PATH_SENTINEL
+    return ("Bash", token)
 
 
 def _sha8(s: str) -> str:
