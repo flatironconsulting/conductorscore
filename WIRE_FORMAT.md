@@ -4,7 +4,7 @@ The client emits a strict-shape JSON payload to the ConductorScore server. This 
 
 ## Privacy invariant
 
-Every field below is one of: a number, a fixed-length hash (`sha256(...)[:16]`), or a known categorical (model id, tool name, signal enum). No raw prompts, code, or file paths are ever emitted.
+Every field below is one of: a number, a fixed-length hash (`sha256(...)[:16]`), or a categorical label. Categoricals include built-in tool names and signal enums (a closed set), plus identifiers you (or your tooling) configured — Anthropic model IDs, slash-command names, **MCP server/tool names, and plugin command names** — which are emitted **in plaintext** (e.g. `mcp__github__create_issue`, `my-plugin:deploy`). We emit the names only, never their arguments, inputs, or outputs. No raw prompts, code, or file paths are ever emitted.
 
 The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_json_contains_no_session_content` — every change to the scanner must keep that test green.
 
@@ -21,6 +21,8 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.7 | Prototype-merge — cache split + plugins + builtin invocations + agent dispatches | `sessions[].{cache_input_tokens, cache_creation_input_tokens, builtin_tool_invocations, plugin_invocations, distinct_plugins, agent_dispatches}`, `config.{plugin_count, distinct_installed_plugins}` |
 | 0.8 | Cost-modal precision — precise per-(model, leg) token split | `sessions[].tokens_by_model` (map of `model_id → {input_miss, input_hit, output}`) |
 | 0.9 | Turn-rule classifier — replaces v0.3 minute rule | `sessions[].{hitl_minutes, afk_minutes, idle_minutes, afk_parallel_minutes_foreground, afk_max_streak_minutes, afk_intervals}` now derived from **turn segmentation** (turn ≤ 5 min → HITL, else AFK), matching the megarun renderer. Field shapes unchanged; semantics shift. |
+| 0.10 | "Longest agent run" L4 table | `sessions[].top_afk_streaks` (top-5 AFK streaks per session, descending by `active_minutes`) |
+| 0.11 | Customization "Top by invocations" table | `sessions[].{skill_invocations_by_name, mcp_invocations_by_name, plugin_invocations_by_name}` — per-name invocation maps. MCP and plugin keys are **raw names in plaintext**. |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
@@ -747,3 +749,75 @@ messages with a model). Inner counts MUST be non-negative integers.
   same convention as `assistant_msgs_by_model`. Unknown IDs MUST NOT
   fail validation; the server's `model_pricing` table is the source of
   truth for whether a row contributes to the Cost modal.
+
+## Schema v0.10 — top AFK streaks
+
+Adds one per-session field on top of v0.9, driving the dashboard's
+"Longest agent run" L4 table. No new privacy surface — the streak
+fields are all derived from the existing minute/turn classifier.
+
+### Per-session additions
+
+| Field             | Type             | Default | Notes                                                                                                                       |
+|-------------------|------------------|---------|-----------------------------------------------------------------------------------------------------------------------------|
+| `top_afk_streaks` | array of objects | `[]`    | Up to the top-5 AFK streaks in the session, sorted descending by `active_minutes`. Each element: `{start_ts_ms, end_ts_ms, active_minutes, turn_count}`. |
+
+Each streak object:
+
+| Field            | Type    | Notes                                                                                  |
+|------------------|---------|----------------------------------------------------------------------------------------|
+| `start_ts_ms`    | integer | Wallclock epoch-ms start of the streak (used to render the table's time-range cell).   |
+| `end_ts_ms`      | integer | Wallclock epoch-ms end of the streak.                                                  |
+| `active_minutes` | integer | Per-streak engaged time (intra-turn idle > 5 min excluded).                            |
+| `turn_count`     | integer | Number of turns in the streak.                                                         |
+
+### Compatibility
+
+- The server SHOULD accept `schema_version` of `"0.9"` or `"0.10"`
+  during the deprecation window.
+- `top_afk_streaks` defaults to `[]`. The server MUST treat absence
+  and `[]` identically.
+
+## Schema v0.11 — per-name invocation maps
+
+Adds three per-session maps on top of v0.10, driving the Customization
+"Top by invocations" table. Each map sums to its existing scalar total
+(`skill_invocations_by_name` → `user_skill_invocations`,
+`mcp_invocations_by_name` → `hitl_mcp_invocations`,
+`plugin_invocations_by_name` → `plugin_invocations`).
+
+**Plaintext names.** MCP and plugin keys are **raw names**, emitted in
+plaintext — consistent with `distinct_mcp_tools` (plaintext since v0.2).
+These are identifiers you (or your tooling) configured, not transcript
+content; their arguments, inputs, and outputs are never emitted. They
+render plaintext on both the owner's dashboard and the public profile
+(like skill and MCP tool names). Skill keys are the same slash-command
+tokens already emitted in `distinct_skills` / counted in
+`user_skill_invocations`.
+
+### Per-session additions
+
+| Field                        | Type                | Default | Notes                                                                                                                       |
+|------------------------------|---------------------|---------|-----------------------------------------------------------------------------------------------------------------------------|
+| `skill_invocations_by_name`  | object<string,int>  | `{}`    | `{ "<skill_name>": count }`. Sums to `user_skill_invocations`. Keys are slash-command tokens (e.g. `"plan"`).               |
+| `mcp_invocations_by_name`    | object<string,int>  | `{}`    | `{ "<mcp_tool_name>": count }`. Sums to `hitl_mcp_invocations`. Keys are **raw plaintext** MCP names (e.g. `"mcp__github__create_issue"`). |
+| `plugin_invocations_by_name` | object<string,int>  | `{}`    | `{ "<plugin_command_name>": count }`. Sums to `plugin_invocations`. Keys are **raw plaintext** plugin command names (e.g. `"my-plugin:deploy"`), parsed from `<command-name>` markers. |
+
+### Example session fragment
+
+```json
+{
+  "skill_invocations_by_name": { "plan": 4, "brainstorming": 1 },
+  "mcp_invocations_by_name": { "mcp__github__create_issue": 3, "mcp__supabase__execute_sql": 2 },
+  "plugin_invocations_by_name": { "my-plugin:deploy": 2 }
+}
+```
+
+### Compatibility
+
+- The server SHOULD accept `schema_version` of `"0.10"` or `"0.11"`
+  during the deprecation window.
+- All three maps default to `{}`. The server MUST treat absence and
+  `{}` identically.
+- MCP and plugin keys are unvalidated raw strings — the server MUST
+  NOT fail validation on unfamiliar names.

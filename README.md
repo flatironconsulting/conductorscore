@@ -21,7 +21,7 @@ Per Claude Code session in the last 30 days, the client emits ~38 fields ([`outp
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
 - a **boolean**, or
-- a value from a **closed set of categorical labels** (tool names like `Bash` / `Edit` / `mcp__github__*`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan`, plan-signal enums like `EnterPlanMode`).
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan`, and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
 
 ## What is never uploaded
 
@@ -32,9 +32,29 @@ Per Claude Code session in the last 30 days, the client emits ~38 fields ([`outp
 - **No `CLAUDE.md` content** — only the line count.
 - **No prompts or planning text** — only which structural signals fired.
 
-This invariant is enforced in CI. An integration test feeds real transcripts through the scanner and fails the build if a single byte of transcript content shows up in the payload — including a companion sweep that re-runs the check for every anti-pattern detector added since.
+This invariant is enforced in CI. An integration test feeds synthetic transcripts — seeded with planted secret markers in every place content could leak (user prompts, file paths, tool inputs, slash-command arguments, assistant text) — through the real scanner, then asserts that not a single one of those bytes appears anywhere in the upload payload. A companion sweep re-runs the check for every anti-pattern detector.
 
 For the field-by-field schema, see [`WIRE_FORMAT.md`](WIRE_FORMAT.md). A sample payload lives at [`wire_format_sample.json`](wire_format_sample.json).
+
+## Verify the privacy invariant yourself
+
+Don't take our word for it — the test that enforces the no-leak guarantee ships in this repo and runs in under a second:
+
+```bash
+git clone https://github.com/flatironconsulting/conductorscore
+cd conductorscore
+pip install -e ".[dev]"        # the only dev dependency is pytest; the client itself has zero runtime deps
+
+# Run just the privacy-invariant test:
+pytest tests/integration/test_extractor_integration.py -v
+
+# Or run the whole suite (unit + integration):
+pytest
+```
+
+The privacy test ([`tests/integration/test_extractor_integration.py`](tests/integration/test_extractor_integration.py)) plants unique secret strings into a synthetic `~/.claude` transcript tree, runs the actual `extract()` path the installed skill uses, and fails if any planted secret — or any raw prompt, path, or tool argument — survives into the serialized payload. To convince yourself it's real, edit the scanner to leak something on purpose and watch the test go red.
+
+This is the same `pytest` invocation our CI runs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), so a green badge means the invariant held on the exact code you're reading.
 
 ## Auditing this repo
 

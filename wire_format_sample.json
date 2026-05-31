@@ -1,11 +1,11 @@
 {
-  "_comment": "Sample wire-format payload (v0.7). The complete schema lives in WIRE_FORMAT.md alongside this file. Privacy invariant: every value below is either a number, a SHA-256 hash, a known categorical (model id, tool name, signal enum), or an array of those. No raw prompts, code, file paths, or transcript content are emitted. This sample is illustrative — the real payload from a 30-day window typically contains 100-200 session objects.",
+  "_comment": "Sample wire-format payload (v0.11). The complete schema lives in WIRE_FORMAT.md alongside this file. Privacy invariant: every value below is either a number, a SHA-256 hash, or a categorical label (model id, built-in tool name, signal enum, or a user-configured identifier — slash-command, MCP server/tool, and plugin command names, which are emitted in plaintext). We emit names only, never their arguments, inputs, or outputs. No raw prompts, code, file paths, or transcript content are emitted. This sample is illustrative — the real payload from a 30-day window typically contains 100-200 session objects.",
 
   "device": {
-    "client_version": "0.7.0",
+    "client_version": "0.11.0",
     "device_id": "11111111-2222-4333-8444-555555555555",
     "extracted_at_ms": 1748102400000,
-    "schema_version": "0.7",
+    "schema_version": "0.11",
     "window_days": 30
   },
 
@@ -43,6 +43,10 @@
       "afk_max_streak_minutes": 25,
       "afk_parallel_minutes_foreground": 113,
       "cron_parallel_minutes": 10,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1747955100000, "end_ts_ms": 1747956600000, "active_minutes": 25, "turn_count": 3},
+        {"start_ts_ms": 1747958040000, "end_ts_ms": 1747958820000, "active_minutes": 13, "turn_count": 2}
+      ],
 
       "distinct_skills": ["brainstorming", "plan", "writing-plans"],
       "distinct_mcp_tools": ["mcp__github__add_comment", "mcp__supabase__execute_sql"],
@@ -80,7 +84,16 @@
       "builtin_tool_invocations": 218,
       "plugin_invocations": 2,
       "distinct_plugins": ["1111111111111111", "3333333333333333"],
-      "agent_dispatches": 12
+      "agent_dispatches": 12,
+
+      "tokens_by_model": {
+        "claude-opus-4-7": {"input_miss": 12220, "input_hit": 45200, "output": 11280},
+        "claude-sonnet-4-6": {"input_miss": 30000, "input_hit": 100000, "output": 30000}
+      },
+
+      "skill_invocations_by_name": {"plan": 1, "brainstorming": 1, "writing-plans": 1},
+      "mcp_invocations_by_name": {"mcp__github__add_comment": 1},
+      "plugin_invocations_by_name": {"deploy-kit:release": 1, "test-runner:all": 1}
     },
 
     {
@@ -97,6 +110,7 @@
       "afk_max_streak_minutes": 4,
       "afk_parallel_minutes_foreground": 4,
       "cron_parallel_minutes": 0,
+      "top_afk_streaks": [],
 
       "distinct_skills": [],
       "distinct_mcp_tools": [],
@@ -130,7 +144,15 @@
       "builtin_tool_invocations": 18,
       "plugin_invocations": 0,
       "distinct_plugins": [],
-      "agent_dispatches": 0
+      "agent_dispatches": 0,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 4420, "input_hit": 8420, "output": 2110}
+      },
+
+      "skill_invocations_by_name": {},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {}
     },
 
     {
@@ -149,6 +171,9 @@
       "afk_max_streak_minutes": 47,
       "afk_parallel_minutes_foreground": 78,
       "cron_parallel_minutes": 0,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1748057100000, "end_ts_ms": 1748059920000, "active_minutes": 47, "turn_count": 5}
+      ],
 
       "distinct_skills": ["plan"],
       "distinct_mcp_tools": ["mcp__github__get_file_contents"],
@@ -185,7 +210,15 @@
       "builtin_tool_invocations": 612,
       "plugin_invocations": 1,
       "distinct_plugins": ["2222222222222222"],
-      "agent_dispatches": 8
+      "agent_dispatches": 8,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 86100, "input_hit": 326700, "output": 64500}
+      },
+
+      "skill_invocations_by_name": {"plan": 1},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {"deploy-kit:release": 1}
     },
 
     {
@@ -204,6 +237,9 @@
       "afk_max_streak_minutes": 5,
       "afk_parallel_minutes_foreground": 18,
       "cron_parallel_minutes": 0,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1748099400000, "end_ts_ms": 1748099700000, "active_minutes": 5, "turn_count": 1}
+      ],
 
       "distinct_skills": [],
       "distinct_mcp_tools": [],
@@ -239,7 +275,15 @@
       "builtin_tool_invocations": 144,
       "plugin_invocations": 0,
       "distinct_plugins": [],
-      "agent_dispatches": 9
+      "agent_dispatches": 9,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 79400, "input_hit": 219000, "output": 38120}
+      },
+
+      "skill_invocations_by_name": {},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {}
     }
   ]
 }
