@@ -863,7 +863,7 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
 
     Privacy: the returned ``text_map`` is a side-channel for in-process
     detectors only. The wire format never carries any value from this
-    map (the extractor passes it to the detectors which emit counts /
+    map (the scanner passes it to the detectors which emit counts /
     booleans only).
     """
     # Late import (cycle).

@@ -6,7 +6,7 @@ The client emits a strict-shape JSON payload to the ConductorScore server. This 
 
 Every field below is one of: a number, a fixed-length hash (`sha256(...)[:16]`), or a known categorical (model id, tool name, signal enum). No raw prompts, code, or file paths are ever emitted.
 
-The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_json_contains_no_session_content` — every change to the extractor must keep that test green.
+The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_json_contains_no_session_content` — every change to the scanner must keep that test green.
 
 ## Schema evolution (Wave 1)
 
@@ -75,7 +75,7 @@ so the body is canonical and reproducible bit-for-bit on a given input.
 | `device_id`       | string  | no       | Stable per-device UUID4 (`client_device_id`), generated on first run.|
 | `client_version`  | string  | no       | Semver of the local client package (e.g. `"0.1.0"`).                 |
 | `schema_version`  | string  | no       | Wire-format version. For this schema, MUST be `"0.1"`.               |
-| `extracted_at_ms` | integer | no       | Unix epoch milliseconds when the extractor ran.                      |
+| `extracted_at_ms` | integer | no       | Unix epoch milliseconds when the scanner ran.                      |
 | `window_days`     | integer | no       | Look-back window applied to sessions. Defaults to `30`.              |
 
 ### `sessions[]` — PerSession
@@ -614,7 +614,7 @@ following are added:
 - **user_skill_invocations** — the slash-command regex is applied
   in-process to user text; only the integer escapes. Slash-command
   arguments and surrounding prose are dropped, identical to the
-  `distinct_skills` extractor.
+  `distinct_skills` scanner.
 - **hitl_mcp_invocations** — derived from existing in-memory
   `Event` objects + the precomputed HITL minute set; no raw text is
   read.

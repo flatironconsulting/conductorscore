@@ -287,7 +287,7 @@ def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:
         <projects>/<encoded-cwd>/<session_id>/subagents/agent-<sid>.jsonl
 
     The main JSONL itself usually carries no sidechain lines, so the
-    extractor cannot recover parallel-AFK time from it alone. Mirrors
+    scanner cannot recover parallel-AFK time from it alone. Mirrors
     the megarun's ``_load_subagent_tracks`` so the live card sees the
     same subagent activity the megarun does.
     """
@@ -446,7 +446,7 @@ def top_afk_streaks(turns: list[Turn], n: int = 5) -> list[AfkStreak]:
 
 
 # ---------------------------------------------------------------------------
-# Aggregations for the extractor
+# Aggregations for the scanner
 # ---------------------------------------------------------------------------
 
 
@@ -481,7 +481,7 @@ def compute_turn_aggregates(
 
     When ``jsonl_path`` is provided, the on-disk subagent transcripts
     next to it are read and folded into ``afk_parallel_minutes_foreground``.
-    Production extractor MUST pass it; unit tests can omit it.
+    Production scanner MUST pass it; unit tests can omit it.
     """
     turns = segment_turns(events)
     hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
@@ -503,7 +503,7 @@ def compute_turn_aggregates(
 def hitl_minute_set(turns: tuple[Turn, ...] | list[Turn]) -> set[int]:
     """Minutes covered by HITL turns — keyed off ``floor(ts_ms / 60_000)``.
 
-    Used by the extractor to attribute ``hitl_mcp_invocations`` (an MCP
+    Used by the scanner to attribute ``hitl_mcp_invocations`` (an MCP
     tool invocation that fires during a HITL turn counts as
     user-initiated).
     """

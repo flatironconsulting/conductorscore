@@ -237,7 +237,7 @@ def detect_plan_signals(
 def session_produced_plan_artifact(events: list[Event]) -> bool:
     """Did this session produce a plan artifact (outline definition)?
 
-    Used by the extractor to compute the prior-24h cross-session lookback
+    Used by the scanner to compute the prior-24h cross-session lookback
     signal. A plan artifact is any of:
       * ``EnterPlanMode`` tool call,
       * ``writing-plans`` skill invocation,

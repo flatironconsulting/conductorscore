@@ -27,7 +27,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
-from scripts.extractor import extract
+from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
