@@ -7,7 +7,7 @@ You score the user's Claude Code skill from local transcripts.
 
 ## Two invocation paths
 
-**Path A — fresh install / re-pair.** If the user's recent message contains a URL matching `<host>/p/<token>` or `<host>/install.md?pair=<token>` (any token format, bare or prefixed), they pasted the install snippet from conductorscore.com. Treat that URL as your source of truth — do NOT validate the token format yourself; the server does that:
+**Path A — fresh install / re-pair.** If the user's recent message contains a URL matching `<host>/p/<token>`, `<host>/install.md?p=<token>`, or `<host>/install.md?pair=<token>` (any token format, bare or prefixed), they pasted the install snippet from conductorscore.com. Treat that URL as your source of truth — do NOT validate the token format yourself; the server does that:
 
 1. Bash: `curl -fsSL '<that URL>'` (use Bash, not WebFetch — WebFetch rejects non-public hosts so localhost fails). The server returns either install instructions or a "missing pair" message.
 2. Follow every step in the markdown output. It will tell you to wipe + re-download files, then run pair.py, then run /conductorscore.
