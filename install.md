@@ -50,8 +50,8 @@ python3 ~/.claude/skills/conductorscore/scripts/pair.py <code>
 ```
 
 If it prints `Paired as @<username>`, continue to step 3.
-If it prints `code_expired` or `code_already_used`, stop and tell the user to
-visit https://conductorscore.com/install to get a fresh URL.
+If it says the code expired, was not recognized, or was already used, stop and
+tell the user to visit https://conductorscore.com/install to get a fresh URL.
 
 ## Step 3 — run the first score
 

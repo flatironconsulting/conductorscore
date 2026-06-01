@@ -17,3 +17,10 @@ def test_install_md_uses_p_pairing_parameter():
     md = (ROOT / "install.md").read_text()
     assert "`p=` parameter" in md
     assert "cs_pair_" in md
+
+
+def test_install_md_points_pairing_failures_to_install():
+    md = (ROOT / "install.md").read_text()
+    assert "was not recognized" in md
+    assert "https://conductorscore.com/install" in md
+    assert "https://conductorscore.com/pair" not in md

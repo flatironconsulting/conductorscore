@@ -93,10 +93,14 @@ def main() -> int:
         return 0
 
     if status == 410:
-        print("Pairing code expired. Visit conductorscore.com/pair for a fresh one.", file=sys.stderr)
+        print(
+            "Pairing code expired or was not recognized by this ConductorScore server. "
+            "Visit conductorscore.com/install for a fresh URL.",
+            file=sys.stderr,
+        )
         return 1
     if status == 409:
-        print("Pairing code already used. Visit conductorscore.com/pair for a fresh one.", file=sys.stderr)
+        print("Pairing code already used. Visit conductorscore.com/install for a fresh URL.", file=sys.stderr)
         return 1
     if status == 400:
         print(f"bad_format: {body.get('error')}", file=sys.stderr)
