@@ -14,7 +14,7 @@ You score the user's Claude Code skill from local transcripts.
 
 **Path B — existing install.** If no install URL is in context (the user just invoked `/conductorscore` or said "run my conductorscore"):
 
-1. Bash: `python3 ~/.claude/skills/conductorscore/scripts/run.py`
+1. Bash: `python3 ~/.claude/skills/conductorscore/scripts/run.py 2>/dev/null || python ~/.claude/skills/conductorscore/scripts/run.py 2>/dev/null || py -3 ~/.claude/skills/conductorscore/scripts/run.py`
 2. If it prints "Not paired yet. Visit conductorscore.com/install...", tell the user to visit the URL it printed. Do not try to pair from inside this session.
 
 ## Output discipline

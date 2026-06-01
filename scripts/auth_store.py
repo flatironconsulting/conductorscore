@@ -19,6 +19,14 @@ SCHEMA_VERSION = 2
 PROD_BASE = "https://conductorscore.com"
 
 
+def _chmod_600(p: Path) -> None:
+    """Best-effort owner-only permissions."""
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
 def config_dir() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME")
     return (Path(xdg) if xdg else Path.home() / ".config") / "conductorscore"
@@ -39,7 +47,7 @@ def load_or_create_device_id() -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     new_id = str(uuid.uuid4())
     p.write_text(new_id)
-    os.chmod(p, 0o600)
+    _chmod_600(p)
     return new_id
 
 
@@ -85,7 +93,7 @@ def _write_store(store: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(store, indent=2))
-    os.chmod(tmp, 0o600)
+    _chmod_600(tmp)
     tmp.replace(p)  # atomic on POSIX; preserves the tmp file's 0600 mode
 
 

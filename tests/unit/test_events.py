@@ -10,6 +10,8 @@ import pytest
 from scripts.events import (
     Event,
     EventKind,
+    _is_excluded_edit_path,
+    basename,
     claude_home,
     find_sessions,
     read_events,
@@ -28,6 +30,25 @@ def isolated_claude_home(tmp_path, monkeypatch):
 def _write_jsonl(path: Path, lines: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+def test_basename_is_separator_agnostic():
+    assert basename("/home/me/proj/CLAUDE.md") == "CLAUDE.md"
+    assert basename(r"C:\home\me\proj\CLAUDE.md") == "CLAUDE.md"
+    assert basename(r"C:\proj\mixed/sep\file.md") == "file.md"
+    assert basename("plain.md") == "plain.md"
+
+
+def test_excluded_edit_path_handles_windows_separators():
+    assert _is_excluded_edit_path("/repo/.claude/settings.json") is True
+    assert _is_excluded_edit_path("/repo/.git/config") is True
+    assert _is_excluded_edit_path("/repo/CLAUDE.md") is True
+    assert _is_excluded_edit_path("/repo/src/main.py") is False
+
+    assert _is_excluded_edit_path(r"C:\repo\.claude\settings.json") is True
+    assert _is_excluded_edit_path(r"C:\repo\.git\config") is True
+    assert _is_excluded_edit_path(r"C:\repo\CLAUDE.md") is True
+    assert _is_excluded_edit_path(r"C:\repo\src\main.py") is False
 
 
 def test_claude_home_env_var_override(isolated_claude_home):

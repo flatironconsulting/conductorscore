@@ -453,16 +453,21 @@ _EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".git/")
 _EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md"})
 
 
+def basename(path: str) -> str:
+    """Return the final path component for POSIX or Windows separators."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _is_excluded_edit_path(path: str) -> bool:
     """Outline § coding session: edits to .claude/, .git/, basename
     CLAUDE.md are excluded from the edit footprint.
     """
     if not path:
         return False
-    if any(part in path for part in _EXCLUDED_EDIT_DIR_PARTS):
+    norm = path.replace("\\", "/")
+    if any(part in norm for part in _EXCLUDED_EDIT_DIR_PARTS):
         return True
-    basename = path.rsplit("/", 1)[-1]
-    return basename in _EXCLUDED_EDIT_BASENAMES
+    return basename(norm) in _EXCLUDED_EDIT_BASENAMES
 
 
 def _count_string_lines(s) -> int:

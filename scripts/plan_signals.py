@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from scripts.events import Event, EventKind
+from scripts.events import Event, EventKind, basename
 
 # ---------------------------------------------------------------------------
 # Path classification.
@@ -83,20 +83,21 @@ def is_plan_shaped_path(path: str) -> bool:
     """
     if not isinstance(path, str) or not path:
         return False
+    path = path.replace("\\", "/")
     if _EXCLUDED_PATH_RE.search(path):
         return False
     if _PLAN_DIR_RE.search(path):
         return True
-    basename = path.rsplit("/", 1)[-1].lower()
-    if not basename:
+    base = basename(path).lower()
+    if not base:
         return False
-    if basename in _STANDARD_REPO_FILES:
+    if base in _STANDARD_REPO_FILES:
         return False
     # Basename matching: require a text-like extension to avoid hitting
     # ``planner.py`` etc.
-    if not (basename.endswith(".md") or basename.endswith(".txt")):
+    if not (base.endswith(".md") or base.endswith(".txt")):
         return False
-    return bool(_PLAN_BASENAME_RE.search(basename))
+    return bool(_PLAN_BASENAME_RE.search(base))
 
 
 # ---------------------------------------------------------------------------
