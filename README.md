@@ -84,7 +84,7 @@ Calculate my ConductorScore: https://conductorscore.com/p/<code>
 
 Claude fetches the install instructions, drops this skill into `~/.claude/skills/conductorscore/`, pairs the device, scans your transcripts on-device, and uploads. First score in under 60 seconds.
 
-Pairing uses GitHub's OAuth device flow, requesting the `read:user` and `user:email` scopes only — no `repo` scope, so the server can never read private repository contents. This device flow is the only GitHub authentication path: the client never requests broader scopes and never transmits any other GitHub credential (such as a local `gh` CLI token). The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
+Pairing uses GitHub's OAuth device flow, requesting the `read:user` and `user:email` scopes only. The installed client never requests `repo` scope and never transmits any other GitHub credential (such as a local `gh` CLI token). Separately, web sign-in may request broader GitHub access so the server can count commits across repositories you can read. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
 
 ## License
 
