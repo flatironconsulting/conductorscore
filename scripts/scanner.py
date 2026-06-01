@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import time
 
+from scripts.agents.registry import enabled_agents
 from scripts.approval_counter import count_redundant_approvals
 from scripts.config_scanner import scan_config
 from scripts.edit_counter import count_edits
 from scripts.events import (
     EventKind,
     claude_home,
-    find_sessions,
     read_events_and_text,
 )
 from scripts.frustration_detector import detect_rage_quit
@@ -102,9 +102,14 @@ def extract(
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
 
+    # Obtain enabled agent adapters. This slice only implements Claude, so
+    # the selection is always ``[ClaudeAdapter()]`` and the payload is
+    # identical to v0.11 (single-agent Claude scan).
+    agents = enabled_agents()
+
     # Pre-filter so on_progress has an accurate total (sessions outside the
     # window are skipped silently, not counted against the bar).
-    all_sessions = find_sessions()
+    all_sessions = [s for agent in agents for s in agent.find_sessions()]
     in_window = [s for s in all_sessions if s.last_ts_ms >= cutoff]
     total = len(in_window)
 
