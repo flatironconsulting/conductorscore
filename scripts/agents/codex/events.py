@@ -130,9 +130,13 @@ def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
     """Extract ``(input_tokens, cached_input_tokens, output_tokens)`` from a
     Codex ``event_msg.token_count`` payload.
 
+    ``payload`` is the row's ``payload`` dict, i.e. the value under the
+    ``event_msg`` row's ``"payload"`` key:
+        {"type": "token_count", "info": {"last_token_usage": {...},
+                                         "total_token_usage": {...}}}
     Supports BOTH observed shapes for the PER-TURN delta:
-      * nested: ``payload.payload.info.last_token_usage``
-      * direct: ``payload.payload.last_token_usage``
+      * nested: ``payload.info.last_token_usage``  (real Codex rollouts)
+      * direct: ``payload.last_token_usage``
     ``last_token_usage`` is always the per-turn delta. A sibling
     ``total_token_usage`` (cumulative) may also appear — it is deliberately
     IGNORED here so cumulative counts never get added to a per-turn delta.
@@ -141,18 +145,17 @@ def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
     NOT add reasoning separately (no double-count). Returns ``None`` on any
     shape mismatch so the caller simply skips the attachment.
     """
-    inner = payload.get("payload")
-    if not isinstance(inner, dict):
+    if not isinstance(payload, dict):
         return None
-    # Prefer the nested ``info.last_token_usage``; fall back to the direct
+    # Prefer the nested ``info.last_token_usage``; fall back to a direct
     # ``last_token_usage`` on the payload. NEVER read ``total_token_usage``
     # (cumulative) — only the per-turn delta crosses into the token split.
     usage = None
-    info = inner.get("info")
+    info = payload.get("info")
     if isinstance(info, dict):
         usage = info.get("last_token_usage")
     if not isinstance(usage, dict):
-        usage = inner.get("last_token_usage")
+        usage = payload.get("last_token_usage")
     if not isinstance(usage, dict):
         return None
     try:
@@ -301,6 +304,18 @@ def _read(
     # Index into ``events`` of the most recent assistant text event, so a
     # following per-turn ``token_count`` row can attach its usage to it.
     last_assistant_idx: int | None = None
+    # Index of the most recent assistant text/tool event in the CURRENT turn,
+    # used to mark the real turn boundary. Codex interleaves many assistant
+    # commentary messages between tool calls, so an individual assistant
+    # message is NOT a turn end (marking each one end_turn would shatter a
+    # long autonomous turn into seconds-long micro-turns and erase all AFK
+    # time). The true boundary is ``event_msg.task_complete``: when we see it
+    # we promote the latest assistant event of the turn to ``end_turn``. If a
+    # session has no task_complete, the turn naturally closes at the next USER
+    # or session end — still one turn, so AFK is preserved. Unlike
+    # ``last_assistant_idx`` this is NOT cleared by token_count (which precedes
+    # task_complete in the row order).
+    turn_close_idx: int | None = None
 
     for d, ts_ms in _iter_rows(jsonl_path):
         top = d.get("type")
@@ -344,17 +359,23 @@ def _read(
                     events.append(ev)
                     if want_text:
                         text_map[id(ev)] = text
+                    # New turn opens: any pending closer belonged to a turn
+                    # that ended without a task_complete marker.
+                    turn_close_idx = None
                 elif role == "assistant":
+                    # NOT end_turn — Codex emits many assistant messages per
+                    # turn. task_complete marks the real boundary (see below).
                     events.append(
                         Event(
                             kind=EventKind.ASSISTANT_TEXT,
                             session_id=session_id,
                             timestamp_ms=ts_ms,
-                            stop_reason="end_turn",
+                            stop_reason="tool_use",
                             model=current_model,
                         )
                     )
                     last_assistant_idx = len(events) - 1
+                    turn_close_idx = len(events) - 1
                 continue
 
             # --- Tool calls -----------------------------------------------
@@ -377,6 +398,7 @@ def _read(
                         **craft,
                     )
                 )
+                turn_close_idx = len(events) - 1
                 continue
 
             # --- Web search call (its own response_item kind) -------------
@@ -398,6 +420,7 @@ def _read(
                         stop_reason="tool_use",
                     )
                 )
+                turn_close_idx = len(events) - 1
                 continue
 
             # --- Tool outputs → results (NOT new calls) -------------------
@@ -440,6 +463,7 @@ def _read(
                     events.append(ev)
                     if want_text:
                         text_map[id(ev)] = text
+                    turn_close_idx = None
                     continue
                 if ptype == "agent_message":
                     msg = payload.get("message")
@@ -449,17 +473,30 @@ def _read(
                                 kind=EventKind.ASSISTANT_TEXT,
                                 session_id=session_id,
                                 timestamp_ms=ts_ms,
-                                stop_reason="end_turn",
+                                stop_reason="tool_use",
                                 model=current_model,
                             )
                         )
                         last_assistant_idx = len(events) - 1
+                        turn_close_idx = len(events) - 1
                     continue
+
+            # task_complete marks the REAL end of a Codex agent turn. Promote
+            # the latest assistant event of the turn to ``end_turn`` so the
+            # shared turn classifier closes the turn here — capturing all the
+            # autonomous tool work since the user's message as ONE turn (which
+            # becomes AFK when its active time exceeds the HITL threshold).
+            if ptype == "task_complete":
+                if turn_close_idx is not None:
+                    prev = events[turn_close_idx]
+                    events[turn_close_idx] = replace(prev, stop_reason="end_turn")
+                    turn_close_idx = None
+                continue
 
             # token_count: attach the per-turn usage to the most recent
             # assistant text event so the scanner's token metrics are
             # non-zero. The row carries no timeline event of its own.
-            #   payload.payload.info.last_token_usage =
+            #   payload.info.last_token_usage =
             #     {input_tokens, cached_input_tokens, output_tokens, total_tokens}
             # The split mirrors the scanner invariants:
             #   cache_input_tokens          = cached_input_tokens (HIT)
