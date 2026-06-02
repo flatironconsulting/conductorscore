@@ -344,14 +344,19 @@ def count_codex_tools(events) -> ToolCounts:
         name = e.tool_name
         if not isinstance(name, str) or not name:
             continue
-        if name.startswith("mcp__"):
-            # Only count as an MCP session invocation when the name actually
-            # carries the mcp__server__tool shape; bare Codex tools never
-            # infer MCP usage.
-            mcp.add(name)
-        elif name in KNOWN_TOOL_NAMES:
+        if name in KNOWN_TOOL_NAMES:
             builtin.add(name)
             builtin_invocations += 1
+        elif "__" in name:
+            # MCP session invocation. Codex names MCP tools as
+            # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix is
+            # dropped when there's no name collision); both carry the ``server``
+            # via the ``__`` separator. A ``__`` in a non-builtin tool name is
+            # the structural MCP signal — bare single-word tools never infer
+            # MCP. (Bare provider tools that drop the server prefix entirely,
+            # e.g. ``list_deployments``, are unattributable and fall through to
+            # diagnostics.)
+            mcp.add(name)
         else:
             # Unknown Codex tool kind — local diagnostics only, never uploaded.
             diagnostics[name] = diagnostics.get(name, 0) + 1

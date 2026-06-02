@@ -382,6 +382,15 @@ def _read(
             if ptype in ("function_call", "custom_tool_call"):
                 name = payload.get("name")
                 name = name if isinstance(name, str) and name else None
+                # MCP tools carry a ``namespace`` (e.g. "mcp__playwright") even
+                # when ``name`` is bare ("browser_navigate"). Fold it into the
+                # canonical ``mcp__server__tool`` name so the shared tool
+                # counter recognizes the MCP session invocation. Without this
+                # the bare name looks like an unknown built-in and MCP usage
+                # reads as zero. Only categorical names are kept — never args.
+                namespace = payload.get("namespace")
+                if isinstance(namespace, str) and namespace and name:
+                    name = f"{namespace}__{name}"
                 call_id = payload.get("call_id")
                 call_id = call_id if isinstance(call_id, str) else None
                 if name and call_id:

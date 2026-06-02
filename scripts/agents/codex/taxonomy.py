@@ -157,6 +157,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "shell",
         "exec_command",
+        "shell_command",  # observed shell-exec variant
+        "write_stdin",    # sends stdin to a running shell/exec command
         "apply_patch",
         "update_plan",
         "web_search",
