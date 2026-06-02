@@ -74,17 +74,30 @@ CONDUCTORSCORE_LAUNCH_PROVIDER=codex python3 ~/.codex/skills/conductorscore/scri
 ### Cross-provider scanning (consent required)
 
 The first run scans only the provider you launched from. If it detects recent
-activity from the OTHER provider it prints a line like
-`CONDUCTORSCORE_PERMISSION_NEEDED provider=codex sessions_30d=N` and asks
-whether to include it. It scans the other provider ONLY after you say yes — it
-never scans it silently. To scan both up front without the prompt, set the
-explicit override (this bypasses the consent prompt):
+activity from the OTHER provider, `run.py` prints, after the score, a line like:
 
-```bash
-CONDUCTORSCORE_PROVIDERS=all python3 ~/.claude/skills/conductorscore/scripts/run.py
+```
+CONDUCTORSCORE_PERMISSION_NEEDED provider=codex sessions_30d=N
 ```
 
-`CONDUCTORSCORE_PROVIDERS` accepts `claude`, `codex`, `all`, or `claude,codex`.
+**You (the agent) MUST act on this line.** When you see it after a run:
+
+1. Report the launch-provider score first.
+2. Then ASK the user, in plain language, whether to include the other provider
+   (e.g. "I also found N Codex sessions from the last 30 days. Want me to
+   include Codex and recompute your aggregate ConductorScore?").
+3. If the user says **yes**, rerun with the explicit override and report the new
+   aggregate score + URL:
+
+   ```bash
+   CONDUCTORSCORE_PROVIDERS=all python3 ~/.claude/skills/conductorscore/scripts/run.py
+   ```
+4. If the user says **no**, keep the launch-provider-only score.
+
+Never scan the other provider silently — only after the user agrees (or when the
+user sets the override themselves). `CONDUCTORSCORE_PROVIDERS` accepts `claude`,
+`codex`, `all`, or `claude,codex`. The same flow runs in reverse when launched
+from Codex (it detects Claude activity and asks).
 
 ## Constraints
 

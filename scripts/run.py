@@ -122,6 +122,24 @@ def main() -> int:
         ver = final.get("verification") or {}
         if ver.get("github") is True:
             print("  Verified via GitHub.")
+        # Surface the cross-provider consent prompt. scan.py only scanned the
+        # launch provider; if it found recent activity from the OTHER provider
+        # it recorded it here. Re-emit so the launching agent can ASK the user
+        # whether to include it (scan.py's own stdout went to the log file).
+        pn = final.get("permission_needed")
+        if pn:
+            n = final.get("permission_sessions_30d")
+            other = "Codex" if pn == "codex" else "Claude"
+            print(f"CONDUCTORSCORE_PERMISSION_NEEDED provider={pn} sessions_30d={n}")
+            print(
+                f"  I also found {other} activity from the last 30 days "
+                f"({n} sessions), not included above. Ask the user whether to "
+                f"include {other} and recompute the aggregate ConductorScore."
+            )
+            print(
+                f"  If yes, rerun: CONDUCTORSCORE_PROVIDERS=all "
+                f"python3 {Path(__file__).resolve()}"
+            )
         return 0
 
     if final.get("phase") == "error":

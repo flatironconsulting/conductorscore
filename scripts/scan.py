@@ -187,6 +187,12 @@ def main() -> int:
         score=resp.get("score"),
         verification=resp.get("verification"),
         profile_url=_profile_url(auth),
+        # Surface the cross-provider consent decision through the structured
+        # status channel so the orchestrator (run.py) can re-emit the prompt to
+        # the agent. scan.py also prints it to stdout, but run.py redirects that
+        # to a log file — the status channel is what actually reaches the user.
+        permission_needed=decision.permission_needed,
+        permission_sessions_30d=decision.permission_sessions_30d,
     )
     return 0
 
