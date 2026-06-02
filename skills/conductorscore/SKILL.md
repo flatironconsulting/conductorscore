@@ -28,9 +28,14 @@ with the matching flag:
 - `providers` question → re-run with `--providers=all` (All), `--providers=claude`
   (Claude Code), or `--providers=codex` (Codex). On Cancel, stop.
 - `daily` question → re-run with `--daily=yes` (Yes) or `--daily=no` (No).
+- `login` question → the script printed a GitHub URL + code and STOPPED. Show the
+  URL and code to the user and wait for them to authorize in their browser. When
+  they confirm ("I've authorized"), re-run `run.py` with NO new flag — it resumes
+  the same login and continues. On Cancel, stop.
 
 ## Device-flow login
 
-If `run.py` prints a `https://github.com/login/device` URL and a code, show both
-to the user and wait for them to authorize in their browser. The script polls and
-continues on its own once they approve.
+First run prints a `https://github.com/login/device` URL and a code, then STOPS
+(it does not block or poll in the background). Show the URL and code to the user,
+let them authorize in their browser, and once they confirm, re-run `run.py` — it
+resumes the pending login, finishes authentication, and proceeds to the scan.
