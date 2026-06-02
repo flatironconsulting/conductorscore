@@ -7,11 +7,19 @@ data-grounded signals are counted, grouped by signature:
 1. **Denials** — a ``tool_result`` whose text matched a denial marker
    (auto-mode classifier denial, user rejection, or user interrupt
    mid-tool), surfaced by the reader as ``Event.is_denied``.
-2. **Approval-waits** — a Bash/Edit-family tool call followed by a pause
+2. **Approval-waits** — a shell/Edit-family tool call followed by a pause
    of more than ``APPROVAL_WAIT_MS`` before the next event. Grants are
    never logged, so a long gap between dispatching a tool and its result
    is the only data-grounded proxy for "execution waited for the human
-   to click approve."
+   to click approve." This covers Claude (``Bash`` + Edit/Write/MultiEdit)
+   and Codex (``shell`` / ``exec_command`` + ``apply_patch``) symmetrically.
+
+   CODEX CAVEAT: Codex rollouts examined so far carry NO explicit
+   sandbox / escalation / approval record, so the wait-gap proxy is the
+   only approval-friction basis for Codex — applied ONLY to the
+   shell/apply_patch-like tools above (never web_search / update_plan /
+   view_image). If a future Codex transcript shape surfaces explicit
+   approval records, prefer those over this proxy.
 
    CAVEAT: that gap also contains the tool's own execution time, so a
    genuinely slow command (a long build, a subagent) can look like an
@@ -46,6 +54,20 @@ import hashlib
 import re
 
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+
+# Shell-family tool names whose ``raw_input["command"]`` yields a Bash-style
+# signature: ``Bash`` (Claude) + ``shell`` / ``exec_command`` (Codex; the
+# reader normalized both arg shapes to one command string).
+_SHELL_TOOL_NAMES: frozenset[str] = frozenset(
+    {"Bash", "shell", "exec_command"}
+)
+
+# Codex applies edits through ``apply_patch``. It carries no single
+# ``file_path`` (it can touch many files); the reader pre-hashed each path
+# into ``edit_files``. We use the first hashed file as the signature bucket so
+# repeated patches to the same area group together — symmetric with the Edit
+# top-level-dir hash, and still nothing raw on the wire.
+_CODEX_PATCH_TOOL = "apply_patch"
 
 # A leading shell ``NAME=value`` assignment. We skip these when deriving a
 # Bash signature so a secret VALUE (e.g. ``TOKEN=ghp_…``) can never become a
@@ -131,8 +153,8 @@ def signature_for_event(event) -> tuple[str, str] | None:
         return None
     raw = getattr(event, "raw_input", None) or {}
     if not isinstance(raw, dict):
-        return None
-    if event.tool_name == "Bash":
+        raw = {}
+    if event.tool_name in _SHELL_TOOL_NAMES:
         cmd = raw.get("command", "")
         if not isinstance(cmd, str):
             return None
@@ -140,6 +162,20 @@ def signature_for_event(event) -> tuple[str, str] | None:
     if event.tool_name in _EDIT_TOOL_NAMES:
         path = raw.get("file_path", "")
         return signature_for_edit(path if isinstance(path, str) else "")
+    if event.tool_name == _CODEX_PATCH_TOOL:
+        # apply_patch — already-hashed first file (no raw path reachable).
+        # NOTE: the wait-gap proxy is the only approval-friction basis for
+        # Codex today (no explicit sandbox/escalation/approval records were
+        # found in the fixtures); it is applied ONLY to shell/apply_patch-like
+        # tools, matching Claude's Bash/Edit-family scope. If Codex transcripts
+        # later carry explicit approval records, prefer those over this proxy.
+        edit_files = getattr(event, "edit_files", None)
+        first_hash = ""
+        if edit_files:
+            first_hash = edit_files[0][0] or ""
+        elif isinstance(event.edit_file_path_hash, str):
+            first_hash = event.edit_file_path_hash
+        return ("Edit", first_hash)
     return None
 
 

@@ -36,6 +36,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
+from scripts.agents.codex.taxonomy import (
+    EDIT_TOOL_NAMES,
+    SHELL_TOOL_NAMES,
+    normalize_shell_command,
+    parse_apply_patch_files,
+)
 
 # Top-level Codex rollout row types — presence of any of these is the
 # auto-detection signal that a JSONL is a Codex transcript (vs Claude).
@@ -167,6 +173,67 @@ def _message_text(payload: dict) -> str:
     return ""
 
 
+def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
+    """Compute the SHARED structural craft fields for a Codex tool call.
+
+    The returned dict carries exactly the normalized ``Event`` craft kwargs so
+    the SAME counters that consume Claude events also score Codex:
+
+      * ``apply_patch`` (custom_tool_call): parse the V4A patch HEADERS to get
+        each touched file + line estimate. Each path is hashed IMMEDIATELY
+        (reusing the Claude edit path-hash, ``sha256[:16]``); the raw path is
+        never stored. Multi-file patches land in ``edit_files``; the scalar
+        ``edit_file_path_hash`` mirrors the first file for the single-file
+        case. A plan-shaped ``.md`` target fires ``is_plan_file_write``.
+      * ``shell`` / ``exec_command`` (function_call): normalize BOTH arg shapes
+        to one command string and stash it on ``raw_input["command"]`` (in
+        memory only) so the revert + approval detectors run unchanged.
+
+    Privacy: raw patch paths and shell command strings are consumed here only
+    to derive hashes / booleans / an in-memory ``raw_input``; none are
+    serialized (``raw_input`` is never written to the wire — see the
+    privacy-invariant test).
+    """
+    # Late import to avoid a cycle: claude events imports plan_signals which
+    # imports Event from core.normalized.
+    from scripts.agents.claude.events import (
+        _is_excluded_edit_path,
+        _sha16 as _edit_sha16,
+    )
+    from scripts.plan_signals import is_plan_shaped_path
+
+    craft: dict = {}
+    if name in EDIT_TOOL_NAMES:
+        # apply_patch carries its V4A body under ``input`` (custom tool call).
+        body = payload.get("input")
+        if not isinstance(body, str):
+            body = ""
+        files = parse_apply_patch_files(body)
+        if files:
+            edit_files: list[tuple[str, int, bool]] = []
+            is_plan_write = False
+            for path, lines in files:
+                edit_files.append(
+                    (_edit_sha16(path), lines, _is_excluded_edit_path(path))
+                )
+                if path.lower().endswith(".md") and is_plan_shaped_path(path):
+                    is_plan_write = True
+            craft["edit_files"] = tuple(edit_files)
+            # Mirror the first file into the scalar fields so single-file
+            # consumers / debug renders still see a hash.
+            craft["edit_file_path_hash"] = edit_files[0][0]
+            craft["edit_line_count"] = edit_files[0][1]
+            craft["is_excluded_edit_path"] = edit_files[0][2]
+            craft["is_plan_file_write"] = is_plan_write
+    elif name in SHELL_TOOL_NAMES:
+        cmd = normalize_shell_command(payload.get("arguments"))
+        if cmd:
+            # In-memory ONLY — the revert + approval detectors read
+            # ``raw_input["command"]``; it is never serialized.
+            craft["raw_input"] = {"command": cmd}
+    return craft
+
+
 def _has_response_item_messages(jsonl_path: Path) -> bool:
     for d, _ in _iter_rows(jsonl_path):
         if d.get("type") != "response_item":
@@ -286,6 +353,7 @@ def _read(
                 call_id = call_id if isinstance(call_id, str) else None
                 if name and call_id:
                     call_names[call_id] = name
+                craft = _build_codex_tool_craft(name, payload)
                 events.append(
                     Event(
                         kind=EventKind.ASSISTANT_TOOL,
@@ -294,6 +362,7 @@ def _read(
                         tool_name=name,
                         tool_use_id=call_id,
                         stop_reason="tool_use",
+                        **craft,
                     )
                 )
                 continue

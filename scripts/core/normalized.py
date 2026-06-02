@@ -66,6 +66,13 @@ class Event:
         line count touched (max of new/old string newlines).
       ``is_excluded_edit_path`` — ASSISTANT_TOOL Edit/Write/MultiEdit:
         ``.claude/`` / ``.git/`` / basename ``CLAUDE.md`` — boolean only.
+      ``edit_files`` — ASSISTANT_TOOL edit events that touch MULTIPLE files
+        in a single call (Codex ``apply_patch``). A tuple of
+        ``(path_hash, line_count, is_excluded)`` triples — one per file in
+        the patch. The path is hashed by the reader IMMEDIATELY and the raw
+        path never lands on the Event. ``None`` (the default) for Claude's
+        one-file-per-call Edit/Write/MultiEdit, which use the scalar
+        ``edit_file_path_hash`` / ``edit_line_count`` fields instead.
     """
 
     kind: EventKind
@@ -96,6 +103,11 @@ class Event:
     edit_file_path_hash: str | None = None
     edit_line_count: int = 0
     is_excluded_edit_path: bool = False
+    # Multi-file edit footprint for a single call (Codex ``apply_patch``).
+    # Tuple of ``(path_hash, line_count, is_excluded)`` — one per patched
+    # file. Paths are hashed by the reader; raw paths never reach the Event.
+    # ``None`` for Claude's one-file-per-call edits.
+    edit_files: tuple[tuple[str, int, bool], ...] | None = None
     # v0.5 — Feature 7 (anti-pattern cluster). All optional, default-safe.
     # NOTE: ``raw_input`` carries the small subset of tool ``input`` needed
     # by in-memory detectors (Bash ``command``, Edit/Write/MultiEdit

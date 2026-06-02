@@ -21,6 +21,16 @@ from __future__ import annotations
 
 import re
 
+# Shell-family tool names whose ``raw_input["command"]`` is checked for
+# reverts. ``Bash`` is Claude; ``shell`` (old ``{"command":[...]}`` arg shape)
+# and ``exec_command`` (new ``{"cmd":...}`` shape) are Codex — the reader has
+# already normalized BOTH Codex shapes to a single command string on
+# ``raw_input["command"]``, so this detector reuses the SAME regexes with no
+# per-provider branching.
+SHELL_TOOL_NAMES: frozenset[str] = frozenset(
+    {"Bash", "shell", "exec_command"}
+)
+
 # Patterns that flag a Bash segment as a destructive revert. Each is
 # anchored at the start of the (stripped) segment so we don't false-fire
 # on commands like ``foo && git revert …`` (the splitter handles that).
@@ -62,13 +72,16 @@ def count_reverts(events) -> int:
     ``git stash drop && git clean -f`` counts as 2 reverts; ``git status &&
     git revert HEAD && ls`` counts as 1.
 
-    Only ``ASSISTANT_TOOL`` events whose ``tool_name == "Bash"`` and whose
-    in-memory ``raw_input`` dict carries a ``command`` string are
-    considered. Missing or malformed ``raw_input`` contributes 0.
+    Only ``ASSISTANT_TOOL`` events whose ``tool_name`` is a shell-family tool
+    (``Bash`` for Claude; ``shell`` / ``exec_command`` for Codex) and whose
+    in-memory ``raw_input`` dict carries a ``command`` string are considered.
+    Both Codex arg shapes were normalized to one command string by the reader,
+    so this counter is arg-shape-agnostic. Missing or malformed ``raw_input``
+    contributes 0.
     """
     count = 0
     for e in events:
-        if e.kind.name != "ASSISTANT_TOOL" or e.tool_name != "Bash":
+        if e.kind.name != "ASSISTANT_TOOL" or e.tool_name not in SHELL_TOOL_NAMES:
             continue
         raw = getattr(e, "raw_input", None) or {}
         if not isinstance(raw, dict):
@@ -84,6 +97,7 @@ def count_reverts(events) -> int:
 
 __all__ = [
     "REVERT_PATTERNS",
+    "SHELL_TOOL_NAMES",
     "count_reverts",
     "is_revert_command",
 ]

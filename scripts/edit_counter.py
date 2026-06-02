@@ -24,7 +24,13 @@ from dataclasses import dataclass
 
 from scripts.events import Event, EventKind
 
-EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+# Claude edit tools + the Codex ``apply_patch`` custom tool. Codex applies
+# all structured edits through ``apply_patch``; the reader has already parsed
+# its V4A headers into the per-file ``edit_files`` footprint (hashed paths +
+# line estimates), so this aggregator stays a pure, provider-neutral counter.
+EDIT_TOOLS: frozenset[str] = frozenset(
+    {"Edit", "Write", "MultiEdit", "apply_patch"}
+)
 SIGNIFICANT_FILES_FLOOR = 5  # files_modified > 5
 SIGNIFICANT_LINES_FLOOR = 200  # total_lines_edited > 200
 
@@ -51,6 +57,18 @@ def count_edits(events: list[Event]) -> EditCounts:
         if e.kind != EventKind.ASSISTANT_TOOL:
             continue
         if e.tool_name not in EDIT_TOOLS:
+            continue
+        # Multi-file edit (Codex ``apply_patch``): the reader pre-hashed each
+        # patched file into ``edit_files`` = [(path_hash, lines, excluded), …].
+        # Per-file exclusion is applied here so a single patch touching both a
+        # real file and a ``.git/`` path counts only the real one.
+        edit_files = getattr(e, "edit_files", None)
+        if edit_files:
+            for path_hash, line_count, excluded in edit_files:
+                if excluded or not path_hash:
+                    continue
+                files.add(path_hash)
+                total_lines += int(line_count or 0)
             continue
         if e.is_excluded_edit_path:
             continue
