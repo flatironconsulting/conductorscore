@@ -11,9 +11,17 @@ possession of a GitHub session by handing a GitHub token to OUR server's
 """
 from __future__ import annotations
 
+import os
+from urllib.parse import urlparse
+
 import scripts.auth_store as auth_store
 import scripts.device_flow as device_flow
 from scripts._http import get_json, post_json
+
+
+def _is_local_host(api_base: str) -> bool:
+    host = (urlparse(api_base).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
 
 
 class ReauthRequired(Exception):
@@ -66,6 +74,16 @@ def resolve_auth(api_base: str, *, interactive: bool, force_refresh: bool = Fals
         if existing:
             return existing
     device_id = auth_store.load_or_create_device_id()
+
+    # Dark-in-prod test seam (mirrors the server's CONDUCTORSCORE_TEST_GITHUB_IDENTITY
+    # seam): a headless E2E can mint a device token by handing a STUB github token
+    # to the REAL /api/auth/github exchange, skipping the interactive device flow.
+    # Guarded tightly — localhost only — so it can never affect the prod path.
+    stub_token = os.environ.get("CONDUCTORSCORE_TEST_GITHUB_TOKEN")
+    if stub_token and _is_local_host(api_base):
+        entry = _entry_from(exchange_github_token(api_base, stub_token, device_id))
+        auth_store.save_auth(api_base, entry)
+        return entry
 
     # Rung 2 — device flow (interactive only).
     if interactive:
