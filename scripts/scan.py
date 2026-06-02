@@ -27,6 +27,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
 
@@ -98,7 +99,7 @@ def main() -> int:
     try:
         features = extract(
             device_id=device_id,
-            client_version="0.3.0",
+            client_version=CLIENT_VERSION,
             on_progress=on_progress,
         )
     except Exception as e:

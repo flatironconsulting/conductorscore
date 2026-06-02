@@ -4,6 +4,12 @@ import json
 from dataclasses import asdict, dataclass, field
 
 SCHEMA_VERSION = "0.11"
+# Client build version — kept in sync with ``version`` in pyproject.toml (see
+# RELEASING.md step 1). Distinct from SCHEMA_VERSION, which only moves when the
+# wire shape changes. Lives here (a shipped module) so scan.py can stamp the
+# upload without reading pyproject.toml, which is not installed alongside the
+# skill and would need tomllib (>=3.11, above our 3.10 floor).
+CLIENT_VERSION = "0.4.1"
 
 
 @dataclass(frozen=True)
