@@ -6,6 +6,7 @@ import time
 from scripts.agents import consent as consent_mod
 from scripts.agents.registry import adapters_for
 from scripts.approval_counter import count_redundant_approvals
+from scripts.commit_counter import count_commits
 from scripts.config_scanner import scan_config
 from scripts.edit_counter import count_edits
 from scripts.events import (
@@ -416,6 +417,7 @@ def extract(
                 is_planned=plan.is_planned,
                 files_modified=edits.files_modified,
                 total_lines_edited=edits.total_lines_edited,
+                commit_count=count_commits(events),
                 is_significant_edit_session=edits.is_significant,
                 revert_count=revert_count,
                 qualifying_pairs=rep.qualifying_pairs,

@@ -108,6 +108,11 @@ class PerSession:
     is_planned: bool = False
     files_modified: int = 0
     total_lines_edited: int = 0
+    # Output — number of commit-creating ``git commit`` invocations counted
+    # from the session's shell commands (transcript-only; no GitHub fetch).
+    # Additive scalar; always emitted (like ``total_lines_edited``) so it does
+    # not depend on provider, keeping Claude/Codex payloads consistent.
+    commit_count: int = 0
     is_significant_edit_session: bool = False
     # v0.5 — anti-pattern cluster (Feature 7)
     revert_count: int = 0
@@ -214,6 +219,7 @@ class ExtractorOutput:
                     "is_planned": s.is_planned,
                     "files_modified": s.files_modified,
                     "total_lines_edited": s.total_lines_edited,
+                    "commit_count": s.commit_count,
                     "is_significant_edit_session": s.is_significant_edit_session,
                     "revert_count": s.revert_count,
                     "qualifying_pairs": s.qualifying_pairs,
