@@ -89,9 +89,13 @@ We detected multiple coding agents on your system. Which would you like to scan 
 
 **You (the agent) MUST act on this line.** When you see `CONDUCTORSCORE_MULTIPLE_AGENTS`:
 
-1. Present the choice to the user as a multiple-choice question with exactly
-   these options (in this order): **All (Recommended)**, **Claude Code**,
-   **Codex**, **Cancel**.
+1. Present the choice to the user as a multiple-choice question. Use these
+   option labels VERBATIM, in this order — do NOT shorten or paraphrase them:
+   - `All (Recommended)`  (the first option's label must literally read
+     "All (Recommended)", not just "All")
+   - `Claude Code`
+   - `Codex`
+   - `Cancel`
 2. Rerun this same command with the matching override and report the score + URL:
 
    ```bash
