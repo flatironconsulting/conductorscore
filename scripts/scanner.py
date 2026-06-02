@@ -37,6 +37,7 @@ from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
 from scripts.tool_counter import (
+    count_codex_tools,
     count_compaction_and_tokens,
     count_hitl_mcp_invocations,
     count_hitl_mcp_invocations_by_name,
@@ -49,6 +50,29 @@ PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
 def _sha16(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def _merge_config_counts(a: ConfigCounts, b: ConfigCounts) -> ConfigCounts:
+    """Field-wise additive merge of two provider config scans.
+
+    Every ConfigCounts field is an additive count (installed MCP servers,
+    hooks, custom commands / installed skills, plugins, instruction-file
+    lines), so summing across providers is the right aggregation: a device
+    that runs both Claude and Codex gets credit for both customizations.
+
+    ``project_claude_md_lines_avg`` is a per-project average; Codex reports
+    ``0`` for it (it has no project-CLAUDE.md notion), so the sum preserves
+    the Claude value unchanged.
+    """
+    return ConfigCounts(
+        mcp_servers=a.mcp_servers + b.mcp_servers,
+        hooks=a.hooks + b.hooks,
+        custom_commands=a.custom_commands + b.custom_commands,
+        global_claude_md_lines=a.global_claude_md_lines + b.global_claude_md_lines,
+        project_claude_md_lines_avg=a.project_claude_md_lines_avg
+        + b.project_claude_md_lines_avg,
+        plugin_count=a.plugin_count + b.plugin_count,
+    )
 
 
 def _had_plan_artifact_prior_24h(
@@ -136,11 +160,15 @@ def extract(
             # Each adapter parses its own transcript format into the shared
             # normalized Event model. ``count_tools`` is Claude-JSONL-specific
             # (it reads Claude ``tool_use`` blocks + ``<command-name>``
-            # markers); for codex we leave tool counts empty this slice — the
-            # nonzero-profile signal comes from the normalized events (turns +
-            # token usage), not the Claude tool counter.
-            tc = count_tools(s.jsonl_path) if provider == "claude" else None
+            # markers). Codex tool usage is counted from the NORMALIZED events
+            # instead (``count_codex_tools``): the same wire fields
+            # (distinct_builtin_tools / builtin_tool_invocations /
+            # distinct_mcp_tools) drive the Customization + Tools surfaces.
             events, text_map = agent.read_events_and_text(s.jsonl_path)
+            if provider == "claude":
+                tc = count_tools(s.jsonl_path)
+            else:
+                tc = count_codex_tools(events)
         else:
             tc = None
             events = []
@@ -157,6 +185,19 @@ def extract(
     # v0.5 — scan global + project CLAUDE.md line counts. project_roots
     # are the un-hashed local paths; counts cross the wire as integers.
     config = scan_config(home, project_roots=sorted(project_roots))
+    # Merge in each non-Claude agent's config counts (Codex: config.toml MCP
+    # servers + plugins, installed skills, AGENTS.md instruction lines). The
+    # ConfigCounts shape is provider-neutral, so we sum the additive counts
+    # field-by-field. A Claude-only run never enters this branch → byte-
+    # identical to v0.11.
+    for agent in agents:
+        if agent.agent_id == "claude":
+            continue
+        scan = getattr(agent, "scan_config", None)
+        if scan is None:
+            continue
+        other = scan()
+        config = _merge_config_counts(config, other)
 
     sessions: list[PerSession] = []
     for s, provider, events, text_map, tc in loaded:

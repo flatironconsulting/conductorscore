@@ -298,6 +298,27 @@ def _read(
                 )
                 continue
 
+            # --- Web search call (its own response_item kind) -------------
+            # A ``web_search_call`` row IS the tool invocation; its tool
+            # name is the built-in ``web_search`` (no ``name`` field on the
+            # payload). Counts as one ASSISTANT_TOOL like any other call.
+            if ptype == "web_search_call":
+                call_id = payload.get("call_id")
+                call_id = call_id if isinstance(call_id, str) else None
+                if call_id:
+                    call_names[call_id] = "web_search"
+                events.append(
+                    Event(
+                        kind=EventKind.ASSISTANT_TOOL,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        tool_name="web_search",
+                        tool_use_id=call_id,
+                        stop_reason="tool_use",
+                    )
+                )
+                continue
+
             # --- Tool outputs → results (NOT new calls) -------------------
             if ptype in ("function_call_output", "custom_tool_call_output"):
                 call_id = payload.get("call_id")

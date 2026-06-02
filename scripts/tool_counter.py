@@ -106,6 +106,11 @@ class ToolCounts:
     # ``sum(skill_invocations_by_name.values()) == skill_invocations``.
     skill_invocations: int = 0
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    # LOCAL diagnostics only — unrecognized Codex tool names seen while
+    # counting (``{name: count}``). Never serialized to the wire; the
+    # ``ExtractorOutput`` builder never reads this field. Lets the scanner
+    # surface "we saw a Codex tool we don't model yet" without leaking it.
+    codex_unknown_tool_diagnostics: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,77 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         plugin_invocations_by_name=plugins_by_name,
         skill_invocations=skill_invocations,
         skill_invocations_by_name=skills_by_name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex built-in tool counting (from NORMALIZED events).
+# ---------------------------------------------------------------------------
+
+
+def count_codex_tools(events) -> ToolCounts:
+    """Count Codex tool usage from a session's normalized ``Event`` stream.
+
+    Codex transcripts are parsed (``scripts.agents.codex.events``) into the
+    same normalized ``Event`` model the Claude reader produces:
+      * ``ASSISTANT_TOOL`` events carry a ``tool_name`` — the Codex call name
+        (``shell``, ``exec_command``, ``apply_patch``, ``web_search``,
+        ``update_plan``, ``view_image``) or an ``mcp__server__tool`` name.
+      * ``TOOL_RESULT`` events are tool OUTPUTS — they are NEVER counted as
+        invocations (we only look at ``ASSISTANT_TOOL``).
+
+    Routing mirrors the Claude path so the SAME wire fields drive scoring:
+      * ``mcp__*``               → ``distinct_mcp_tools`` (MCP session
+        invocations are only inferred when the tool name actually carries the
+        ``mcp__server__tool`` shape — never guessed from a bare Codex tool).
+      * known Codex built-ins    → ``distinct_builtin_tools`` +
+        ``builtin_tool_invocations``.
+      * unknown / unrecognized   → recorded in the returned ``diagnostics``
+        side-channel ONLY (the caller logs/ignores it; it never serializes).
+
+    Privacy: only categorical tool NAMES are read. Shell command strings and
+    tool outputs were already discarded by the Codex reader before the Event
+    was built, so no raw command/output/path is reachable here. Both shell
+    arg shapes (``{"command":[...]}`` old, ``{"cmd":...}`` new) collapse to the
+    same categorical tool name upstream, so this counter is arg-shape-agnostic.
+
+    Skills / plugins / agent-dispatches are not sourced from Codex tool calls
+    (Codex has no ``<command-name>`` markers and no ``Task`` dispatch tool);
+    those map from Codex config instead. The returned ``ToolCounts`` therefore
+    leaves the command-derived fields empty.
+    """
+    from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES
+    from scripts.core.normalized import EventKind
+
+    mcp: set[str] = set()
+    builtin: set[str] = set()
+    builtin_invocations = 0
+    diagnostics: dict[str, int] = {}
+
+    for e in events:
+        if e.kind != EventKind.ASSISTANT_TOOL:
+            continue
+        name = e.tool_name
+        if not isinstance(name, str) or not name:
+            continue
+        if name.startswith("mcp__"):
+            # Only count as an MCP session invocation when the name actually
+            # carries the mcp__server__tool shape; bare Codex tools never
+            # infer MCP usage.
+            mcp.add(name)
+        elif name in KNOWN_TOOL_NAMES:
+            builtin.add(name)
+            builtin_invocations += 1
+        else:
+            # Unknown Codex tool kind — local diagnostics only, never uploaded.
+            diagnostics[name] = diagnostics.get(name, 0) + 1
+
+    return ToolCounts(
+        distinct_skills=[],
+        distinct_mcp_tools=sorted(mcp),
+        distinct_builtin_tools=sorted(builtin),
+        builtin_tool_invocations=builtin_invocations,
+        codex_unknown_tool_diagnostics=diagnostics,
     )
 
 

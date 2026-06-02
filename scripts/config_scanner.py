@@ -13,10 +13,16 @@ from scripts.agents.claude.config import (
     read_installed_plugins,
     scan_config,
 )
+# Codex config scan (``~/.codex/config.toml`` MCP servers + plugins,
+# installed skills, AGENTS.md instruction lines) lives at the Codex adapter
+# edge. Re-exported here under a provider-qualified name so the scanner and
+# tests reach it through the same facade as the Claude scanner.
+from scripts.agents.codex.config import scan_config as scan_codex_config
 
 __all__ = [
     "ConfigCounts",
     "count_claude_md_lines",
     "read_installed_plugins",
+    "scan_codex_config",
     "scan_config",
 ]
