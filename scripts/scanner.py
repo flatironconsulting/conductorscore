@@ -10,7 +10,6 @@ from scripts.edit_counter import count_edits
 from scripts.events import (
     EventKind,
     claude_home,
-    read_events_and_text,
 )
 from scripts.frustration_detector import detect_rage_quit
 from scripts.cron_classifier import (
@@ -102,16 +101,23 @@ def extract(
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
 
-    # Obtain enabled agent adapters. This slice only implements Claude, so
-    # the selection is always ``[ClaudeAdapter()]`` and the payload is
-    # identical to v0.11 (single-agent Claude scan).
+    # Obtain enabled agent adapters. Defaults to ``[ClaudeAdapter()]`` (the
+    # selection is Claude-only unless ``CONDUCTORSCORE_PROVIDERS`` opts in to
+    # codex/all), so a Claude-only run stays byte-identical to v0.11.
     agents = enabled_agents()
 
     # Pre-filter so on_progress has an accurate total (sessions outside the
-    # window are skipped silently, not counted against the bar).
-    all_sessions = [s for agent in agents for s in agent.find_sessions()]
-    in_window = [s for s in all_sessions if s.last_ts_ms >= cutoff]
+    # window are skipped silently, not counted against the bar). Each session
+    # is tagged with the adapter (provider) that discovered it so Pass 2 can
+    # read events with the right parser, set ``provider`` on the wire, and
+    # hash session ids per-provider to avoid cross-provider collisions.
+    all_sessions = [
+        (agent, s) for agent in agents for s in agent.find_sessions()
+    ]
+    in_window = [(a, s) for (a, s) in all_sessions if s.last_ts_ms >= cutoff]
     total = len(in_window)
+    # Device-level set of providers actually scanned (sorted on emit).
+    providers_seen: set[str] = {a.agent_id for (a, _) in in_window}
 
     # Pass 1 — load every session in the lookback window once. We keep
     # the parsed Events + in-memory text map around so Pass 2 doesn't
@@ -121,18 +127,25 @@ def extract(
     # for sessions that produced a plan artifact, so the weak
     # "prior-24h plan artifact in same project" signal can be answered
     # without re-parsing.
-    loaded: list[tuple] = []  # (SessionMeta, events, text_map, tool_counts)
+    loaded: list[tuple] = []  # (SessionMeta, provider, events, text_map, tool_counts)
     artifact_times_by_project: dict[str, list[tuple[str, int]]] = {}
     project_roots: set[str] = set()
-    for i, s in enumerate(in_window):
+    for i, (agent, s) in enumerate(in_window):
+        provider = agent.agent_id
         if s.jsonl_path is not None:
-            tc = count_tools(s.jsonl_path)
-            events, text_map = read_events_and_text(s.jsonl_path)
+            # Each adapter parses its own transcript format into the shared
+            # normalized Event model. ``count_tools`` is Claude-JSONL-specific
+            # (it reads Claude ``tool_use`` blocks + ``<command-name>``
+            # markers); for codex we leave tool counts empty this slice — the
+            # nonzero-profile signal comes from the normalized events (turns +
+            # token usage), not the Claude tool counter.
+            tc = count_tools(s.jsonl_path) if provider == "claude" else None
+            events, text_map = agent.read_events_and_text(s.jsonl_path)
         else:
             tc = None
             events = []
             text_map = {}
-        loaded.append((s, events, text_map, tc))
+        loaded.append((s, provider, events, text_map, tc))
         project_roots.add(s.project_root)
         if events and session_produced_plan_artifact(events):
             artifact_times_by_project.setdefault(s.project_root, []).append(
@@ -146,7 +159,7 @@ def extract(
     config = scan_config(home, project_roots=sorted(project_roots))
 
     sessions: list[PerSession] = []
-    for s, events, text_map, tc in loaded:
+    for s, provider, events, text_map, tc in loaded:
         if tc is not None:
             distinct_skills = tuple(tc.distinct_skills)
             distinct_mcp_tools = tuple(tc.distinct_mcp_tools)
@@ -314,12 +327,25 @@ def extract(
             slot["input_hit"] += in_hit
             slot["output"] += out
 
+        # Namespace the session hash by provider to avoid cross-provider
+        # collisions. Claude stays UNPREFIXED so the v0.11 Claude payload is
+        # byte-identical; only non-default providers (codex) get the
+        # ``<provider>:`` prefix. Same for the project hash, since two agents
+        # in the same cwd would otherwise collapse to one project bucket.
+        if provider == "claude":
+            session_hash = _sha16(s.session_id)
+            project_hash = _sha16(s.project_root)
+        else:
+            session_hash = _sha16(f"{provider}:{s.session_id}")
+            project_hash = _sha16(f"{provider}:{s.project_root}")
+
         sessions.append(
             PerSession(
-                session_hash=_sha16(s.session_id),
-                project_hash=_sha16(s.project_root),
+                session_hash=session_hash,
+                project_hash=project_hash,
                 started_at_ms=s.first_ts_ms,
                 ended_at_ms=s.last_ts_ms,
+                provider=provider,
                 distinct_skills=distinct_skills,
                 distinct_mcp_tools=distinct_mcp_tools,
                 distinct_builtin_tools=distinct_builtin_tools,
@@ -364,6 +390,10 @@ def extract(
                 plugin_invocations_by_name=plugin_invocations_by_name,
             )
         )
+    # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
+    # byte-equivalent to v0.11 (output_schema omits the key in that case).
+    # Empty scans (no sessions) also report the default Claude-only set.
+    seen = tuple(sorted(providers_seen)) if providers_seen else ("claude",)
     return ExtractorOutput(
         device=DeviceMeta(
             device_id=device_id,
@@ -372,6 +402,7 @@ def extract(
         ),
         config=config,
         sessions=tuple(sessions),
+        providers_seen=seen,  # type: ignore[arg-type]
     )
 
 

@@ -22,6 +22,10 @@ from scripts.agents.claude.events import (
     read_events_and_text as _claude_read_events_and_text,
 )
 from scripts.agents.codex import events as _codex_events
+from scripts.agents.codex.discovery import (
+    codex_home,
+    find_sessions as find_codex_sessions,
+)
 # Private helper consumed cross-repo by the server-side session viewer
 # (server/scripts/client/session_viewer.py imports
 # ``_strip_synthetic_content`` from here). Re-export it so that consumer
@@ -64,6 +68,8 @@ __all__ = [
     "EventKind",
     "SessionMeta",
     "claude_home",
+    "codex_home",
+    "find_codex_sessions",
     "find_sessions",
     "load_subagent_panels",
     "read_events",

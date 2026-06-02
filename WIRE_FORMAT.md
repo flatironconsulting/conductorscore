@@ -831,3 +831,52 @@ tokens already emitted in `distinct_skills` / counted in
   `{}` identically.
 - MCP and plugin keys are unvalidated raw strings — the server MUST
   NOT fail validation on unfamiliar names.
+
+## Provider tagging (Codex support) — additive, no schema bump
+
+ConductorScore scans more than one coding agent. Each session is produced
+by exactly one **provider**; the device reports which providers it scanned.
+This is **additive on top of v0.11** — there is no schema-version bump.
+
+### `sessions[].provider`
+
+| Field      | Type   | Default    | Notes                                                                                   |
+|------------|--------|------------|-----------------------------------------------------------------------------------------|
+| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
+
+### Top-level `providers_seen`
+
+| Field            | Type             | Default      | Notes                                                                                  |
+|------------------|------------------|--------------|----------------------------------------------------------------------------------------|
+| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run (`["claude"]`, `["codex"]`, or `["claude","codex"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
+
+### Byte-equivalence guarantee
+
+A **Claude-only** scan emits neither `sessions[].provider` nor top-level
+`providers_seen` (both are at their defaults and therefore suppressed), so
+the v0.11 Claude payload is **byte-for-byte identical** to the pre-Codex
+shape. The CI `WIRE_FORMAT.md` drift check and the canonical-JSON parity
+tests are unaffected.
+
+### Privacy posture
+
+`provider` and `providers_seen` are closed-set categorical labels
+(`"claude"` / `"codex"`) — no transcript content. Codex sessions follow the
+same privacy invariant as Claude: the project `cwd` is hashed into
+`project_hash` (namespaced `codex:<cwd>` to avoid cross-provider hash
+collisions), user prose is reduced to a hash + token count, and shell
+commands / `apply_patch` file paths are never serialized. The Codex model
+id (e.g. `gpt-5-codex`) is a public categorical and rides plaintext in
+`assistant_msgs_by_model` / `tokens_by_model`, exactly like Anthropic model
+ids.
+
+### Compatibility
+
+- No `schema_version` bump: provider tagging rides on the v0.11 envelope.
+  The server's ingest validator MUST accept `provider` / `providers_seen`
+  (absent on Claude-only uploads, present on Codex/mixed uploads).
+- `provider` defaults to `"claude"`; `providers_seen` defaults to
+  `["claude"]`. The server MUST treat absence identically to those
+  defaults.
+- `provider` values are a CLOSED enum (`"claude"`, `"codex"`). Unknown
+  provider strings indicate a drift the server hasn't acknowledged.

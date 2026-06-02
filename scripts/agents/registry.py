@@ -4,8 +4,13 @@ Single source of truth mapping a provider selection (the
 ``CONDUCTORSCORE_PROVIDERS`` env var) to concrete ``AgentAdapter`` instances.
 
 Selection grammar:
-  * unset / empty / ``"claude"`` → ``[ClaudeAdapter()]``
-  * ``"all"``                    → every implemented adapter (Claude only this slice)
+  * unset / empty / ``"claude"`` → ``[ClaudeAdapter()]`` (default stays
+    Claude-only — cross-provider scanning is opt-in until consent lands)
+  * ``"codex"``                  → ``[CodexAdapter()]``
+  * ``"all"``                    → every implemented adapter, canonical order
+                                   (``[ClaudeAdapter(), CodexAdapter()]``)
+  * comma list (``"claude,codex"``) → those adapters, in the requested order,
+                                   de-duplicated
   * anything else                → ``ValueError("unsupported_provider:<requested>")``
 
 Adding a new agent later is a one-line change to ``_KNOWN_ADAPTERS`` — no
@@ -18,12 +23,14 @@ from collections.abc import Mapping
 
 from scripts.agents.base import AgentAdapter, AgentId
 from scripts.agents.claude import ClaudeAdapter
+from scripts.agents.codex import CodexAdapter
 
 # Implemented adapters, in canonical order. To add an agent: implement its
 # adapter package and add one entry here. The registry — and only the
 # registry — knows the full set.
 _KNOWN_ADAPTERS: dict[AgentId, type] = {
     "claude": ClaudeAdapter,
+    "codex": CodexAdapter,
 }
 
 _DEFAULT_SELECTION: list[AgentId] = ["claude"]
@@ -34,7 +41,9 @@ def parse_agent_selection(requested: str | None) -> list[AgentId]:
     agent ids.
 
     ``None`` / empty / ``"claude"`` → ``["claude"]``; ``"all"`` → all
-    implemented ids; unknown → ``ValueError("unsupported_provider:<requested>")``.
+    implemented ids (canonical order); a comma-separated list → those ids in
+    the requested order (de-duplicated); unknown →
+    ``ValueError("unsupported_provider:<requested>")``.
     """
     if requested is None:
         return list(_DEFAULT_SELECTION)
@@ -43,9 +52,21 @@ def parse_agent_selection(requested: str | None) -> list[AgentId]:
         return list(_DEFAULT_SELECTION)
     if normalized == "all":
         return list(_KNOWN_ADAPTERS.keys())
-    if normalized in _KNOWN_ADAPTERS:
-        return [normalized]  # type: ignore[list-item]
-    raise ValueError(f"unsupported_provider:{requested}")
+
+    # Comma-separated list (or a single id). De-dupe while preserving the
+    # requested order; any unknown token fails the whole selection.
+    selection: list[AgentId] = []
+    for token in normalized.split(","):
+        agent_id = token.strip()
+        if not agent_id:
+            continue
+        if agent_id not in _KNOWN_ADAPTERS:
+            raise ValueError(f"unsupported_provider:{requested}")
+        if agent_id not in selection:
+            selection.append(agent_id)  # type: ignore[arg-type]
+    if not selection:
+        raise ValueError(f"unsupported_provider:{requested}")
+    return selection
 
 
 def enabled_agents(env: Mapping[str, str] = os.environ) -> list[AgentAdapter]:

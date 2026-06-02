@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from typing import Literal
 
 SCHEMA_VERSION = "0.11"
+
+# The agent that produced a session / the device's observed providers. Codex
+# support (Slice 2) is additive on top of v0.11: ``provider`` defaults to
+# ``"claude"`` and is emitted per-session ONLY for non-default (codex)
+# sessions, and ``providers_seen`` is emitted at the top level ONLY when it
+# isn't exactly ``["claude"]``. That keeps a Claude-only payload byte-for-byte
+# identical to the pre-Slice-2 v0.11 shape (CI parity + the server validator
+# are unaffected); the server simply treats absence as "claude".
+Provider = Literal["claude", "codex"]
+_DEFAULT_PROVIDER: Provider = "claude"
 
 
 @dataclass(frozen=True)
@@ -147,6 +158,10 @@ class PerSession:
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     mcp_invocations_by_name: dict[str, int] = field(default_factory=dict)
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    # Slice 2 — the agent that produced this session. Defaults to "claude"
+    # and is serialized only when it isn't the default (see to_dict), so a
+    # Claude-only payload stays byte-equivalent to v0.11.
+    provider: Provider = _DEFAULT_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -154,14 +169,16 @@ class ExtractorOutput:
     device: DeviceMeta
     config: ConfigCounts = field(default_factory=ConfigCounts)
     sessions: tuple[PerSession, ...] = field(default_factory=tuple)
+    # Slice 2 — every provider the device scanned this run (sorted). Emitted
+    # at the top level only when it isn't exactly ("claude",), so a
+    # Claude-only payload stays byte-equivalent to v0.11.
+    providers_seen: tuple[Provider, ...] = (_DEFAULT_PROVIDER,)
 
     def to_dict(self) -> dict:
         config_d = asdict(self.config)
-        return {
-            "device": asdict(self.device),
-            "config": config_d,
-            "sessions": [
-                {
+
+        def _session_dict(s: PerSession) -> dict:
+            d = {
                     "session_hash": s.session_hash,
                     "project_hash": s.project_hash,
                     "started_at_ms": s.started_at_ms,
@@ -229,10 +246,23 @@ class ExtractorOutput:
                     "plugin_invocations_by_name": dict(
                         s.plugin_invocations_by_name
                     ),
-                }
-                for s in self.sessions
-            ],
+            }
+            # Emit ``provider`` only for non-default (codex) sessions so the
+            # Claude-only payload is byte-identical to v0.11.
+            if s.provider != _DEFAULT_PROVIDER:
+                d["provider"] = s.provider
+            return d
+
+        out: dict = {
+            "device": asdict(self.device),
+            "config": config_d,
+            "sessions": [_session_dict(s) for s in self.sessions],
         }
+        # Emit ``providers_seen`` only when it isn't exactly ("claude",); a
+        # Claude-only run stays byte-equivalent to v0.11.
+        if tuple(self.providers_seen) != (_DEFAULT_PROVIDER,):
+            out["providers_seen"] = sorted(set(self.providers_seen))
+        return out
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))

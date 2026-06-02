@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
@@ -119,6 +120,32 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
     return False
 
 
+def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
+    """Extract ``(input_tokens, cached_input_tokens, output_tokens)`` from a
+    Codex ``event_msg.token_count`` payload.
+
+    Shape: ``payload.payload.info.last_token_usage``. ``last_token_usage`` is
+    the PER-TURN delta (never cumulative). Returns ``None`` on any shape
+    mismatch so the caller simply skips the attachment.
+    """
+    inner = payload.get("payload")
+    if not isinstance(inner, dict):
+        return None
+    info = inner.get("info")
+    if not isinstance(info, dict):
+        return None
+    usage = info.get("last_token_usage")
+    if not isinstance(usage, dict):
+        return None
+    try:
+        in_total = int(usage.get("input_tokens", 0) or 0)
+        cached = int(usage.get("cached_input_tokens", 0) or 0)
+        out = int(usage.get("output_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return in_total, cached, out
+
+
 def _message_text(payload: dict) -> str:
     """Flatten a ``response_item.message`` content list to flat text.
 
@@ -188,9 +215,32 @@ def _read(
     # Map tool call_id -> tool_name so outputs can attach as TOOL_RESULT.
     call_names: dict[str, str] = {}
 
+    # The active model id from the most recent ``turn_context`` row. Codex
+    # carries the model per-turn there (e.g. "gpt-5-codex"); we stamp it
+    # onto assistant events so the per-model token rollups have a key.
+    current_model: str | None = None
+    # Index into ``events`` of the most recent assistant text event, so a
+    # following per-turn ``token_count`` row can attach its usage to it.
+    last_assistant_idx: int | None = None
+
     for d, ts_ms in _iter_rows(jsonl_path):
         top = d.get("type")
         payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+
+        if top == "turn_context":
+            m = payload.get("model")
+            if isinstance(m, str) and m:
+                current_model = m
+            continue
+
+        if top == "session_meta":
+            # The session-level model_provider can seed a model label when no
+            # turn_context model is present; turn_context overrides it.
+            if current_model is None:
+                prov = payload.get("model_provider")
+                if isinstance(prov, str) and prov:
+                    current_model = prov
+            continue
 
         if top == "response_item":
             ptype = payload.get("type")
@@ -222,8 +272,10 @@ def _read(
                             session_id=session_id,
                             timestamp_ms=ts_ms,
                             stop_reason="end_turn",
+                            model=current_model,
                         )
                     )
+                    last_assistant_idx = len(events) - 1
                 continue
 
             # --- Tool calls -----------------------------------------------
@@ -296,11 +348,40 @@ def _read(
                                 session_id=session_id,
                                 timestamp_ms=ts_ms,
                                 stop_reason="end_turn",
+                                model=current_model,
                             )
                         )
+                        last_assistant_idx = len(events) - 1
                     continue
-            # token_count and other event_msg payloads: must not crash, no
-            # event emitted (token wiring is a later slice).
+
+            # token_count: attach the per-turn usage to the most recent
+            # assistant text event so the scanner's token metrics are
+            # non-zero. The row carries no timeline event of its own.
+            #   payload.payload.info.last_token_usage =
+            #     {input_tokens, cached_input_tokens, output_tokens, total_tokens}
+            # The split mirrors the scanner invariants:
+            #   cache_input_tokens          = cached_input_tokens (HIT)
+            #   cache_creation_input_tokens = input_tokens - cached (MISS)
+            #   input_tokens                = input_tokens
+            #   output_tokens               = output_tokens
+            if ptype == "token_count" and last_assistant_idx is not None:
+                usage = _last_token_usage(payload)
+                if usage is not None:
+                    in_total, cached, out = usage
+                    miss = max(0, in_total - cached)
+                    prev = events[last_assistant_idx]
+                    events[last_assistant_idx] = replace(
+                        prev,
+                        input_tokens=in_total,
+                        output_tokens=out,
+                        cache_input_tokens=cached,
+                        cache_creation_input_tokens=miss,
+                    )
+                # Only the first token_count after an assistant turn applies;
+                # clear so a later turn's usage doesn't re-attach here.
+                last_assistant_idx = None
+                continue
+            # Other event_msg payloads: must not crash, no event emitted.
             continue
 
         # session_meta / turn_context carry no timeline event.

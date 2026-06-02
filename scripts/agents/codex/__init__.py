@@ -2,14 +2,52 @@
 
 Parses ``~/.codex/sessions/.../rollout-*.jsonl`` transcripts into the same
 normalized ``Event`` stream the Claude adapter produces, so the shared
-session viewer / classifier can render Codex sessions unchanged.
+session viewer / classifier / scanner handle Codex sessions unchanged.
 
-This slice (Slice 1) wires only the *rendering* path: raw user/assistant
-text is kept in memory for the debug viewer, but the normalized ``Event``
-dataclass still carries no raw text (user prose is hashed, like Claude).
+The :class:`CodexAdapter` satisfies the ``AgentAdapter`` protocol
+(discover / read_events / scan_config), mirroring ``ClaudeAdapter``. The
+registry hands the scanner instances of this class when the provider
+selection includes ``codex``.
 """
 from __future__ import annotations
 
-from scripts.agents.codex.events import is_codex_jsonl, read_events, read_events_and_text
+from pathlib import Path
 
-__all__ = ["is_codex_jsonl", "read_events", "read_events_and_text"]
+from scripts.agents.base import AgentId
+from scripts.agents.codex import config, discovery, events
+from scripts.agents.codex.events import (
+    is_codex_jsonl,
+    read_events,
+    read_events_and_text,
+)
+from scripts.core.normalized import Event, SessionMeta
+
+
+class CodexAdapter:
+    """``AgentAdapter`` implementation for Codex (OpenAI) rollout transcripts."""
+
+    @property
+    def agent_id(self) -> AgentId:
+        return "codex"
+
+    def find_sessions(self) -> list[SessionMeta]:
+        return discovery.find_sessions()
+
+    def read_events_and_text(
+        self, jsonl_path: Path
+    ) -> tuple[list[Event], dict[int, str]]:
+        return events.read_events_and_text(jsonl_path)
+
+    def scan_config(self):
+        return config.scan_config()
+
+
+__all__ = [
+    "CodexAdapter",
+    "config",
+    "discovery",
+    "events",
+    "is_codex_jsonl",
+    "read_events",
+    "read_events_and_text",
+]
