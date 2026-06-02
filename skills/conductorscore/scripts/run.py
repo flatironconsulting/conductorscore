@@ -38,6 +38,26 @@ API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com
 
 POLL_INTERVAL = 1.0
 LINE_INTERVAL = 3.0
+# Guaranteed progress heartbeat: never go longer than this without printing a
+# line, so the agent (which runs us non-interactively, piped) always sees we're
+# alive instead of a silent "hang".
+HEARTBEAT_INTERVAL = 10.0
+
+
+def _make_output_live() -> None:
+    """Line-buffer stdout/stderr so every printed line flushes immediately.
+
+    The skill is launched by the agent via Bash with stdout piped (not a TTY),
+    where Python block-buffers by default — so progress lines, and crucially the
+    GitHub device-flow URL+code, would sit unflushed until the process exits and
+    look like a hang. Reconfiguring to line-buffered makes each newline flush.
+    Guarded: under pytest's capture the stream may lack ``reconfigure``.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def _cache_dir() -> Path:
@@ -106,6 +126,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> int:
+    _make_output_live()
     auth_store.ensure_migrated()
     argv = sys.argv[1:]
     if argv and argv[0] == "login":
@@ -163,23 +184,34 @@ def main() -> int:
     if status_path.exists():
         status_path.unlink()
 
+    print("Scanning your transcripts…")
     log = open(log_path, "w")
     proc = subprocess.Popen(_scan_cmd(), stdout=log, stderr=subprocess.STDOUT)
 
-    last_line_at = 0.0
+    last_line_at = time.time()
     last_text = ""
     while proc.poll() is None:
         time.sleep(POLL_INTERVAL)
+        now = time.time()
         status = _read_status(status_path)
-        if not status:
-            continue
-        if status.get("phase") == "scanning":
-            now = time.time()
+        phase = status.get("phase") if status else None
+        if phase == "scanning":
             text = f"Scanning {status.get('current', 0)}/{status.get('total', 0)} sessions…"
             if (now - last_line_at) > LINE_INTERVAL and text != last_text:
                 print(text)
                 last_line_at = now
                 last_text = text
+        # Guaranteed heartbeat: if nothing has printed for HEARTBEAT_INTERVAL,
+        # emit a phase-aware "still alive" line so the run never looks hung —
+        # covers slow scans and the non-"scanning" phases (starting/uploading).
+        if (now - last_line_at) >= HEARTBEAT_INTERVAL:
+            label = {
+                "starting": "Starting up",
+                "scanning": "Scanning",
+                "uploading": "Uploading your score",
+            }.get(phase or "", "Working")
+            print(f"{label}… (still running)")
+            last_line_at = now
 
     log.close()
     final = _read_status(status_path) or {}

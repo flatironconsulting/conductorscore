@@ -19,9 +19,19 @@ class DeviceFlowError(Exception):
     pass
 
 
+def _device_code_url() -> str:
+    # Dark-in-prod test seam: point the device-flow endpoints at a local stub so
+    # the first-run flow can be exercised end-to-end without hitting github.com.
+    return os.environ.get("CONDUCTORSCORE_DEVICE_CODE_URL", DEVICE_CODE_URL)
+
+
+def _token_url() -> str:
+    return os.environ.get("CONDUCTORSCORE_DEVICE_TOKEN_URL", TOKEN_URL)
+
+
 def start_device_flow(client_id, *, http_post):
     status, body = http_post(
-        DEVICE_CODE_URL,
+        _device_code_url(),
         {"client_id": client_id, "scope": SCOPE},
         headers={"accept": "application/json"},
     )
@@ -59,10 +69,12 @@ def poll_for_token(client_id, device_code, *, interval, expires_in, http_post):
             pass
     deadline = time.monotonic() + expires_in
     wait = max(1, int(interval))
+    started = time.monotonic()
+    last_heartbeat = started
     while time.monotonic() < deadline:
         time.sleep(wait)
         status, body = http_post(
-            TOKEN_URL,
+            _token_url(),
             {"client_id": client_id, "device_code": device_code, "grant_type": GRANT},
             headers={"accept": "application/json"},
         )
@@ -70,6 +82,14 @@ def poll_for_token(client_id, device_code, *, interval, expires_in, http_post):
             return body["access_token"]
         err = body.get("error")
         if err == "authorization_pending":
+            # Heartbeat (~every 10s) so the wait for browser authorization never
+            # looks like a silent hang. flush=True in case stdout isn't yet
+            # line-buffered (e.g. device_flow used outside run.py).
+            now = time.monotonic()
+            if now - last_heartbeat >= 10.0:
+                waited = int(now - started)
+                print(f"Still waiting for you to authorize in your browser… ({waited}s)")
+                last_heartbeat = now
             continue
         if err == "slow_down":
             wait = int(body.get("interval", wait + 5))
