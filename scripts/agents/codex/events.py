@@ -130,17 +130,29 @@ def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
     """Extract ``(input_tokens, cached_input_tokens, output_tokens)`` from a
     Codex ``event_msg.token_count`` payload.
 
-    Shape: ``payload.payload.info.last_token_usage``. ``last_token_usage`` is
-    the PER-TURN delta (never cumulative). Returns ``None`` on any shape
-    mismatch so the caller simply skips the attachment.
+    Supports BOTH observed shapes for the PER-TURN delta:
+      * nested: ``payload.payload.info.last_token_usage``
+      * direct: ``payload.payload.last_token_usage``
+    ``last_token_usage`` is always the per-turn delta. A sibling
+    ``total_token_usage`` (cumulative) may also appear — it is deliberately
+    IGNORED here so cumulative counts never get added to a per-turn delta.
+
+    ``output_tokens`` already includes any ``reasoning_output_tokens``; we do
+    NOT add reasoning separately (no double-count). Returns ``None`` on any
+    shape mismatch so the caller simply skips the attachment.
     """
     inner = payload.get("payload")
     if not isinstance(inner, dict):
         return None
+    # Prefer the nested ``info.last_token_usage``; fall back to the direct
+    # ``last_token_usage`` on the payload. NEVER read ``total_token_usage``
+    # (cumulative) — only the per-turn delta crosses into the token split.
+    usage = None
     info = inner.get("info")
-    if not isinstance(info, dict):
-        return None
-    usage = info.get("last_token_usage")
+    if isinstance(info, dict):
+        usage = info.get("last_token_usage")
+    if not isinstance(usage, dict):
+        usage = inner.get("last_token_usage")
     if not isinstance(usage, dict):
         return None
     try:
