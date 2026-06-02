@@ -41,6 +41,9 @@ class CodexAdapter:
     def scan_config(self):
         return config.scan_config()
 
+    def preflight(self, now_ms: int, window_ms: int) -> dict:
+        return discovery.preflight(now_ms, window_ms)
+
 
 __all__ = [
     "CodexAdapter",

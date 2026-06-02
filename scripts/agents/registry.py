@@ -69,6 +69,11 @@ def parse_agent_selection(requested: str | None) -> list[AgentId]:
     return selection
 
 
+def adapters_for(selection: list[AgentId]) -> list[AgentAdapter]:
+    """Instantiate adapters for an already-resolved list of agent ids."""
+    return [_KNOWN_ADAPTERS[agent_id]() for agent_id in selection]
+
+
 def enabled_agents(env: Mapping[str, str] = os.environ) -> list[AgentAdapter]:
     """Return the adapter instances selected by ``CONDUCTORSCORE_PROVIDERS``.
 
@@ -76,7 +81,7 @@ def enabled_agents(env: Mapping[str, str] = os.environ) -> list[AgentAdapter]:
     """
     requested = env.get("CONDUCTORSCORE_PROVIDERS")
     selection = parse_agent_selection(requested)
-    return [_KNOWN_ADAPTERS[agent_id]() for agent_id in selection]
+    return adapters_for(selection)
 
 
-__all__ = ["enabled_agents", "parse_agent_selection"]
+__all__ = ["adapters_for", "enabled_agents", "parse_agent_selection"]

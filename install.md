@@ -55,11 +55,36 @@ tell the user to visit https://conductorscore.com/install to get a fresh URL.
 
 ## Step 3 — run the first score
 
-Invoke the skill:
+Invoke the skill. Tell the skill which provider you launched it from by setting
+`CONDUCTORSCORE_LAUNCH_PROVIDER` — this is the provider whose CLI is running this
+session, NOT a request to scan it silently. From Claude Code:
 
 ```bash
-python3 ~/.claude/skills/conductorscore/scripts/run.py
+CONDUCTORSCORE_LAUNCH_PROVIDER=claude python3 ~/.claude/skills/conductorscore/scripts/run.py
 ```
+
+If you are running ConductorScore from **Codex** instead, install the skill
+under `~/.codex/skills/conductorscore` (or add `~/.codex/prompts/conductorscore.md`)
+and launch with:
+
+```bash
+CONDUCTORSCORE_LAUNCH_PROVIDER=codex python3 ~/.codex/skills/conductorscore/scripts/run.py
+```
+
+### Cross-provider scanning (consent required)
+
+The first run scans only the provider you launched from. If it detects recent
+activity from the OTHER provider it prints a line like
+`CONDUCTORSCORE_PERMISSION_NEEDED provider=codex sessions_30d=N` and asks
+whether to include it. It scans the other provider ONLY after you say yes — it
+never scans it silently. To scan both up front without the prompt, set the
+explicit override (this bypasses the consent prompt):
+
+```bash
+CONDUCTORSCORE_PROVIDERS=all python3 ~/.claude/skills/conductorscore/scripts/run.py
+```
+
+`CONDUCTORSCORE_PROVIDERS` accepts `claude`, `codex`, `all`, or `claude,codex`.
 
 ## Constraints
 

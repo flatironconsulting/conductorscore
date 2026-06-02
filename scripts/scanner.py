@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import time
 
-from scripts.agents.registry import enabled_agents
+from scripts.agents import consent as consent_mod
+from scripts.agents.registry import adapters_for
 from scripts.approval_counter import count_redundant_approvals
 from scripts.config_scanner import scan_config
 from scripts.edit_counter import count_edits
@@ -107,6 +108,7 @@ def extract(
     client_version: str,
     now_ms: int | None = None,
     on_progress=None,
+    consent_decision: "consent_mod.ConsentDecision | None" = None,
 ) -> ExtractorOutput:
     """Scan + score the user's session transcripts.
 
@@ -115,6 +117,12 @@ def extract(
         on_progress: optional callable(done: int, total: int) invoked once per
             loaded session in Pass 1. Callers wiring a TUI progress bar pass
             ``ProgressBar.update``; everyone else leaves it ``None``.
+        consent_decision: the resolved cross-provider consent decision. When
+            ``None`` the scanner resolves it from the environment. The decision
+            picks WHICH providers are scanned — only the launch provider unless
+            an explicit ``CONDUCTORSCORE_PROVIDERS`` override, cached consent,
+            or fresh consent allows the other. The non-launched provider is
+            NEVER scanned without one of those.
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
@@ -125,10 +133,15 @@ def extract(
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
 
-    # Obtain enabled agent adapters. Defaults to ``[ClaudeAdapter()]`` (the
-    # selection is Claude-only unless ``CONDUCTORSCORE_PROVIDERS`` opts in to
-    # codex/all), so a Claude-only run stays byte-identical to v0.11.
-    agents = enabled_agents()
+    # Resolve the cross-provider consent decision: which providers we are
+    # allowed to scan. The launch provider is always scanned; the OTHER
+    # provider is scanned only with an explicit ``CONDUCTORSCORE_PROVIDERS``
+    # override, cached consent, or fresh consent. The non-launched provider's
+    # transcripts are NEVER parsed without one of those — the decision's
+    # metadata-only preflight is the only thing that touched its home.
+    if consent_decision is None:
+        consent_decision = consent_mod.decide(now_ms=now_ms)
+    agents = adapters_for(consent_decision.providers)
 
     # Pre-filter so on_progress has an accurate total (sessions outside the
     # window are skipped silently, not counted against the bar). Each session

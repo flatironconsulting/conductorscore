@@ -27,5 +27,8 @@ class ClaudeAdapter:
     ) -> tuple[list[Event], dict[int, str]]:
         return events.read_events_and_text(jsonl_path)
 
+    def preflight(self, now_ms: int, window_ms: int) -> dict:
+        return discovery.preflight(now_ms, window_ms)
+
 
 __all__ = ["ClaudeAdapter", "config", "discovery", "events"]

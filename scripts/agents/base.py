@@ -46,5 +46,15 @@ class AgentAdapter(Protocol):
         in-process detectors."""
         ...
 
+    def preflight(self, now_ms: int, window_ms: int) -> dict:
+        """Metadata-ONLY probe used for cross-provider consent.
+
+        Returns counts only (``home_exists`` / ``config_exists`` /
+        ``sessions_in_window`` / ``sessions_per_day``). MUST NOT parse
+        transcript message text, tool inputs/outputs, cwd, or instruction
+        files — it answers "does this provider have recent activity?" without
+        reading any content the user hasn't consented to scan."""
+        ...
+
 
 __all__ = ["AgentAdapter", "AgentId", "Event", "SessionMeta"]

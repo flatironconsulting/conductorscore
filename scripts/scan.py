@@ -27,6 +27,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts.agents import consent as consent_mod
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
 
@@ -95,16 +96,51 @@ def main() -> int:
             sw.write(phase="scanning", current=current, total=total)
             last_emit = now
 
+    # Cross-provider consent gate. Decide WHICH providers to scan before we
+    # touch any transcript. When the non-launched provider has recent activity
+    # but the user hasn't consented (and there's no override / cached consent),
+    # we scan ONLY the launch provider and emit a structured permission-needed
+    # line so the agent can ask the user. We NEVER silently scan the other
+    # provider — only its metadata-only preflight ran.
+    decision = consent_mod.decide()
+    if decision.permission_needed is not None:
+        print(
+            f"CONDUCTORSCORE_PERMISSION_NEEDED provider={decision.permission_needed} "
+            f"sessions_30d={decision.permission_sessions_30d}"
+        )
+        other = "Codex" if decision.permission_needed == "codex" else "Claude"
+        print(
+            f"I found {other} activity from the last 30 days. Scan {other} too "
+            f"and include it in your aggregate ConductorScore?"
+        )
+
     try:
         features = extract(
             device_id=device_id,
             client_version="0.3.0",
             on_progress=on_progress,
+            consent_decision=decision,
         )
     except Exception as e:
         sw.write(phase="error", message=f"scan_failed: {e}")
         print(f"scan_failed: {e}", file=sys.stderr)
         return 1
+
+    # Preview before upload: which providers were scanned + per-provider session
+    # counts. Numbers only — no transcript content. Derived from the extractor
+    # output when it exposes ``sessions`` / ``providers_seen``; falls back to the
+    # consent decision's resolved provider list otherwise.
+    sessions = getattr(features, "sessions", None)
+    seen_list = getattr(features, "providers_seen", None) or decision.providers
+    if sessions is not None:
+        provider_counts: dict[str, int] = {}
+        for s in sessions:
+            p = getattr(s, "provider", "claude")
+            provider_counts[p] = provider_counts.get(p, 0) + 1
+        seen = ", ".join(f"{p}={provider_counts.get(p, 0)}" for p in seen_list)
+    else:
+        seen = ", ".join(seen_list)
+    print(f"providers_seen: {seen}")
 
     sw.write(phase="uploading", current=last_progress["current"], total=last_progress["total"])
 

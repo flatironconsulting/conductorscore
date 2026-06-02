@@ -61,6 +61,59 @@ def claude_home() -> Path:
     )
 
 
+def preflight(now_ms: int, window_ms: int) -> dict:
+    """Metadata-only probe of the Claude home for cross-provider consent.
+
+    Returns ONLY counts — never parses transcript message text, tool
+    inputs/outputs, cwd, or instruction files. The session-window count comes
+    from each transcript's first/last timestamp rows (the same cheap fields
+    ``find_sessions`` reads to bound a session), NOT from any message body.
+    Used to decide whether to ASK the user for permission to scan the
+    non-launched provider; the real scan only runs after consent.
+
+    Keys:
+      * ``home_exists``    — the ``.claude`` dir is present.
+      * ``config_exists``  — a ``settings.json`` is present (Claude config).
+      * ``sessions_in_window`` — count of transcripts with activity within
+        ``now_ms - window_ms``.
+      * ``sessions_per_day`` — approximate sessions/day across the window.
+    """
+    home = claude_home()
+    out = {
+        "home_exists": home.is_dir(),
+        "config_exists": (home / "settings.json").is_file(),
+        "sessions_in_window": 0,
+        "sessions_per_day": 0.0,
+    }
+    projects_dir = home / "projects"
+    if not projects_dir.is_dir():
+        return out
+    cutoff = now_ms - window_ms
+    count = 0
+    for proj_dir in projects_dir.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                lines = jsonl.read_text().splitlines()
+            except OSError:
+                continue
+            if not lines:
+                continue
+            last: int | None = None
+            for line in reversed(lines):
+                last = _parse_ts_ms(line)
+                if last is not None:
+                    break
+            if last is None or last < cutoff:
+                continue
+            count += 1
+    out["sessions_in_window"] = count
+    days = max(1.0, window_ms / (24 * 60 * 60 * 1000))
+    out["sessions_per_day"] = round(count / days, 3)
+    return out
+
+
 def find_sessions() -> list[SessionMeta]:
     home = claude_home()
     projects_dir = home / "projects"
