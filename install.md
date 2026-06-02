@@ -71,33 +71,39 @@ and launch with:
 CONDUCTORSCORE_LAUNCH_PROVIDER=codex python3 ~/.codex/skills/conductorscore/scripts/run.py
 ```
 
-### Cross-provider scanning (consent required)
+### Multiple coding agents (ask BEFORE scanning)
 
-The first run scans only the provider you launched from. If it detects recent
-activity from the OTHER provider, `run.py` prints, after the score, a line like:
+`run.py` checks, with metadata only, which coding agents have recent activity.
+If only ONE is present it scans it straight through. If MORE THAN ONE is present
+(e.g. both Claude Code and Codex) and the user hasn't already chosen, it does
+NOT scan — instead it prints, BEFORE any scoring:
 
 ```
-CONDUCTORSCORE_PERMISSION_NEEDED provider=codex sessions_30d=N
+CONDUCTORSCORE_MULTIPLE_AGENTS detected=claude,codex
+We detected multiple coding agents on your system. Which would you like to scan for your ConductorScore?
+  - All (Recommended)  -> CONDUCTORSCORE_PROVIDERS=all
+  - Claude Code  -> CONDUCTORSCORE_PROVIDERS=claude
+  - Codex  -> CONDUCTORSCORE_PROVIDERS=codex
+  - Cancel  -> do not scan
 ```
 
-**You (the agent) MUST act on this line.** When you see it after a run:
+**You (the agent) MUST act on this line.** When you see `CONDUCTORSCORE_MULTIPLE_AGENTS`:
 
-1. Report the launch-provider score first.
-2. Then ASK the user, in plain language, whether to include the other provider
-   (e.g. "I also found N Codex sessions from the last 30 days. Want me to
-   include Codex and recompute your aggregate ConductorScore?").
-3. If the user says **yes**, rerun with the explicit override and report the new
-   aggregate score + URL:
+1. Present the choice to the user as a multiple-choice question with exactly
+   these options (in this order): **All (Recommended)**, **Claude Code**,
+   **Codex**, **Cancel**.
+2. Rerun this same command with the matching override and report the score + URL:
 
    ```bash
-   CONDUCTORSCORE_PROVIDERS=all python3 ~/.claude/skills/conductorscore/scripts/run.py
+   CONDUCTORSCORE_PROVIDERS=all   python3 ~/.claude/skills/conductorscore/scripts/run.py   # All
+   CONDUCTORSCORE_PROVIDERS=claude python3 ~/.claude/skills/conductorscore/scripts/run.py   # Claude Code only
+   CONDUCTORSCORE_PROVIDERS=codex  python3 ~/.claude/skills/conductorscore/scripts/run.py   # Codex only
    ```
-4. If the user says **no**, keep the launch-provider-only score.
+3. On **Cancel**, stop and do not scan.
 
-Never scan the other provider silently — only after the user agrees (or when the
-user sets the override themselves). `CONDUCTORSCORE_PROVIDERS` accepts `claude`,
-`codex`, `all`, or `claude,codex`. The same flow runs in reverse when launched
-from Codex (it detects Claude activity and asks).
+Never scan an agent the user didn't choose. `CONDUCTORSCORE_PROVIDERS` accepts
+`claude`, `codex`, `all`, or `claude,codex`. The same menu appears no matter
+which agent you launched from (the detection is symmetric).
 
 ## Constraints
 

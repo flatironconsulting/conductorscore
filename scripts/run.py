@@ -84,6 +84,38 @@ def main() -> int:
             print(f"Run /conductorscore login to authenticate, or visit {PAIR_URL}.")
             return 0
 
+    # Cross-provider gate: ASK BEFORE scanning, and only when more than one
+    # coding agent is present. If the user hasn't already chosen (no explicit
+    # CONDUCTORSCORE_PROVIDERS override, no cached consent) and metadata-only
+    # detection finds >1 agent with recent activity, emit a structured menu and
+    # STOP without scanning. The launching agent presents the choice and reruns
+    # with CONDUCTORSCORE_PROVIDERS=all|claude|codex. A single agent scans
+    # straight through with no prompt.
+    if not os.environ.get("CONDUCTORSCORE_PROVIDERS"):
+        import scripts.agents.consent as consent_mod
+
+        if consent_mod.read_cached_consent(os.environ) is None:
+            detected = consent_mod.detect_agents()
+            if len(detected) > 1:
+                labels = {"claude": "Claude Code", "codex": "Codex"}
+                print(f"CONDUCTORSCORE_MULTIPLE_AGENTS detected={','.join(detected)}")
+                print(
+                    "We detected multiple coding agents on your system. Which "
+                    "would you like to scan for your ConductorScore?"
+                )
+                print("  - All (Recommended)  -> CONDUCTORSCORE_PROVIDERS=all")
+                for aid in detected:
+                    print(
+                        f"  - {labels.get(aid, aid)}  -> "
+                        f"CONDUCTORSCORE_PROVIDERS={aid}"
+                    )
+                print("  - Cancel  -> do not scan")
+                print(
+                    "Ask the user to choose, then rerun this command with the "
+                    "matching CONDUCTORSCORE_PROVIDERS value (or stop on Cancel)."
+                )
+                return 0
+
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     status_path = cache / "status.json"
@@ -122,24 +154,6 @@ def main() -> int:
         ver = final.get("verification") or {}
         if ver.get("github") is True:
             print("  Verified via GitHub.")
-        # Surface the cross-provider consent prompt. scan.py only scanned the
-        # launch provider; if it found recent activity from the OTHER provider
-        # it recorded it here. Re-emit so the launching agent can ASK the user
-        # whether to include it (scan.py's own stdout went to the log file).
-        pn = final.get("permission_needed")
-        if pn:
-            n = final.get("permission_sessions_30d")
-            other = "Codex" if pn == "codex" else "Claude"
-            print(f"CONDUCTORSCORE_PERMISSION_NEEDED provider={pn} sessions_30d={n}")
-            print(
-                f"  I also found {other} activity from the last 30 days "
-                f"({n} sessions), not included above. Ask the user whether to "
-                f"include {other} and recompute the aggregate ConductorScore."
-            )
-            print(
-                f"  If yes, rerun: CONDUCTORSCORE_PROVIDERS=all "
-                f"python3 {Path(__file__).resolve()}"
-            )
         return 0
 
     if final.get("phase") == "error":

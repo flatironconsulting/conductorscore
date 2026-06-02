@@ -208,6 +208,38 @@ def write_cached_consent(
         pass
 
 
+def detect_agents(
+    env: Mapping[str, str] = os.environ,
+    *,
+    now_ms: int | None = None,
+    adapters: Mapping[AgentId, AgentAdapter] | None = None,
+) -> list[AgentId]:
+    """Metadata-only: which coding agents have sessions in the 30-day window.
+
+    Preflights EVERY known agent (not just the non-launch one) so the
+    orchestrator can ask the user UP FRONT which agents to scan when more than
+    one is present. Reads only file existence / timestamp metadata — never
+    transcript text, tool IO, cwd, or instruction files. Returns the agents in
+    canonical order (claude, codex).
+    """
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    if adapters is None:
+        from scripts.agents.claude import ClaudeAdapter
+        from scripts.agents.codex import CodexAdapter
+
+        adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
+    found: list[AgentId] = []
+    for aid in _CANONICAL_ORDER:
+        ad = adapters.get(aid)
+        if ad is None:
+            continue
+        pf = ad.preflight(now_ms, WINDOW_MS)
+        if pf.get("home_exists") and int(pf.get("sessions_in_window", 0) or 0) > 0:
+            found.append(aid)
+    return found
+
+
 def decide(
     env: Mapping[str, str] = os.environ,
     *,
@@ -286,6 +318,7 @@ __all__ = [
     "ConsentDecision",
     "consent_file",
     "decide",
+    "detect_agents",
     "detect_launch_provider",
     "read_cached_consent",
     "write_cached_consent",
