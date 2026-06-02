@@ -12,7 +12,7 @@ import webbrowser
 DEVICE_CODE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 GRANT = "urn:ietf:params:oauth:grant-type:device_code"
-SCOPE = "read:user user:email"
+SCOPE = "read:user"
 
 
 class DeviceFlowError(Exception):

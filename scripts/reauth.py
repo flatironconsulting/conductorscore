@@ -2,7 +2,7 @@
 API base, escalating: existing entry -> device flow -> (headless) raise.
 
 The client's only GitHub auth path is the minimal-scope OAuth device flow
-(``read:user user:email`` — see ``device_flow.SCOPE``). There is no gh-CLI
+(``read:user`` — see ``device_flow.SCOPE``). There is no gh-CLI
 shortcut, so no broader-scoped token can ever leave the machine.
 
 Anti-impersonation (spec D10): the client never asserts identity. It only proves
