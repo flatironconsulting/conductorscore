@@ -2,14 +2,22 @@
 """Orchestrator for the ConductorScore skill.
 
 Behavior:
-  * If no auth token is stored for the configured API base, print the pair URL and exit 0.
+  * If no auth token is stored for the configured API base, run the GitHub
+    device flow (interactive) to authenticate before scanning.
+  * If more than one coding agent is present and the user hasn't chosen, emit a
+    ``CONDUCTORSCORE_ASK providers ...`` line and stop (the agent relays the
+    choice and re-runs with ``--providers``).
   * Otherwise spawn scan.py (or $CONDUCTORSCORE_SCAN_CMD), poll status.json,
-    print one updating line per ~3s during scan, then print a 3-line summary.
+    print one updating line per ~3s during scan, then print the score.
+  * After a successful scan, emit ``CONDUCTORSCORE_ASK daily ...`` unless
+    ``--daily`` was given; ``--daily yes`` enables daily scoring.
 
-Output budget: ≤9 lines on first run, ≤7 lines on subsequent runs.
+The skill never blocks on stdin: every user decision is surfaced via an ASK
+line and resolved by re-running with a flag.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shlex
@@ -28,7 +36,6 @@ import scripts.auth_store as auth_store
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
-PAIR_URL = "https://conductorscore.com/pair"
 POLL_INTERVAL = 1.0
 LINE_INTERVAL = 3.0
 
@@ -66,53 +73,85 @@ def _login(opts: list[str]) -> int:
     return 0
 
 
+def _handle_daily(args: argparse.Namespace) -> None:
+    """After a successful scan, resolve the daily-scoring decision.
+
+    No ``--daily`` → emit the ASK line and let the agent re-run with the flag.
+    ``--daily yes`` → enable daily scoring for the launch provider and print the
+    result. ``--daily no`` → do nothing.
+    """
+    if args.daily is None:
+        print(
+            'CONDUCTORSCORE_ASK daily "Want ConductorScore to refresh your '
+            'score automatically once per day?" [Yes] [No]'
+        )
+        return
+    if args.daily == "yes":
+        import scripts.agents.consent as consent_mod
+        import scripts.daily as daily
+
+        launch = consent_mod.detect_launch_provider(os.environ)
+        result = daily.enable_daily(launch)
+        if result.instruction:
+            print(result.instruction)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="conductorscore", add_help=False)
+    parser.add_argument("--providers", choices=["all", "claude", "codex"], default=None)
+    parser.add_argument("--daily", choices=["yes", "no"], default=None)
+    parser.add_argument("--pair", default=None)  # back-compat (unused here)
+    ns, _unknown = parser.parse_known_args(argv)
+    return ns
+
+
 def main() -> int:
     auth_store.ensure_migrated()
-    args = sys.argv[1:]
-    if args and args[0] == "login":
-        return _login(args[1:])
+    argv = sys.argv[1:]
+    if argv and argv[0] == "login":
+        return _login(argv[1:])
 
+    args = _parse_args(argv)
+
+    # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
+    # already honors. Set it before consent/scan logic reads the environment.
+    if args.providers:
+        os.environ["CONDUCTORSCORE_PROVIDERS"] = args.providers
+
+    # First run / no stored token: run the interactive GitHub device flow.
+    # resolve_auth prints the login/device URL + code; the agent relays it and
+    # waits for the user to authorize, then resolve_auth returns the entry.
     if auth_store.load_auth(API_BASE) is None:
-        # Auto path: non-interactive, so a bare `/conductorscore` never springs
-        # a browser device flow. With no stored token it can only raise; point
-        # the user at the explicit login / pair flow.
         import scripts.reauth as reauth
+
         try:
-            reauth.resolve_auth(API_BASE, interactive=False)
-        except reauth.ReauthRequired:
-            print("Not paired yet.")
-            print(f"Run /conductorscore login to authenticate, or visit {PAIR_URL}.")
+            reauth.resolve_auth(API_BASE, interactive=True)
+        except reauth.ReauthRequired as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        except Exception as e:  # network/server errors must not break the session
+            print(f"Could not start GitHub login: {e}", file=sys.stderr)
+            print("Try again, or run /conductorscore login.", file=sys.stderr)
             return 0
 
     # Cross-provider gate: ASK BEFORE scanning, and only when more than one
     # coding agent is present. If the user hasn't already chosen (no explicit
-    # CONDUCTORSCORE_PROVIDERS override, no cached consent) and metadata-only
-    # detection finds >1 agent with recent activity, emit a structured menu and
-    # STOP without scanning. The launching agent presents the choice and reruns
-    # with CONDUCTORSCORE_PROVIDERS=all|claude|codex. A single agent scans
-    # straight through with no prompt.
+    # --providers / CONDUCTORSCORE_PROVIDERS override, no cached consent) and
+    # metadata-only detection finds >1 agent with recent activity, emit a
+    # structured ASK line and STOP without scanning. The launching agent
+    # presents the choice and re-runs with --providers=all|claude|codex. A
+    # single agent scans straight through with no prompt.
     if not os.environ.get("CONDUCTORSCORE_PROVIDERS"):
         import scripts.agents.consent as consent_mod
 
         if consent_mod.read_cached_consent(os.environ) is None:
             detected = consent_mod.detect_agents()
             if len(detected) > 1:
-                labels = {"claude": "Claude Code", "codex": "Codex"}
-                print(f"CONDUCTORSCORE_MULTIPLE_AGENTS detected={','.join(detected)}")
                 print(
-                    "We detected multiple coding agents on your system. Which "
-                    "would you like to scan for your ConductorScore?"
-                )
-                print("  - All (Recommended)  -> CONDUCTORSCORE_PROVIDERS=all")
-                for aid in detected:
-                    print(
-                        f"  - {labels.get(aid, aid)}  -> "
-                        f"CONDUCTORSCORE_PROVIDERS={aid}"
-                    )
-                print("  - Cancel  -> do not scan")
-                print(
-                    "Ask the user to choose, then rerun this command with the "
-                    "matching CONDUCTORSCORE_PROVIDERS value (or stop on Cancel)."
+                    'CONDUCTORSCORE_ASK providers "We detected multiple coding '
+                    "agents on your system. Which would you like to scan for "
+                    'your ConductorScore?" '
+                    "[All (Recommended)] [Claude Code] [Codex] [Cancel]"
                 )
                 return 0
 
@@ -154,6 +193,7 @@ def main() -> int:
         ver = final.get("verification") or {}
         if ver.get("github") is True:
             print("  Verified via GitHub.")
+        _handle_daily(args)
         return 0
 
     if final.get("phase") == "error":

@@ -5,6 +5,7 @@ never hardcoded here (spec: no hardcoded credentials).
 """
 from __future__ import annotations
 
+import os
 import time
 import webbrowser
 
@@ -35,6 +36,12 @@ def prompt_user(flow: dict) -> None:
     uri = flow.get("verification_uri", "https://github.com/login/device")
     code = flow.get("user_code", "")
     print(f"To authenticate, visit {uri} and enter code: {code}")
+    # The skill runs non-interactively (launched by the agent via Bash), so the
+    # printed URL is the source of truth — the agent relays it to the user. We do
+    # NOT auto-open a browser by default: in sandboxes (WSL, CI) `xdg-open` can
+    # spawn a browser that blocks the process. Opt in with CONDUCTORSCORE_OPEN_BROWSER=1.
+    if os.environ.get("CONDUCTORSCORE_OPEN_BROWSER") != "1":
+        return
     try:
         webbrowser.open(uri)
     except Exception:
@@ -42,6 +49,14 @@ def prompt_user(flow: dict) -> None:
 
 
 def poll_for_token(client_id, device_code, *, interval, expires_in, http_post):
+    # An optional cap (seconds) on how long we poll. Lets tests / CI bound the
+    # wait so an unauthorized device flow can't block for the full ~15 min.
+    cap = os.environ.get("CONDUCTORSCORE_DEVICE_FLOW_MAX_WAIT")
+    if cap:
+        try:
+            expires_in = min(int(expires_in), max(0, int(cap)))
+        except ValueError:
+            pass
     deadline = time.monotonic() + expires_in
     wait = max(1, int(interval))
     while time.monotonic() < deadline:
