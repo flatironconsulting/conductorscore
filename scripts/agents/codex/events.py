@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -124,6 +125,30 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
         if isinstance(t, str) and t in {"user", "assistant", "system"}:
             return False
     return False
+
+
+# Codex shell/exec outputs are plain strings that include a
+# "Process exited with code N" trailer; a non-zero code is a tool error. We
+# parse ONLY this boolean signal transiently — the raw output is never stored.
+_EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
+
+
+def _output_is_error(output: object) -> bool:
+    """True when a Codex tool output indicates a failed call.
+
+    Detects a non-zero shell/exec exit code in the output string. Returns False
+    for outputs with no exit-code marker (e.g. apply_patch success). Only a
+    boolean crosses out of here — never the raw output text.
+    """
+    text = output if isinstance(output, str) else None
+    if text is None and isinstance(output, dict):
+        # Some outputs wrap content in {"output": "...", ...}.
+        inner = output.get("output")
+        text = inner if isinstance(inner, str) else None
+    if not text:
+        return False
+    m = _EXIT_CODE_RE.search(text)
+    return bool(m) and m.group(1) != "0"
 
 
 def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
@@ -443,6 +468,9 @@ def _read(
                         timestamp_ms=ts_ms,
                         tool_name=call_names.get(call_id) if call_id else None,
                         tool_use_id=call_id,
+                        # Non-zero shell/exec exit code → tool error (feeds
+                        # tool_error_count). Boolean only; output not stored.
+                        is_error=_output_is_error(payload.get("output")),
                     )
                 )
                 continue
