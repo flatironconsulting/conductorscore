@@ -368,6 +368,40 @@ def _apply_daily_decision(decision: str) -> int:
     return 0
 
 
+def _has_cached_consent() -> bool:
+    """True when this API base + account already has a persisted provider consent
+    (a returning user). Used to keep the version banner to the first run only.
+    Never raises — a cache-read failure just means 'show the banner'."""
+    try:
+        import scripts.agents.consent as consent_mod
+
+        return consent_mod.read_cached_consent(os.environ) is not None
+    except Exception:
+        return False
+
+
+def _persist_consent_choice() -> None:
+    """After a successful scan, record the resolved provider selection so a later
+    run reads cached consent and scans straight through (no repeat providers ASK).
+
+    Only persists an explicit selection (from --providers / CONDUCTORSCORE_PROVIDERS)
+    so we never write a cross-provider grant the user did not make. Never raises —
+    a cache-write failure must not break the run (write_cached_consent swallows
+    OSError; we guard the rest)."""
+    requested = (os.environ.get("CONDUCTORSCORE_PROVIDERS") or "").strip()
+    if not requested:
+        return
+    try:
+        import scripts.agents.consent as consent_mod
+        from scripts.agents.registry import parse_agent_selection
+
+        providers = consent_mod._canonical(parse_agent_selection(requested))
+        if providers:
+            consent_mod.write_cached_consent(providers, os.environ)
+    except Exception:
+        pass
+
+
 def _emit_daily_ask() -> None:
     print(
         'CONDUCTORSCORE_ASK daily "Want ConductorScore to refresh your score '
@@ -484,8 +518,18 @@ def main() -> int:
     if args.daily is not None:
         return _apply_daily_decision(args.daily)
 
-    # Banner: print the version up front (and an update notice only if behind).
-    _version_banner()
+    # Banner: print the version up front (and an update notice only if behind),
+    # but ONLY on the initial invocation of a scoring cycle. `--providers`/`--daily`
+    # re-runs are continuations the user already saw the banner for; a headless
+    # (agent-driven) run has no human reading a banner; and a returning user whose
+    # consent is already cached has seen it before too — keep later runs silent.
+    if not (
+        args.providers
+        or args.daily
+        or os.environ.get("CONDUCTORSCORE_HEADLESS")
+        or _has_cached_consent()
+    ):
+        _version_banner()
 
     # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
     # already honors. Set it before consent/scan logic reads the environment.
@@ -589,6 +633,12 @@ def main() -> int:
     final = _read_status(status_path) or {}
 
     if final.get("phase") == "done":
+        # Persist the provider choice so the NEXT run reads cached consent and
+        # scans straight through — no second providers ASK. We only reach here
+        # after a successful scan, and only record when the user actually made a
+        # multi-provider choice (explicit --providers / CONDUCTORSCORE_PROVIDERS),
+        # so a single-agent run never writes a spurious cross-provider grant.
+        _persist_consent_choice()
         # Terminal users get a human summary; the agent gets a structured result
         # line and renders the final report itself (SKILL.md). Either way the
         # daily question comes LAST and never re-scans (see _apply_daily_decision).
