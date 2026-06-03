@@ -467,6 +467,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main() -> int:
+    if os.environ.get("CONDUCTORSCORE_FORCE_BACKSTOP"):
+        # Test/diagnostic seam: prove the __main__ backstop swallows an uncaught
+        # error so no Python traceback ever reaches the host session.
+        raise RuntimeError("forced backstop")
     _make_output_live()
     auth_store.ensure_migrated()
     argv = sys.argv[1:]
@@ -530,19 +534,28 @@ def main() -> int:
                     _emit_providers_ask()
                     return 0
 
-    cache = _writable_cache_dir()
-    status_path = cache / "status.json"
-    log_path = cache / "last-run.log"
-
-    if status_path.exists():
-        status_path.unlink()
+    # Cache setup is best-effort: even after _writable_cache_dir()'s temp
+    # fallback, a hostile FS can still refuse the unlink/open. Any OSError here
+    # must NOT break the host session — print one clean line and exit 0.
+    try:
+        cache = _writable_cache_dir()
+        status_path = cache / "status.json"
+        log_path = cache / "last-run.log"
+        status_path.unlink(missing_ok=True)
+        log = open(log_path, "w")
+    except OSError:
+        print(
+            "ConductorScore couldn't write its cache (read-only filesystem); "
+            "skipping the scan.",
+            file=sys.stderr,
+        )
+        return 0
 
     print("Scanning your transcripts…")
     # Share the chosen writable dir with the scan subprocess so the scanner
     # writes status.json / last-run.log to the exact same place we read.
     scan_env = dict(os.environ)
     scan_env["CONDUCTORSCORE_CACHE_DIR"] = str(cache)
-    log = open(log_path, "w")
     proc = subprocess.Popen(
         _scan_cmd(), stdout=log, stderr=subprocess.STDOUT, env=scan_env
     )
@@ -604,5 +617,30 @@ def _read_status(path: Path) -> dict | None:
         return None
 
 
+def _backstop_main() -> int:
+    """Run main() under a last-resort guard so NO Python traceback ever reaches
+    the user's Claude Code session. SystemExit raised intentionally by inner code
+    is re-raised unchanged; any other uncaught error prints one clean human line
+    and exits 0 (host-session-safe)."""
+    try:
+        return main()
+    except SystemExit:
+        raise
+    except OSError:
+        print(
+            "ConductorScore couldn't write its cache (read-only filesystem); "
+            "skipping the scan.",
+            file=sys.stderr,
+        )
+        return 0
+    except Exception:
+        print(
+            "ConductorScore hit an unexpected error and stopped. "
+            "Your Claude Code session is unaffected.",
+            file=sys.stderr,
+        )
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_backstop_main())

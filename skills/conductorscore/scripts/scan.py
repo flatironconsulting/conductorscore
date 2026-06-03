@@ -36,6 +36,9 @@ API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com
 
 
 def _cache_dir() -> Path:
+    explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
+    if explicit:
+        return Path(explicit)
     xdg = os.environ.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
 
@@ -80,6 +83,10 @@ def _upload(features_json: str, device_token: str):
 
 
 def main() -> int:
+    if os.environ.get("CONDUCTORSCORE_FORCE_BACKSTOP"):
+        # Test/diagnostic seam: prove the __main__ backstop swallows an uncaught
+        # error so no Python traceback ever reaches the host session.
+        raise RuntimeError("forced backstop")
     sw = StatusWriter(_status_path())
     sw.write(phase="starting")
     auth = _load_auth()
@@ -198,5 +205,29 @@ def main() -> int:
     return 0
 
 
+def _backstop_main() -> int:
+    """Last-resort guard so the scan subprocess never surfaces a Python traceback
+    to the host session. SystemExit raised intentionally by inner code is
+    re-raised unchanged; any other uncaught error prints one clean line and
+    exits 0 (run.py reads status.json / the log, not the traceback)."""
+    try:
+        return main()
+    except SystemExit:
+        raise
+    except OSError:
+        print(
+            "ConductorScore couldn't write its cache (read-only filesystem); "
+            "skipping the scan.",
+            file=sys.stderr,
+        )
+        return 0
+    except Exception:
+        print(
+            "ConductorScore hit an unexpected error and stopped.",
+            file=sys.stderr,
+        )
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_backstop_main())
