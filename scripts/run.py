@@ -23,6 +23,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -112,6 +113,25 @@ def _cache_dir() -> Path:
         return Path(explicit)
     xdg = os.environ.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
+
+
+def _writable_cache_dir() -> Path:
+    """Return a cache dir we can actually write to.
+
+    Prefer `_cache_dir()` (CONDUCTORSCORE_CACHE_DIR / XDG / ~/.cache). Probe it
+    by creating the dir and writing+unlinking a sentinel. If anything raises
+    OSError (read-only FS, permission denied, etc.), fall back to a fresh
+    `tempfile.mkdtemp()` dir so a scan never crashes the host session.
+    """
+    preferred = _cache_dir()
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        probe = preferred / ".probe"
+        probe.write_text("")
+        probe.unlink()
+        return preferred
+    except OSError:
+        return Path(tempfile.mkdtemp(prefix="conductorscore-"))
 
 
 def _scan_cmd() -> list[str]:
@@ -510,8 +530,7 @@ def main() -> int:
                     _emit_providers_ask()
                     return 0
 
-    cache = _cache_dir()
-    cache.mkdir(parents=True, exist_ok=True)
+    cache = _writable_cache_dir()
     status_path = cache / "status.json"
     log_path = cache / "last-run.log"
 
@@ -519,8 +538,14 @@ def main() -> int:
         status_path.unlink()
 
     print("Scanning your transcripts…")
+    # Share the chosen writable dir with the scan subprocess so the scanner
+    # writes status.json / last-run.log to the exact same place we read.
+    scan_env = dict(os.environ)
+    scan_env["CONDUCTORSCORE_CACHE_DIR"] = str(cache)
     log = open(log_path, "w")
-    proc = subprocess.Popen(_scan_cmd(), stdout=log, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        _scan_cmd(), stdout=log, stderr=subprocess.STDOUT, env=scan_env
+    )
 
     last_line_at = time.time()
     last_text = ""
