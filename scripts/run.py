@@ -63,6 +63,49 @@ def _make_output_live() -> None:
             pass
 
 
+def _skill_version() -> str | None:
+    """The installed skill's version, from the VERSION file beside scripts/."""
+    try:
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+    except OSError:
+        return None
+
+
+def _is_outdated(local: str, latest: str) -> bool:
+    def parts(v: str) -> list[int]:
+        out = []
+        for p in v.strip().split("."):
+            try:
+                out.append(int(p))
+            except ValueError:
+                out.append(0)
+        return out
+
+    return parts(local) < parts(latest)
+
+
+def _version_banner() -> None:
+    """Print the version and, only when behind the server's published version, a
+    one-line update notice. Silent on any network/parse failure; skippable with
+    CONDUCTORSCORE_NO_VERSION_CHECK=1 (used by tests)."""
+    local = _skill_version()
+    if local:
+        print(f"Version {local}")
+    if not local or os.environ.get("CONDUCTORSCORE_NO_VERSION_CHECK"):
+        return
+    try:
+        from scripts._http import get_json
+
+        status, body = get_json(f"{API_BASE}/api/skill-config")
+        latest = body.get("latest_skill_version") if status == 200 else None
+    except Exception:
+        latest = None
+    if isinstance(latest, str) and _is_outdated(local, latest):
+        print(
+            f"↑ v{latest} available — run: gh skill update conductorscore --force"
+        )
+
+
 def _cache_dir() -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
@@ -397,6 +440,9 @@ def main() -> int:
     # their score, so applying it must NOT trigger another scan.
     if args.daily is not None:
         return _apply_daily_decision(args.daily)
+
+    # Banner: print the version up front (and an update notice only if behind).
+    _version_banner()
 
     # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
     # already honors. Set it before consent/scan logic reads the environment.

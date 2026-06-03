@@ -8,8 +8,10 @@ resulting numbers (your score) — never transcript text.
 
 ## How to run
 
-When the user invokes this skill, say exactly **"Calculating your ConductorScore"**
-(nothing more), then run the orchestrator from the skill directory:
+When the user invokes this skill, say **"Calculating your ConductorScore"** and,
+on the next line, the skill version the script reports (its first output line is
+`Version X.Y.Z`) — e.g. show `Version 0.5.0` beneath the heading. Run the
+orchestrator from the skill directory:
 
 ```
 python3 ~/.claude/skills/conductorscore/scripts/run.py
@@ -17,20 +19,13 @@ python3 ~/.claude/skills/conductorscore/scripts/run.py
 
 (If you launched from Codex, use `~/.codex/skills/conductorscore/scripts/run.py`.)
 
+If the script prints `↑ vX.Y.Z available — run: gh skill update …`, relay that
+line so the user can update; then continue normally.
+
 The script drives the flow. Don't narrate the steps or restate its progress
 lines. Your jobs are: (a) run the script, (b) handle the `CONDUCTORSCORE_ASK`
 lines below, and (c) when the scan finishes, render the **final report** from
 the `CONDUCTORSCORE_RESULT` line (see "Final report").
-
-## Keep the skill up to date
-
-Before the first run in a session, make sure the latest skill is installed:
-
-```
-gh skill update flatironconsulting/conductorscore conductorscore
-```
-
-It's a quick no-op if already current. Skip silently if `gh` is unavailable.
 
 ## ASK relay rule
 
