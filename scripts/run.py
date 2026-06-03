@@ -238,10 +238,16 @@ def _login_nonblocking(pending: dict, resumable: bool, device_id: str) -> str:
     return "pending"
 
 
-def _login_step() -> str:
+def _login_step(confirm_existing: bool = False) -> str:
     """Device-flow login. Returns ``"ok"`` (authenticated, proceed),
     ``"pending"`` (printed an ASK and stopped — agent re-runs to resume), or
     ``"error"``.
+
+    ``confirm_existing`` (set by the explicit ``/conductorscore login``
+    subcommand) prints a ``✓ Logged in as @<handle>`` line when the
+    already-authenticated fast path is taken, so the command is never a silent
+    no-op. The auto first-run path leaves it False — it falls through to the
+    scan, which renders its own result.
 
     Adaptive: a real terminal (TTY) gets the `gh auth login --web` /
     `gcloud auth login` experience — open the browser and AUTO-CONTINUE on
@@ -259,6 +265,10 @@ def _login_step() -> str:
     # both and raises ReauthRequired when a real device flow is needed.
     try:
         reauth.resolve_auth(API_BASE, interactive=False)
+        if confirm_existing:
+            entry = auth_store.load_auth(API_BASE) or {}
+            handle = entry.get("github_username")
+            print(f"✓ Logged in as @{handle}" if handle else "✓ Logged in.")
         return "ok"
     except reauth.ReauthRequired:
         pass
@@ -280,7 +290,11 @@ def _login_step() -> str:
         except Exception as e:  # network/server errors must not break the session
             print(f"Could not start GitHub login: {e}", file=sys.stderr)
             print("Try again, or run /conductorscore login.", file=sys.stderr)
-            return "error"
+            # Distinct from "error": the auto first-run path treats an
+            # unreachable server as a SOFT failure (exit 0) so a transient
+            # outage never surfaces as a broken Claude Code session. The
+            # explicit `/conductorscore login` subcommand still reports rc 1.
+            return "unreachable"
         pending = {
             "api_base": API_BASE,
             "client_id": cid,
@@ -309,7 +323,9 @@ def _login(opts: list[str]) -> int:
     if "--switch" in opts:
         auth_store.clear_auth(API_BASE)
         _clear_pending()
-    status = _login_step()
+    status = _login_step(confirm_existing=True)
+    # An explicit login that can't even reach the server is a real failure the
+    # user asked about — report rc 1 (unlike the auto first-run soft path).
     return 0 if status in ("ok", "pending") else 1
 
 
@@ -457,6 +473,11 @@ def main() -> int:
         status = _login_step()
         if status == "pending":
             return 0  # stopped; agent re-runs after the user authorizes
+        if status == "unreachable":
+            # Soft-fail: a transient server outage on first run must NOT break
+            # the user's Claude Code session (the friendly message already went
+            # to stderr). The user re-runs once the server is reachable.
+            return 0
         if status == "error":
             return 1
         # status == "ok" → fall through to consent/scan
