@@ -71,3 +71,20 @@ First run prints a `https://github.com/login/device` URL and a code, then STOPS
 (it does not poll in the background). Show the URL and code to the user, let them
 authorize in their browser, and once they confirm, re-run `run.py` — it resumes
 the pending login, finishes authentication, and proceeds to the scan.
+
+## Privacy & data handling
+
+ConductorScore runs entirely on your machine. It reads your local coding-agent
+transcripts to compute metrics, then uploads only:
+
+- **Numbers** — counts, token totals, timing, and derived scores.
+- **Names you already surface by using them** — the skills, slash-commands, MCP
+  servers, plugins, and model IDs invoked in your sessions (these appear on your
+  public profile). Just the names — no arguments, no contents.
+
+It never uploads transcript or message text, prompts, code, file contents, or file
+paths. Message and file text is reduced on-device to a truncated SHA-256 hash (used
+only for dedup/similarity) before any metric is computed. The exact wire payload is
+documented and inspectable in `WIRE_FORMAT.md` (`wire_format_sample.json` is a real
+sample). Uploads happen only after you pair this device, only for the agents you
+consent to scan, and never on an unpaired machine.

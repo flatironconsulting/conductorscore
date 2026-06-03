@@ -450,6 +450,11 @@ def main() -> int:
 
     print("Scanning your transcripts…")
     log = open(log_path, "w")
+    # Runs OUR OWN local scanner (scripts/scan.py) as a child so this process can
+    # stream progress while it works. scan.py reads transcripts on-device and uploads
+    # only per-metric numbers + invoked names (see WIRE_FORMAT.md), and only after the
+    # device is paired + the user consents to the providers scanned. Output is captured
+    # to a log file (not hidden) so the foreground UI can tail it.
     proc = subprocess.Popen(_scan_cmd(), stdout=log, stderr=subprocess.STDOUT)
 
     last_line_at = time.time()

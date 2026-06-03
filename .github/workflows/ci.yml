@@ -16,10 +16,42 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      # Rebuild skills/conductorscore from the canonical sources (SKILL.md +
-      # scripts/ + VERSION). The committed mirror is a build artifact consumed by
-      # `gh skill install`; this hard gate fails CI if it ever drifts.
+      # The committed mirror skills/conductorscore/ is what `gh skill install` and
+      # `npx skills add` consume. Its SKILL.md is the canonical hand-authored skill
+      # body; scripts/ + VERSION are rebuilt from the repo-root sources. There must
+      # be NO root-level SKILL.md — one would make `npx skills add` treat the whole
+      # repository as the skill instead of this clean package. These gates fail CI
+      # if a root SKILL.md is reintroduced or if the mirror ever drifts.
+      - name: No root-level SKILL.md (would break `npx skills add` discovery)
+        run: test ! -f SKILL.md
       - name: Rebuild skill package
         run: python3 scripts/build_skill_package.py
       - name: Assert committed mirror matches a fresh build
         run: git diff --exit-code -- skills/conductorscore
+
+  supply-chain-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Lock the clean-room properties that keep supply-chain scanners (Socket /
+      # Snyk) and behavioral reviewers green: zero third-party dependencies and no
+      # dynamic-code / obfuscation primitives in the scanner. If a future change
+      # genuinely needs one of these, relax this guard deliberately in the same PR.
+      - name: Zero third-party dependencies (stdlib only)
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          t = pathlib.Path("pyproject.toml").read_text()
+          m = re.search(r'(?ms)^\s*dependencies\s*=\s*\[(.*?)\]', t)
+          inner = (m.group(1) if m else "").strip()
+          if inner:
+              sys.exit(f"FAIL: dependencies must be empty (stdlib only); found: {inner}")
+          print("OK: zero runtime dependencies")
+          PY
+      - name: No dynamic-code / obfuscation primitives in scripts/
+        run: |
+          if grep -rnE '\b(eval|exec|__import__)[[:space:]]*\(|\b(os\.system|base64|pickle|marshal)\b' scripts/; then
+            echo "FAIL: dynamic-code/obfuscation primitive found in scripts/ (see above)"
+            exit 1
+          fi
+          echo "OK: no dynamic-code/obfuscation primitives"
