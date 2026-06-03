@@ -438,7 +438,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="conductorscore", add_help=False)
     parser.add_argument("--providers", choices=["all", "claude", "codex"], default=None)
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
-    parser.add_argument("--pair", default=None)  # back-compat (unused here)
     ns, _unknown = parser.parse_known_args(argv)
     return ns
 

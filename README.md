@@ -67,24 +67,33 @@ If you're here to verify the data path before installing, these are the files th
 | [`scripts/events.py`](scripts/events.py)               | JSONL event parsing — what the client reads off disk.                                |
 | [`scripts/scan.py`](scripts/scan.py)                   | Runs the scan and uploads the payload — the score upload (`POST /api/ingest`) is here. |
 | [`scripts/run.py`](scripts/run.py)                     | CLI orchestrator: spawns `scan.py`, polls a local status file, prints the summary.   |
-| [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py), [`scripts/pair.py`](scripts/pair.py) | Pairing / GitHub OAuth network calls — identity only, separate from the score upload. |
+| [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py) | GitHub OAuth device-flow login — identity only, separate from the score upload. |
 | [`WIRE_FORMAT.md`](WIRE_FORMAT.md)                     | Versioned schema, including a per-version changelog.                                 |
 
 Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is under 4k lines of Python.
 
 ## Install
 
-1. Visit [conductorscore.com/pair](https://conductorscore.com/pair) and sign in with GitHub or email.
-2. Copy the one-line snippet shown after login.
-3. Paste it into a Claude Code session:
+Install the skill with either the GitHub CLI or skills.sh:
 
 ```
-Calculate my ConductorScore: https://conductorscore.com/p/<code>
+# GitHub CLI (gh)
+gh skill install flatironconsulting/conductorscore conductorscore
+
+# or skills.sh
+npx skills add flatironconsulting/conductorscore
 ```
 
-Claude fetches the install instructions, drops this skill into `~/.claude/skills/conductorscore/`, pairs the device, scans your transcripts on-device, and uploads. First score in under 60 seconds.
+Then, in a Claude Code (or Codex) session, run `/conductorscore`. On the first
+run the skill signs you in with GitHub, scans your transcripts on-device, and
+uploads only the numbers. First score in under 60 seconds.
 
-Pairing uses GitHub's OAuth device flow, requesting the `read:user` and `user:email` scopes only. The installed client never requests `repo` scope and never transmits any other GitHub credential (such as a local `gh` CLI token). Separately, web sign-in may request broader GitHub access so the server can count commits across repositories you can read. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
+Login uses GitHub's OAuth device flow (it prints a URL and a code to authorize in
+your browser), requesting the `read:user` and `user:email` scopes only. The
+installed client never requests `repo` scope and never transmits any other GitHub
+credential (such as a local `gh` CLI token). Separately, web sign-in may request
+broader GitHub access so the server can count commits across repositories you can
+read. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
 
 ## License
 
