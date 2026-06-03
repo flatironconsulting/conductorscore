@@ -115,19 +115,97 @@ def _print_login_ask(uri: str, code: str) -> None:
     )
 
 
+def _complete_login(token: str, device_id: str) -> str:
+    """Exchange a GitHub token for our device token, persist it, and report."""
+    import scripts.reauth as reauth
+
+    try:
+        entry = reauth._entry_from(
+            reauth.exchange_github_token(API_BASE, token, device_id)
+        )
+    except reauth.ReauthRequired as e:
+        _clear_pending()
+        print(f"Login failed: {e}", file=sys.stderr)
+        return "error"
+    auth_store.save_auth(API_BASE, entry)
+    _clear_pending()
+    print(f"✓ Logged in as @{entry.get('github_username') or 'you'}")
+    return "ok"
+
+
+def _login_interactive(pending: dict, device_id: str) -> str:
+    """Real-terminal (TTY) login, in the style of `gh auth login --web` /
+    `gcloud auth login`: show the one-time code, open the browser on Enter, then
+    POLL and AUTO-CONTINUE the moment the user authorizes — no second prompt."""
+    import webbrowser
+
+    import scripts.device_flow as device_flow
+    from scripts._http import post_json
+
+    uri = pending["verification_uri"]
+    code = pending["user_code"]
+    print(f"! First copy your one-time code: {code}")
+    try:
+        input(f"Press Enter to open {uri} in your browser... ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+    try:
+        webbrowser.open(uri)
+    except Exception:
+        print(f"Couldn't open a browser — visit {uri} to authorize.")
+    print("Waiting for you to authorize…")
+    remaining = int(max(1, pending["expires_at"] - time.time()))
+    try:
+        token = device_flow.poll_for_token(
+            pending["client_id"],
+            pending["device_code"],
+            interval=pending.get("interval", 5),
+            expires_in=remaining,
+            http_post=post_json,
+        )
+    except device_flow.DeviceFlowError as e:
+        print(f"Login did not complete: {e}", file=sys.stderr)
+        return "error"
+    return _complete_login(token, device_id)
+
+
+def _login_nonblocking(pending: dict, resumable: bool, device_id: str) -> str:
+    """Agent/non-TTY login. On a re-run (resumable) poll briefly for the token
+    the user just authorized; otherwise surface the code + a `login` ASK and
+    STOP, so the agent relays it and re-runs after the user authorizes."""
+    import scripts.device_flow as device_flow
+    from scripts._http import post_json
+
+    if resumable:
+        budget = int(min(RESUME_POLL_SECONDS, pending["expires_at"] - time.time()))
+        try:
+            token = device_flow.poll_for_token(
+                pending["client_id"],
+                pending["device_code"],
+                interval=pending.get("interval", 5),
+                expires_in=max(1, budget),
+                http_post=post_json,
+            )
+        except device_flow.DeviceFlowError:
+            token = None
+        if token:
+            return _complete_login(token, device_id)
+    # Fresh, or still not authorized — surface the code and stop.
+    _print_login_ask(pending["verification_uri"], pending["user_code"])
+    return "pending"
+
+
 def _login_step() -> str:
-    """Non-blocking device-flow login. Returns:
+    """Device-flow login. Returns ``"ok"`` (authenticated, proceed),
+    ``"pending"`` (printed an ASK and stopped — agent re-runs to resume), or
+    ``"error"``.
 
-    - ``"ok"``      — authenticated (existing entry, test seam, or the user just
-                       authorized and we exchanged the token); proceed.
-    - ``"pending"`` — printed the URL+code + an ASK line and STOPPED; the agent
-                       relays it and re-runs after the user authorizes, at which
-                       point we resume from the persisted device_code.
-    - ``"error"``   — could not start/finish login.
-
-    The browser authorization happens BETWEEN runs — we never long-poll. The
-    pending device_code is persisted so the re-run resumes the same flow instead
-    of issuing a fresh code.
+    Adaptive: a real terminal (TTY) gets the `gh auth login --web` /
+    `gcloud auth login` experience — open the browser and AUTO-CONTINUE on
+    approval. The agent context (non-TTY, e.g. Claude Code) gets the
+    stop-then-resume ASK instead, since a long foreground poll there is awkward.
+    Either way the pending device_code is persisted so an interrupted login
+    resumes the same code rather than issuing a fresh one.
     """
     import scripts.device_flow as device_flow
     import scripts.reauth as reauth
@@ -143,55 +221,24 @@ def _login_step() -> str:
         pass
 
     device_id = auth_store.load_or_create_device_id()
-    pending = _load_pending()
     now = time.time()
-    resumable = (
+    pending = _load_pending()
+    resumable = bool(
         pending
         and pending.get("api_base") == API_BASE
         and now < pending.get("expires_at", 0)
     )
 
-    if resumable:
-        # The user has (presumably) authorized; poll briefly for the token.
-        budget = int(min(RESUME_POLL_SECONDS, pending["expires_at"] - now))
+    if not resumable:
+        # Start a fresh device flow and persist it (so an interrupt can resume).
         try:
-            token = device_flow.poll_for_token(
-                pending["client_id"],
-                pending["device_code"],
-                interval=pending.get("interval", 5),
-                expires_in=max(1, budget),
-                http_post=post_json,
-            )
-        except device_flow.DeviceFlowError:
-            token = None
-        if token:
-            try:
-                entry = reauth._entry_from(
-                    reauth.exchange_github_token(API_BASE, token, device_id)
-                )
-            except reauth.ReauthRequired as e:
-                _clear_pending()
-                print(f"Login failed: {e}", file=sys.stderr)
-                return "error"
-            auth_store.save_auth(API_BASE, entry)
-            _clear_pending()
-            print(f"✓ Logged in as @{entry.get('github_username') or 'you'}")
-            return "ok"
-        # Not authorized yet — re-surface the same code and stop again.
-        _print_login_ask(pending["verification_uri"], pending["user_code"])
-        return "pending"
-
-    # Fresh device flow: get a code, persist it, surface the ASK, and stop.
-    try:
-        cid = reauth._device_client_id(API_BASE)
-        flow = device_flow.start_device_flow(cid, http_post=post_json)
-    except Exception as e:  # network/server errors must not break the session
-        print(f"Could not start GitHub login: {e}", file=sys.stderr)
-        print("Try again, or run /conductorscore login.", file=sys.stderr)
-        return "error"
-
-    _save_pending(
-        {
+            cid = reauth._device_client_id(API_BASE)
+            flow = device_flow.start_device_flow(cid, http_post=post_json)
+        except Exception as e:  # network/server errors must not break the session
+            print(f"Could not start GitHub login: {e}", file=sys.stderr)
+            print("Try again, or run /conductorscore login.", file=sys.stderr)
+            return "error"
+        pending = {
             "api_base": API_BASE,
             "client_id": cid,
             "device_code": flow["device_code"],
@@ -202,12 +249,11 @@ def _login_step() -> str:
             "interval": flow.get("interval", 5),
             "expires_at": now + int(flow.get("expires_in", 900)),
         }
-    )
-    _print_login_ask(
-        flow.get("verification_uri", "https://github.com/login/device"),
-        flow.get("user_code", ""),
-    )
-    return "pending"
+        _save_pending(pending)
+
+    if sys.stdin.isatty():
+        return _login_interactive(pending, device_id)
+    return _login_nonblocking(pending, resumable, device_id)
 
 
 def _login(opts: list[str]) -> int:
