@@ -29,7 +29,7 @@ else
   for f in __init__.py _http.py approval_counter.py auth_store.py config_scanner.py cron_classifier.py daily.py device_flow.py edit_counter.py events.py scanner.py frustration_detector.py output_schema.py pair.py plan_signals.py prompt_similarity.py reauth.py revert_detector.py run.py scan.py session_window.py status_writer.py tool_counter.py turn_classifier.py; do
     curl -fsSL "$BASE/scripts/$f" -o "$SKILL_DIR/scripts/$f" || { echo "Failed to download $f" >&2; exit 1; }
   done
-  curl -fsSL "$BASE/SKILL.md" -o "$SKILL_DIR/SKILL.md" || { echo "Failed to download SKILL.md" >&2; exit 1; }
+  curl -fsSL "$BASE/skills/conductorscore/SKILL.md" -o "$SKILL_DIR/SKILL.md" || { echo "Failed to download SKILL.md" >&2; exit 1; }
   printf '%s\n' "$SERVER_VER" > "$SKILL_DIR/VERSION"
   echo "ready $SERVER_VER"
 fi

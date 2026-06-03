@@ -26,6 +26,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts._http import open_url
 
 PAIRING_CODE_RE = re.compile(r"^cs_pair_[A-Z2-7]{12}$")
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
@@ -39,7 +40,7 @@ def _post(url: str, payload: dict) -> tuple[int, dict]:
         headers={"content-type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with open_url(req, timeout=15) as r:
             return r.status, json.loads(r.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") or "{}"

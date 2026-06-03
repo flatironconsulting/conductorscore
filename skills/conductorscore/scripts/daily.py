@@ -108,16 +108,26 @@ def main() -> int:
         stamp = _data_dir() / "last_daily"
         if _recent(stamp):
             return 0
-        root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parents[1]))
+        # Resolve scan.py as a sibling of THIS file (scripts/scan.py) — a fixed,
+        # in-package path, never from an env var — so the spawned command line can't
+        # be influenced by the environment.
+        scan_py = Path(__file__).resolve().parent / "scan.py"
         stamp.write_text(str(int(time.time())))  # stamp BEFORE spawn so a crash can't busy-loop.
         # No lock: two simultaneous SessionStarts may both fire once — acceptable for a score refresh.
+        # This spawns OUR OWN local scanner (scripts/scan.py) detached so the daily
+        # refresh doesn't block the session. It is not hidden beaconing: scan.py reads
+        # transcripts on-device, uploads only per-metric numbers + invoked names (see
+        # WIRE_FORMAT.md), and ONLY after this device is paired — on an unpaired machine
+        # scan.py exits immediately (see scan.py `_load_auth`). Output goes to DEVNULL
+        # because there is no session UI to render it; the foreground run.py path logs
+        # to a file instead.
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                       env={**os.environ, "CONDUCTORSCORE_HEADLESS": "1"})
         if os.name == "posix":
             kwargs["start_new_session"] = True
         else:
             kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
-        subprocess.Popen([sys.executable, str(root / "scripts" / "scan.py")], **kwargs)
+        subprocess.Popen([sys.executable, str(scan_py)], **kwargs)
     except OSError:
         pass
     return 0
