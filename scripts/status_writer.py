@@ -14,7 +14,12 @@ from pathlib import Path
 class StatusWriter:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Read-only / non-writable parent: don't crash construction.
+            # write() will surface a terminal error if the path stays unwritable.
+            pass
 
     def write(self, **fields) -> None:
         tmp = tempfile.NamedTemporaryFile(
