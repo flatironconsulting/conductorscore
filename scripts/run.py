@@ -107,6 +107,9 @@ def _version_banner() -> None:
 
 
 def _cache_dir() -> Path:
+    explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
+    if explicit:
+        return Path(explicit)
     xdg = os.environ.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
 
