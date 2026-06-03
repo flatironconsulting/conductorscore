@@ -270,27 +270,90 @@ def _login(opts: list[str]) -> int:
     return 0 if status in ("ok", "pending") else 1
 
 
-def _handle_daily(args: argparse.Namespace) -> None:
-    """After a successful scan, resolve the daily-scoring decision.
-
-    No ``--daily`` → emit the ASK line and let the agent re-run with the flag.
-    ``--daily yes`` → enable daily scoring for the launch provider and print the
-    result. ``--daily no`` → do nothing.
-    """
-    if args.daily is None:
-        print(
-            'CONDUCTORSCORE_ASK daily "Want ConductorScore to refresh your '
-            'score automatically once per day?" [Yes] [No]'
-        )
-        return
-    if args.daily == "yes":
+def _apply_daily_decision(decision: str) -> int:
+    """Scan-less daily follow-up: enable (or skip) the once-per-day hook and
+    report. Invoked on a re-run with ``--daily=yes|no`` AFTER the user has
+    already seen their score — we must NOT scan again here."""
+    if decision == "yes":
         import scripts.agents.consent as consent_mod
         import scripts.daily as daily
 
         launch = consent_mod.detect_launch_provider(os.environ)
         result = daily.enable_daily(launch)
-        if result.instruction:
-            print(result.instruction)
+        print(result.instruction or "Daily ConductorScore refresh enabled.")
+    else:
+        print("No daily refresh — run /conductorscore anytime to update your score.")
+    return 0
+
+
+def _emit_daily_ask() -> None:
+    print(
+        'CONDUCTORSCORE_ASK daily "Want ConductorScore to refresh your score '
+        'automatically once per day?" [Yes] [No]'
+    )
+
+
+def _finish_daily() -> None:
+    """Resolve the daily-refresh question after the score is shown. A real
+    terminal asks inline (defaulting to No) and applies it in-process; the agent
+    (non-TTY) gets the ASK relay and re-runs with --daily=yes|no (no re-scan)."""
+    if sys.stdin.isatty():
+        try:
+            ans = input(
+                "Refresh your score automatically once per day? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            ans = "n"
+        _apply_daily_decision("yes" if ans in ("y", "yes") else "no")
+    else:
+        _emit_daily_ask()
+
+
+def _prompt_providers_tty(detected: list) -> str | None:
+    """Real-terminal provider picker. Returns 'all'|'claude'|'codex', or None to
+    cancel. The non-TTY (agent) path uses the CONDUCTORSCORE_ASK relay instead."""
+    print("We detected multiple coding agents. Which would you like to score?")
+    print("  [1] All  (recommended)")
+    print("  [2] Claude Code")
+    print("  [3] Codex")
+    print("  [4] Cancel")
+    try:
+        choice = input("Choose 1-4 [1]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return {"": "all", "1": "all", "2": "claude", "3": "codex", "4": None}.get(
+        choice, "all"
+    )
+
+
+def _emit_providers_ask() -> None:
+    print(
+        'CONDUCTORSCORE_ASK providers "We detected multiple coding agents on '
+        "your system. Which would you like to scan for your ConductorScore?\" "
+        "[All (Recommended)] [Claude Code] [Codex] [Cancel]"
+    )
+
+
+def _print_summary(final: dict) -> None:
+    """The single, script-owned result block. SKILL.md tells the agent to relay
+    this verbatim, so there is no duplicate agent-authored summary."""
+    score_data = final.get("score")
+    score = score_data.get("total") if isinstance(score_data, dict) else score_data
+    url = final.get("profile_url")
+    total = final.get("total")
+    print(f"✓ Your ConductorScore: {score}")
+    if url:
+        print(f"  See your full breakdown: {url}")
+    if total:
+        print(f"  Based on {total} sessions from your local transcripts.")
+    ver = final.get("verification") or {}
+    if ver.get("github") is True:
+        print("  Verified via GitHub.")
+    print(
+        "  Only your score (the numbers) was uploaded — never any transcript text."
+    )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -310,6 +373,11 @@ def main() -> int:
         return _login(argv[1:])
 
     args = _parse_args(argv)
+
+    # The daily decision is a scan-less follow-up: the user has already seen
+    # their score, so applying it must NOT trigger another scan.
+    if args.daily is not None:
+        return _apply_daily_decision(args.daily)
 
     # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
     # already honors. Set it before consent/scan logic reads the environment.
@@ -341,13 +409,17 @@ def main() -> int:
         if consent_mod.read_cached_consent(os.environ) is None:
             detected = consent_mod.detect_agents()
             if len(detected) > 1:
-                print(
-                    'CONDUCTORSCORE_ASK providers "We detected multiple coding '
-                    "agents on your system. Which would you like to scan for "
-                    'your ConductorScore?" '
-                    "[All (Recommended)] [Claude Code] [Codex] [Cancel]"
-                )
-                return 0
+                # Keep control in the script where possible: a real terminal
+                # gets an inline picker and continues in-process; the agent
+                # (non-TTY) gets the ASK relay and re-runs with --providers.
+                if sys.stdin.isatty():
+                    choice = _prompt_providers_tty(detected)
+                    if choice is None:
+                        return 0
+                    os.environ["CONDUCTORSCORE_PROVIDERS"] = choice
+                else:
+                    _emit_providers_ask()
+                    return 0
 
     cache = _cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
@@ -390,15 +462,11 @@ def main() -> int:
     final = _read_status(status_path) or {}
 
     if final.get("phase") == "done":
-        score_data = final.get("score")
-        # scan.py writes the full ScoreBreakdown dict; pull out the headline number.
-        score_total = score_data.get("total") if isinstance(score_data, dict) else score_data
-        url = final.get("profile_url")
-        print(f"✓ Score: {score_total}  →  {url}")
-        ver = final.get("verification") or {}
-        if ver.get("github") is True:
-            print("  Verified via GitHub.")
-        _handle_daily(args)
+        _print_summary(final)
+        # Ask about daily refresh LAST, after the score. In the agent this is an
+        # ASK the user answers and we re-run with --daily=yes|no, enabling the
+        # hook WITHOUT re-scanning (see _apply_daily_decision).
+        _finish_daily()
         return 0
 
     if final.get("phase") == "error":
