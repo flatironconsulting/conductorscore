@@ -336,14 +336,16 @@ def _emit_providers_ask() -> None:
     )
 
 
-def _print_summary(final: dict) -> None:
-    """The single, script-owned result block. SKILL.md tells the agent to relay
-    this verbatim, so there is no duplicate agent-authored summary."""
+def _score_of(final: dict):
     score_data = final.get("score")
-    score = score_data.get("total") if isinstance(score_data, dict) else score_data
+    return score_data.get("total") if isinstance(score_data, dict) else score_data
+
+
+def _print_summary(final: dict) -> None:
+    """Human-readable result block for a real terminal (no agent to format it)."""
     url = final.get("profile_url")
     total = final.get("total")
-    print(f"✓ Your ConductorScore: {score}")
+    print(f"✓ Your ConductorScore: {_score_of(final)}")
     if url:
         print(f"  See your full breakdown: {url}")
     if total:
@@ -353,6 +355,23 @@ def _print_summary(final: dict) -> None:
         print("  Verified via GitHub.")
     print(
         "  Only your score (the numbers) was uploaded — never any transcript text."
+    )
+
+
+def _emit_result(final: dict) -> None:
+    """Agent path: emit the scan result as ONE structured line and nothing else.
+    The agent turns it into the final report (see SKILL.md), so the script never
+    prints a competing human summary — no duplicate score line."""
+    print(
+        "CONDUCTORSCORE_RESULT "
+        + json.dumps(
+            {
+                "score": _score_of(final),
+                "url": final.get("profile_url"),
+                "sessions": final.get("total"),
+                "verified_github": bool((final.get("verification") or {}).get("github")),
+            }
+        )
     )
 
 
@@ -462,10 +481,13 @@ def main() -> int:
     final = _read_status(status_path) or {}
 
     if final.get("phase") == "done":
-        _print_summary(final)
-        # Ask about daily refresh LAST, after the score. In the agent this is an
-        # ASK the user answers and we re-run with --daily=yes|no, enabling the
-        # hook WITHOUT re-scanning (see _apply_daily_decision).
+        # Terminal users get a human summary; the agent gets a structured result
+        # line and renders the final report itself (SKILL.md). Either way the
+        # daily question comes LAST and never re-scans (see _apply_daily_decision).
+        if sys.stdin.isatty():
+            _print_summary(final)
+        else:
+            _emit_result(final)
         _finish_daily()
         return 0
 
