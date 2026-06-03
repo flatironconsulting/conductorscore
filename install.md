@@ -55,11 +55,59 @@ tell the user to visit https://conductorscore.com/install to get a fresh URL.
 
 ## Step 3 — run the first score
 
-Invoke the skill:
+Invoke the skill. Tell the skill which provider you launched it from by setting
+`CONDUCTORSCORE_LAUNCH_PROVIDER` — this is the provider whose CLI is running this
+session, NOT a request to scan it silently. From Claude Code:
 
 ```bash
-python3 ~/.claude/skills/conductorscore/scripts/run.py
+CONDUCTORSCORE_LAUNCH_PROVIDER=claude python3 ~/.claude/skills/conductorscore/scripts/run.py
 ```
+
+If you are running ConductorScore from **Codex** instead, install the skill
+under `~/.codex/skills/conductorscore` (or add `~/.codex/prompts/conductorscore.md`)
+and launch with:
+
+```bash
+CONDUCTORSCORE_LAUNCH_PROVIDER=codex python3 ~/.codex/skills/conductorscore/scripts/run.py
+```
+
+### Multiple coding agents (ask BEFORE scanning)
+
+`run.py` checks, with metadata only, which coding agents have recent activity.
+If only ONE is present it scans it straight through. If MORE THAN ONE is present
+(e.g. both Claude Code and Codex) and the user hasn't already chosen, it does
+NOT scan — instead it prints, BEFORE any scoring:
+
+```
+CONDUCTORSCORE_MULTIPLE_AGENTS detected=claude,codex
+We detected multiple coding agents on your system. Which would you like to scan for your ConductorScore?
+  - All (Recommended)  -> CONDUCTORSCORE_PROVIDERS=all
+  - Claude Code  -> CONDUCTORSCORE_PROVIDERS=claude
+  - Codex  -> CONDUCTORSCORE_PROVIDERS=codex
+  - Cancel  -> do not scan
+```
+
+**You (the agent) MUST act on this line.** When you see `CONDUCTORSCORE_MULTIPLE_AGENTS`:
+
+1. Present the choice to the user as a multiple-choice question. Use these
+   option labels VERBATIM, in this order — do NOT shorten or paraphrase them:
+   - `All (Recommended)`  (the first option's label must literally read
+     "All (Recommended)", not just "All")
+   - `Claude Code`
+   - `Codex`
+   - `Cancel`
+2. Rerun this same command with the matching override and report the score + URL:
+
+   ```bash
+   CONDUCTORSCORE_PROVIDERS=all   python3 ~/.claude/skills/conductorscore/scripts/run.py   # All
+   CONDUCTORSCORE_PROVIDERS=claude python3 ~/.claude/skills/conductorscore/scripts/run.py   # Claude Code only
+   CONDUCTORSCORE_PROVIDERS=codex  python3 ~/.claude/skills/conductorscore/scripts/run.py   # Codex only
+   ```
+3. On **Cancel**, stop and do not scan.
+
+Never scan an agent the user didn't choose. `CONDUCTORSCORE_PROVIDERS` accepts
+`claude`, `codex`, `all`, or `claude,codex`. The same menu appears no matter
+which agent you launched from (the detection is symmetric).
 
 ## Constraints
 

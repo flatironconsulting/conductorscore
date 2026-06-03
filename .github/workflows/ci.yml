@@ -9,3 +9,17 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install -e ".[dev]"
       - run: pytest -v --cov=scripts
+
+  skill-package-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # Rebuild skills/conductorscore from the canonical sources (SKILL.md +
+      # scripts/ + VERSION). The committed mirror is a build artifact consumed by
+      # `gh skill install`; this hard gate fails CI if it ever drifts.
+      - name: Rebuild skill package
+        run: python3 scripts/build_skill_package.py
+      - name: Assert committed mirror matches a fresh build
+        run: git diff --exit-code -- skills/conductorscore

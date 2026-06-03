@@ -14,6 +14,39 @@ def _write_jsonl(path: Path, lines: list[dict]):
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
 
+def _iter_json_strings(node):
+    """Yield every string value reachable in a parsed-JSON tree.
+
+    This is the recursive "no secret in payload" helper the privacy contract
+    relies on: it descends dicts (keys AND values) and lists so a planted
+    secret can't hide inside a nested field, a dict KEY (e.g. an approval
+    signature), or a list element.
+    """
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_json_strings(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_json_strings(item)
+
+
+def _assert_secret_absent(payload_dict: dict, secret: str, *, where: str) -> None:
+    """Fail if ``secret`` appears as a substring of ANY string in the payload.
+
+    Stronger than a top-level ``secret in json_str`` check: it confirms the
+    secret isn't hiding inside a key, nested object, or list element.
+    """
+    for s in _iter_json_strings(payload_dict):
+        assert secret not in s, (
+            f"{where}: planted secret {secret!r} leaked into wire payload "
+            f"(found inside {s!r})"
+        )
+
+
 @pytest.fixture
 def isolated_claude_home(tmp_path, monkeypatch):
     home = tmp_path / ".claude"
@@ -437,3 +470,398 @@ def test_v0_5_privacy_invariant_holds_for_all_new_detectors(
         sig.startswith("Edit::")
         for sig in s.redundant_approvals_per_signature
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex provider — privacy + corruption + unknown-event invariants (Slice 11)
+#
+# These live in the PUBLIC client repo so skeptics can audit the privacy
+# contract directly against the scanner source: a Codex scan plants distinct
+# synthetic secrets in every raw-text surface (prompt, shell args, cwd,
+# apply_patch path, tool outputs, AGENTS.md) and proves NONE reach the
+# numbers-only wire payload. Corruption + unknown-event tests prove a Codex
+# scan degrades gracefully and never uploads a local-only diagnostic marker.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+from scripts.agents.consent import ConsentDecision
+
+
+def _now_ms() -> int:
+    return int(_dt.datetime.now(_dt.timezone.utc).timestamp() * 1000)
+
+
+def _ts(offset_s: int) -> str:
+    base = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=5)
+    return (base + _dt.timedelta(seconds=offset_s)).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+@pytest.fixture
+def codex_home(tmp_path, monkeypatch):
+    """An isolated ``.codex`` home pointed at by CONDUCTORSCORE_CODEX_HOME."""
+    home = tmp_path / ".codex"
+    (home / "sessions" / "2026" / "06" / "01").mkdir(parents=True)
+    monkeypatch.setenv("CONDUCTORSCORE_CODEX_HOME", str(home))
+    return home
+
+
+def _write_codex_rollout(codex_home: Path, name: str, rows: list[dict]) -> Path:
+    p = codex_home / "sessions" / "2026" / "06" / "01" / name
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return p
+
+
+def _codex_consent() -> ConsentDecision:
+    return ConsentDecision(
+        launch_provider="codex", providers=["codex"], source="override"
+    )
+
+
+def _both_consent() -> ConsentDecision:
+    return ConsentDecision(
+        launch_provider="claude",
+        providers=["claude", "codex"],
+        source="override",
+    )
+
+
+def test_codex_planted_secrets_never_reach_wire_payload(
+    codex_home, isolated_claude_home
+):
+    """Plant distinct secrets in EVERY Codex raw-text surface and assert none
+    reaches the serialized numbers-only payload (recursively scanned)."""
+    # Distinct synthetic secrets per surface.
+    sec_prompt = "CXSECRET_PROMPT_AAA"
+    sec_shell = "CXSECRET_SHELLARG_BBB"
+    sec_cwd = "CXSECRET_CWD_CCC"
+    sec_patch_path = "CXSECRET_PATCHPATH_DDD"
+    sec_tool_out = "CXSECRET_TOOLOUTPUT_EEE"
+    sec_agents_md = "CXSECRET_AGENTSMD_FFF"
+    sec_session_id = "cxsecret-session-GGG-id"
+
+    rows = [
+        {
+            "timestamp": _ts(0),
+            "type": "session_meta",
+            "payload": {
+                "id": sec_session_id,
+                "cwd": f"/home/u/{sec_cwd}/proj",
+                "model_provider": "openai",
+            },
+        },
+        {
+            "timestamp": _ts(1),
+            "type": "turn_context",
+            "payload": {"cwd": f"/home/u/{sec_cwd}/proj", "model": "gpt-5-codex"},
+        },
+        {
+            "timestamp": _ts(2),
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"{sec_prompt} please patch"}
+                ],
+            },
+        },
+        # shell call — secret in argv.
+        {
+            "timestamp": _ts(10),
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": "c1",
+                "arguments": json.dumps(
+                    {"command": ["bash", "-lc", f"grep {sec_shell} ."]}
+                ),
+            },
+        },
+        # tool output — secret in the result body.
+        {
+            "timestamp": _ts(11),
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": f"matched {sec_tool_out} in file",
+            },
+        },
+        # apply_patch — secret in the touched file path.
+        {
+            "timestamp": _ts(20),
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "c2",
+                "input": (
+                    "*** Begin Patch\n"
+                    f"*** Update File: src/{sec_patch_path}/widget.py\n"
+                    "+added = 1\n"
+                    "*** End Patch"
+                ),
+            },
+        },
+        {
+            "timestamp": _ts(21),
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "c2",
+                "output": "Success",
+            },
+        },
+        {
+            "timestamp": _ts(30),
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done."}],
+            },
+        },
+        {
+            "timestamp": _ts(31),
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "payload": {
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 800,
+                            "output_tokens": 200,
+                            "total_tokens": 1200,
+                        }
+                    }
+                },
+            },
+        },
+    ]
+    _write_codex_rollout(codex_home, "rollout-codex-secrets.jsonl", rows)
+    # AGENTS.md instruction file with a planted secret line.
+    (codex_home / "AGENTS.md").write_text(
+        f"line one\n{sec_agents_md} secret instruction\nline three\n"
+    )
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+    payload = json.loads(out.to_json())
+
+    # Sanity: the Codex session was actually scanned (so the absence below is
+    # meaningful, not a vacuous pass on an empty payload).
+    assert len(out.sessions) == 1
+    assert out.sessions[0].provider == "codex"
+
+    for secret, where in (
+        (sec_prompt, "user prompt text"),
+        (sec_shell, "shell argv"),
+        (sec_cwd, "cwd / project path"),
+        (sec_patch_path, "apply_patch file path"),
+        (sec_tool_out, "tool_result output"),
+        (sec_agents_md, "AGENTS.md instruction line"),
+        (sec_session_id, "raw session id"),
+    ):
+        _assert_secret_absent(payload, secret, where=where)
+
+    # The session hash IS present (proves hashing, not omission).
+    expected = hashlib.sha256(f"codex:{sec_session_id}".encode()).hexdigest()[:16]
+    assert expected in out.to_json()
+
+
+def test_claude_planted_secrets_still_safe_with_codex_consent(
+    codex_home, isolated_claude_home
+):
+    """After the provider work, a Claude secret must STILL never leak — even
+    when the run also scans Codex (both-provider consent)."""
+    sec_claude = "CLAUDE_AFTER_CODEX_SECRET_HHH"
+    sec_session = "claude-after-codex-session-III"
+
+    proj_dir = isolated_claude_home / "projects" / "-home-u-proj"
+    _write_jsonl(
+        proj_dir / f"{sec_session}.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _ts(0),
+                "message": {"role": "user", "content": f"remember {sec_claude}"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _ts(5),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "ls"}}
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 5},
+                },
+            },
+        ],
+    )
+    # Minimal valid Codex rollout alongside it.
+    _write_codex_rollout(
+        codex_home,
+        "rollout-codex-minimal.jsonl",
+        [
+            {"timestamp": _ts(0), "type": "session_meta",
+             "payload": {"id": "cx-min", "cwd": "/p", "model_provider": "openai"}},
+            {"timestamp": _ts(1), "type": "turn_context",
+             "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+            {"timestamp": _ts(2), "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "hi"}]}},
+            {"timestamp": _ts(3), "type": "response_item",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "ok"}]}},
+        ],
+    )
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_both_consent(),
+    )
+    payload = json.loads(out.to_json())
+
+    providers = {s.provider for s in out.sessions}
+    assert providers == {"claude", "codex"}, providers
+    _assert_secret_absent(payload, sec_claude, where="claude prompt text")
+    _assert_secret_absent(payload, sec_session, where="claude session id")
+
+
+def test_corrupt_codex_does_not_break_valid_claude(
+    codex_home, isolated_claude_home
+):
+    """A truncated/garbage Codex rollout must not break a valid Claude scan;
+    the Claude session still produces a valid payload."""
+    proj_dir = isolated_claude_home / "projects" / "-home-u-proj"
+    _write_jsonl(
+        proj_dir / "good-claude.jsonl",
+        [
+            {"type": "user", "timestamp": _ts(0),
+             "message": {"role": "user", "content": "do the thing"}},
+            {"type": "assistant", "timestamp": _ts(5),
+             "message": {"role": "assistant",
+                         "content": [{"type": "tool_use", "name": "Bash",
+                                      "input": {"command": "ls"}}],
+                         "usage": {"input_tokens": 5, "output_tokens": 5}}},
+        ],
+    )
+    # Corrupt Codex rollout: a half-written JSON line + a non-dict line.
+    bad = codex_home / "sessions" / "2026" / "06" / "01" / "rollout-bad.jsonl"
+    bad.write_text(
+        '{"timestamp": "%s", "type": "session_meta", "payload": {"id": "x"\n'
+        '"not even json\n'
+        '[1, 2, 3]\n' % _ts(0)
+    )
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_both_consent(),
+    )
+    # The healthy Claude session survives; the corrupt Codex rollout is
+    # skipped (it has no parseable timestamped rows → no session emitted).
+    providers = {s.provider for s in out.sessions}
+    assert "claude" in providers
+    # And the payload serializes cleanly.
+    json.loads(out.to_json())
+
+
+def test_corrupt_claude_does_not_break_valid_codex(
+    codex_home, isolated_claude_home
+):
+    """A corrupt Claude JSONL must not break a valid Codex scan."""
+    # Corrupt Claude transcript.
+    proj_dir = isolated_claude_home / "projects" / "-home-u-proj"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    (proj_dir / "bad-claude.jsonl").write_text(
+        '{"type": "user", "timestamp": "2026-06-01T00:00:00Z", "messa'
+    )
+    # Valid Codex rollout.
+    _write_codex_rollout(
+        codex_home,
+        "rollout-codex-ok.jsonl",
+        [
+            {"timestamp": _ts(0), "type": "session_meta",
+             "payload": {"id": "cx-ok", "cwd": "/p", "model_provider": "openai"}},
+            {"timestamp": _ts(1), "type": "turn_context",
+             "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+            {"timestamp": _ts(2), "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "hi"}]}},
+            {"timestamp": _ts(60), "type": "response_item",
+             "payload": {"type": "function_call", "name": "shell",
+                         "call_id": "c1",
+                         "arguments": '{"command":["bash","-lc","ls"]}'}},
+            {"timestamp": _ts(61), "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": "c1"}},
+            {"timestamp": _ts(120), "type": "response_item",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "ok"}]}},
+        ],
+    )
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_both_consent(),
+    )
+    providers = {s.provider for s in out.sessions}
+    assert "codex" in providers, providers
+    codex_sessions = [s for s in out.sessions if s.provider == "codex"]
+    assert len(codex_sessions) == 1
+    # The healthy Codex session carries real signal (a built-in tool call).
+    assert codex_sessions[0].builtin_tool_invocations >= 1
+    json.loads(out.to_json())
+
+
+def test_unknown_codex_event_type_not_uploaded(codex_home):
+    """An unknown Codex event type must be ignored (local-only) and its marker
+    must NEVER appear in the uploaded numbers-only payload."""
+    unknown_marker = "CXUNKNOWN_EVENT_MARKER_JJJ"
+    rows = [
+        {"timestamp": _ts(0), "type": "session_meta",
+         "payload": {"id": "cx-unknown", "cwd": "/p", "model_provider": "openai"}},
+        {"timestamp": _ts(1), "type": "turn_context",
+         "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+        {"timestamp": _ts(2), "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "hi"}]}},
+        # An UNKNOWN top-level row type carrying a distinctive marker.
+        {"timestamp": _ts(5), "type": "totally_unknown_future_type",
+         "payload": {"kind": unknown_marker, "data": unknown_marker}},
+        # An unknown response_item ptype carrying the marker too.
+        {"timestamp": _ts(6), "type": "response_item",
+         "payload": {"type": "some_future_item", "blob": unknown_marker}},
+        {"timestamp": _ts(10), "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "ok"}]}},
+    ]
+    _write_codex_rollout(codex_home, "rollout-unknown.jsonl", rows)
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+    payload = json.loads(out.to_json())
+    # The session is still scanned (unknown rows are tolerated, not fatal).
+    assert any(s.provider == "codex" for s in out.sessions)
+    # The unknown-type marker NEVER crosses the wire.
+    _assert_secret_absent(payload, unknown_marker, where="unknown codex event")
