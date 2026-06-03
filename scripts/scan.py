@@ -27,6 +27,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts._http import require_web_url
 from scripts.agents import consent as consent_mod
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
@@ -59,8 +60,9 @@ def _upload(features_json: str, device_token: str):
     """POST the payload to /api/ingest. Returns one of:
       ("ok", resp_dict) | ("http", (code, body)) | ("neterr", reason)
     """
+    url = require_web_url(f"{API_BASE}/api/ingest")
     req = urllib.request.Request(
-        f"{API_BASE}/api/ingest",
+        url,
         method="POST",
         data=features_json.encode("utf-8"),
         headers={

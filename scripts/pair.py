@@ -26,12 +26,14 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts._http import require_web_url
 
 PAIRING_CODE_RE = re.compile(r"^cs_pair_[A-Z2-7]{12}$")
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
 
 def _post(url: str, payload: dict) -> tuple[int, dict]:
+    require_web_url(url)
     req = urllib.request.Request(
         url,
         method="POST",
