@@ -42,6 +42,13 @@ _CANONICAL_ORDER: list[AgentId] = ["claude", "codex"]
 
 
 def _cache_dir(env: Mapping[str, str]) -> Path:
+    # CONDUCTORSCORE_CACHE_DIR is the already-resolved writable dir run.py chose
+    # (and exports into the scan subprocess env). Honor it first — verbatim, no
+    # /conductorscore subdir — so consent persists in the SAME place run.py reads
+    # and the orchestrator + subprocess never split-brain.
+    explicit = env.get("CONDUCTORSCORE_CACHE_DIR")
+    if explicit:
+        return Path(explicit)
     xdg = env.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
 

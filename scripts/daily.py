@@ -86,8 +86,14 @@ def enable_daily(provider: str) -> DailyResult:
     )
 
 def _data_dir() -> Path:
-    d = os.environ.get("CLAUDE_PLUGIN_DATA")
-    if d:
+    # CONDUCTORSCORE_CACHE_DIR is the already-resolved writable dir run.py chose
+    # (and exports into the scan subprocess env). Honor it first — verbatim — so
+    # the daily stamp persists in the SAME place run.py reads and the
+    # orchestrator + subprocess never split-brain.
+    shared = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
+    if shared:
+        base = Path(shared)
+    elif d := os.environ.get("CLAUDE_PLUGIN_DATA"):
         base = Path(d)
     else:
         cache = os.environ.get("XDG_CACHE_HOME")
