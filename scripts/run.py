@@ -484,8 +484,12 @@ def main() -> int:
     if args.daily is not None:
         return _apply_daily_decision(args.daily)
 
-    # Banner: print the version up front (and an update notice only if behind).
-    _version_banner()
+    # Banner: print the version up front (and an update notice only if behind),
+    # but ONLY on the initial invocation. `--providers`/`--daily` re-runs are
+    # continuations the user already saw the banner for, and a headless
+    # (agent-driven) run has no human reading a banner.
+    if not (args.providers or args.daily or os.environ.get("CONDUCTORSCORE_HEADLESS")):
+        _version_banner()
 
     # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
     # already honors. Set it before consent/scan logic reads the environment.
