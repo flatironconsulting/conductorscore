@@ -1,20 +1,27 @@
+import datetime as _dt
 import shutil
 from pathlib import Path
 import pytest
 from scripts.scanner import extract
 from tests.integration.test_extractor_integration import (
-    codex_home, _codex_consent, _now_ms,  # noqa: F401  (codex_home is a fixture)
+    codex_home, _codex_consent,  # noqa: F401  (codex_home is a fixture)
 )
 
 FIX = Path(__file__).parent / "fixtures" / "codex_golden"
+
+# Fixtures use fixed 2026-06-01 timestamps; pin now_ms just after them so the
+# scanner's 30-day window always includes them (otherwise the suite would
+# start failing ~30 days after the fixture date).
+_GOLDEN_NOW_MS = int(_dt.datetime(2026, 6, 2, tzinfo=_dt.timezone.utc).timestamp() * 1000)
 
 
 def _scan(codex_home, fixture: str):
     dst = codex_home / "sessions" / "2026" / "06" / "01" / f"rollout-{fixture}.jsonl"
     shutil.copyfile(FIX / f"{fixture}.jsonl", dst)
     out = extract(device_id="dev-1", client_version="0.1.0",
-                  now_ms=_now_ms(), consent_decision=_codex_consent())
+                  now_ms=_GOLDEN_NOW_MS, consent_decision=_codex_consent())
     dst.unlink()
+    assert out.sessions, f"fixture {fixture!r} fell outside the scan window"
     return out.sessions[0]
 
 
