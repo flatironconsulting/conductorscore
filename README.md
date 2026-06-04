@@ -84,9 +84,10 @@ gh skill install flatironconsulting/conductorscore conductorscore
 npx skills add flatironconsulting/conductorscore
 ```
 
-Then, in a Claude Code (or Codex) session, run `/conductorscore`. On the first
-run the skill signs you in with GitHub, scans your transcripts on-device, and
-uploads only the numbers. First score in under 60 seconds.
+Then run the skill: `/conductorscore` in a Claude Code session, or
+`$conductorscore` in Codex. On the first run the skill signs you in with GitHub,
+scans your transcripts on-device, and uploads only the numbers. First score in
+under 60 seconds.
 
 Login uses GitHub's OAuth device flow (it prints a URL and a code to authorize in
 your browser), requesting the `read:user` and `user:email` scopes only. The
