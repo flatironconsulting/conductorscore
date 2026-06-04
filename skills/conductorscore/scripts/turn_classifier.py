@@ -54,6 +54,8 @@ K_BRIDGE_IDLE_SECONDS = 1800  # 30 min
 # subagent itself emits sidechain events that we track separately.
 DISPATCH_TOOLS: frozenset[str] = frozenset({"Task", "Agent"})
 
+MULTI_AGENT_SPAWN_TOOL = "multi_agent_v1__spawn_agent"
+
 # The AskUserQuestion tool is special: dispatching it ends the agent
 # turn, and its tool_result is a soft-USER event.
 ASK_USER_QUESTION_TOOL = "AskUserQuestion"
@@ -215,15 +217,15 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
             i += 1
         # Collect event timestamps inside [start, end], plus implicit
         # boundaries at start and end so we can sum gap-by-gap.
-        boundary_ts: list[int] = [t.start_ts_ms]
+        boundaries: list[tuple[int, Event | None]] = [(t.start_ts_ms, None)]
         j = i
         while j < n and main_events[j].timestamp_ms <= t.end_ts_ms:
             ts = main_events[j].timestamp_ms
-            if ts != boundary_ts[-1]:
-                boundary_ts.append(ts)
+            if ts != boundaries[-1][0]:
+                boundaries.append((ts, main_events[j]))
             j += 1
-        if boundary_ts[-1] != t.end_ts_ms:
-            boundary_ts.append(t.end_ts_ms)
+        if boundaries[-1][0] != t.end_ts_ms:
+            boundaries.append((t.end_ts_ms, None))
         # Sum gaps; each gap is clipped at K_TURN_SECONDS (5 min). A
         # legitimate long-running tool call (a Bash that takes 8 min)
         # contributes its first 5 min as active; the rest is treated as
@@ -231,11 +233,30 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
         # left open for 18 hours contributes at most 5 min per gap, not
         # 18 hours.
         active = 0.0
-        for k in range(len(boundary_ts) - 1):
-            gap_s = (boundary_ts[k + 1] - boundary_ts[k]) / 1000.0
+        for k in range(len(boundaries) - 1):
+            gap_s = (boundaries[k + 1][0] - boundaries[k][0]) / 1000.0
             if gap_s > 0:
-                active += min(gap_s, K_TURN_SECONDS)
+                if _is_tool_runtime_gap(boundaries[k][1], boundaries[k + 1][1]):
+                    active += gap_s
+                else:
+                    active += min(gap_s, K_TURN_SECONDS)
         t.active_seconds = active
+
+
+def _is_tool_runtime_gap(prev: Event | None, nxt: Event | None) -> bool:
+    """True when a gap is a single tool call running until its result.
+
+    Codex can have long-running ``exec_command`` / MCP waits with no
+    intermediate transcript rows. Treating those gaps as idle caps real agent
+    work at five minutes and undercounts longest-run / AFK time.
+    """
+    if prev is None or nxt is None:
+        return False
+    if prev.kind != EventKind.ASSISTANT_TOOL or nxt.kind != EventKind.TOOL_RESULT:
+        return False
+    if not prev.tool_use_id or not nxt.tool_use_id:
+        return False
+    return prev.tool_use_id == nxt.tool_use_id
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +284,50 @@ def subagent_intervals(events: list[Event]) -> dict[str, tuple[int, int]]:
                 min(prev[0], ev.timestamp_ms),
                 max(prev[1], ev.timestamp_ms),
             )
+    return spans
+
+
+def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
+    """Infer Codex multi-agent spans from spawn/wait/close tool metadata.
+
+    The Codex multi-agent MCP connector does not create Claude-style sidechain
+    JSONL files. The adapter surfaces only opaque agent IDs and routing target
+    IDs in ``raw_input``; this function converts those local-only IDs into
+    timestamp spans. IDs never serialize into the wire payload.
+    """
+    starts: dict[str, int] = {}
+    last_seen: dict[str, int] = {}
+    ordered = sorted(events, key=lambda e: e.timestamp_ms)
+    for ev in ordered:
+        raw = getattr(ev, "raw_input", None) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        if ev.kind == EventKind.ASSISTANT_TOOL and ev.tool_name == MULTI_AGENT_SPAWN_TOOL:
+            sid = ev.subagent_id
+            if isinstance(sid, str) and sid:
+                starts.setdefault(sid, ev.timestamp_ms)
+                last_seen[sid] = max(last_seen.get(sid, ev.timestamp_ms), ev.timestamp_ms)
+            continue
+
+        action = raw.get("multi_agent_action") or raw.get("multi_agent_result")
+        if action not in {"wait_agent", "close_agent", "send_input"}:
+            continue
+        targets = raw.get("targets")
+        if not isinstance(targets, list):
+            continue
+        target_ids = [t for t in targets if isinstance(t, str) and t]
+        if any(t == "all" for t in target_ids):
+            target_ids = list(starts)
+        for sid in target_ids:
+            if sid in starts:
+                last_seen[sid] = max(last_seen.get(sid, starts[sid]), ev.timestamp_ms)
+
+    session_end = max((e.timestamp_ms for e in ordered), default=0)
+    spans: dict[str, tuple[int, int]] = {}
+    for sid, start in starts.items():
+        end = last_seen.get(sid, session_end)
+        if end > start:
+            spans[sid] = (start, end)
     return spans
 
 
@@ -347,6 +412,12 @@ def afk_parallel_subagent_seconds(
     if not afk_turns:
         return 0.0
     spans = dict(subagent_intervals(events))
+    for sid, (start, end) in multi_agent_spans(events).items():
+        prev = spans.get(sid)
+        if prev is None:
+            spans[sid] = (start, end)
+        else:
+            spans[sid] = (min(prev[0], start), max(prev[1], end))
     if extra_spans:
         for sid, (start, end) in extra_spans.items():
             prev = spans.get(sid)

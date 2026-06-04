@@ -678,6 +678,99 @@ def test_codex_planted_secrets_never_reach_wire_payload(
     assert expected in out.to_json()
 
 
+def test_codex_skill_multi_agent_and_runtime_gap_metrics(codex_home):
+    """Codex emits skills and multi-agent work through transcript shapes that
+    differ from Claude Code. Count those surfaces without leaking arguments or
+    tool outputs."""
+    rows = [
+        {"timestamp": _ts(0), "type": "session_meta",
+         "payload": {"id": "cx-metrics", "cwd": "/p", "model_provider": "openai"}},
+        {"timestamp": _ts(1), "type": "turn_context",
+         "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+        {"timestamp": _ts(2), "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "coordinate workers"}]}},
+        # Codex has no <command-name> marker. A shell read of SKILL.md is the
+        # stable structural signal that a local skill was loaded.
+        {"timestamp": _ts(5), "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command",
+                     "call_id": "skill-read",
+                     "arguments": json.dumps({
+                         "cmd": (
+                             "sed -n '1,120p' "
+                             "/Users/u/.codex/skills/report-quality-review/SKILL.md "
+                             "/Users/u/.codex/plugins/cache/x/skills/browser/SKILL.md "
+                             "/Users/u/.codex/skills/*/SKILL.md"
+                         )
+                     })}},
+        {"timestamp": _ts(6), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "skill-read",
+                     "output": "skill docs"}},
+        # Multi-agent connector: spawn outputs carry the opaque agent IDs;
+        # wait/close/send target those IDs. Only the IDs are retained locally
+        # to infer spans; no prompt/message payloads are serialized.
+        {"timestamp": _ts(10), "type": "response_item",
+         "payload": {"type": "function_call", "namespace": "multi_agent_v1",
+                     "name": "spawn_agent", "call_id": "spawn-a",
+                     "arguments": json.dumps({"agent_type": "worker",
+                                              "message": "private prompt A"})}},
+        {"timestamp": _ts(11), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "spawn-a",
+                     "output": json.dumps({"agent_id": "agent-a",
+                                           "nickname": "alpha"})}},
+        {"timestamp": _ts(20), "type": "response_item",
+         "payload": {"type": "function_call", "namespace": "multi_agent_v1",
+                     "name": "spawn_agent", "call_id": "spawn-b",
+                     "arguments": json.dumps({"agent_type": "worker",
+                                              "message": "private prompt B"})}},
+        {"timestamp": _ts(21), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "spawn-b",
+                     "output": json.dumps({"agent_id": "agent-b",
+                                           "nickname": "beta"})}},
+        {"timestamp": _ts(30), "type": "response_item",
+         "payload": {"type": "function_call", "namespace": "multi_agent_v1",
+                     "name": "wait_agent", "call_id": "wait-workers",
+                     "arguments": json.dumps({"targets": ["agent-a", "agent-b"],
+                                              "timeout_ms": 500000})}},
+        {"timestamp": _ts(360), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "wait-workers",
+                     "output": json.dumps({"status": {
+                         "agent-a": {"state": "completed"},
+                         "agent-b": {"state": "completed"},
+                     }, "timed_out": False})}},
+        {"timestamp": _ts(366), "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+        {"timestamp": _ts(367), "type": "event_msg",
+         "payload": {"type": "task_complete"}},
+    ]
+    _write_codex_rollout(codex_home, "rollout-codex-metrics.jsonl", rows)
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.provider == "codex"
+    assert s.user_skill_invocations == 2
+    assert s.skill_invocations_by_name == {
+        "browser": 1,
+        "report-quality-review": 1,
+    }
+    assert s.agent_dispatches == 2
+    assert s.afk_parallel_minutes_foreground >= 11
+    # The long tool-call-to-result gap is counted as active runtime instead
+    # of being capped at five minutes.
+    assert s.afk_max_streak_minutes >= 6
+
+    payload = json.loads(out.to_json())
+    for raw in ("private prompt A", "private prompt B", "agent-a", "agent-b"):
+        _assert_secret_absent(payload, raw, where="codex multi-agent local state")
+
+
 def test_claude_planted_secrets_still_safe_with_codex_consent(
     codex_home, isolated_claude_home
 ):

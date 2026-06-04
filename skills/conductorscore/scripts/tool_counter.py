@@ -68,6 +68,31 @@ AUTO_COMPACT_BANNER = (
 # "trusting a hard-coded tool name across Claude Code versions."
 _SUBAGENT_DISPATCH_NAMES: frozenset[str] = frozenset({"Task", "Agent"})
 
+# Codex records MCP / connector tools by namespace + name rather than using the
+# Claude ``Task`` / ``Agent`` dispatch tools. The multi-agent connector's
+# ``spawn_agent`` call is the structural subagent-dispatch event.
+_CODEX_AGENT_DISPATCH_TOOLS: frozenset[str] = frozenset(
+    {"multi_agent_v1__spawn_agent"}
+)
+
+# Codex has no Claude-style ``<command-name>`` skill marker. The most stable
+# local signal that a skill was actually loaded is a shell read of
+# ``.../skills/<name>/SKILL.md``. We emit only the skill directory name, after
+# rejecting globs / variable placeholders.
+CODEX_SKILL_MD_RE = re.compile(
+    r"(?:^|[\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md"
+)
+_SAFE_CODEX_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def _codex_skill_names_from_command(cmd: str) -> list[str]:
+    names: list[str] = []
+    for m in CODEX_SKILL_MD_RE.finditer(cmd):
+        name = m.group(1)
+        if _SAFE_CODEX_SKILL_NAME_RE.match(name):
+            names.append(name)
+    return names
+
 
 @dataclass(frozen=True)
 class ToolCounts:
@@ -325,10 +350,10 @@ def count_codex_tools(events) -> ToolCounts:
     arg shapes (``{"command":[...]}`` old, ``{"cmd":...}`` new) collapse to the
     same categorical tool name upstream, so this counter is arg-shape-agnostic.
 
-    Skills / plugins / agent-dispatches are not sourced from Codex tool calls
-    (Codex has no ``<command-name>`` markers and no ``Task`` dispatch tool);
-    those map from Codex config instead. The returned ``ToolCounts`` therefore
-    leaves the command-derived fields empty.
+    Codex has no ``<command-name>`` markers, so skill invocations are inferred
+    only from structural shell reads of ``.../skills/<name>/SKILL.md``. The
+    multi-agent MCP connector's ``spawn_agent`` call is counted as a subagent
+    dispatch.
     """
     from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES
     from scripts.core.normalized import EventKind
@@ -336,6 +361,10 @@ def count_codex_tools(events) -> ToolCounts:
     mcp: set[str] = set()
     builtin: set[str] = set()
     builtin_invocations = 0
+    agent_dispatches = 0
+    skills: set[str] = set()
+    skill_invocations = 0
+    skills_by_name: dict[str, int] = {}
     diagnostics: dict[str, int] = {}
 
     for e in events:
@@ -347,6 +376,19 @@ def count_codex_tools(events) -> ToolCounts:
         if name in KNOWN_TOOL_NAMES:
             builtin.add(name)
             builtin_invocations += 1
+            raw = getattr(e, "raw_input", None) or {}
+            if isinstance(raw, dict):
+                cmd = raw.get("command")
+                if isinstance(cmd, str):
+                    for skill_name in _codex_skill_names_from_command(cmd):
+                        skills.add(skill_name)
+                        skill_invocations += 1
+                        skills_by_name[skill_name] = (
+                            skills_by_name.get(skill_name, 0) + 1
+                        )
+        elif name in _CODEX_AGENT_DISPATCH_TOOLS:
+            mcp.add(name)
+            agent_dispatches += 1
         elif "__" in name:
             # MCP session invocation. Codex names MCP tools as
             # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix is
@@ -362,10 +404,13 @@ def count_codex_tools(events) -> ToolCounts:
             diagnostics[name] = diagnostics.get(name, 0) + 1
 
     return ToolCounts(
-        distinct_skills=[],
+        distinct_skills=sorted(skills),
         distinct_mcp_tools=sorted(mcp),
         distinct_builtin_tools=sorted(builtin),
         builtin_tool_invocations=builtin_invocations,
+        agent_dispatches=agent_dispatches,
+        skill_invocations=skill_invocations,
+        skill_invocations_by_name=skills_by_name,
         codex_unknown_tool_diagnostics=diagnostics,
     )
 

@@ -132,6 +132,15 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
 # parse ONLY this boolean signal transiently — the raw output is never stored.
 _EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
 
+_MULTI_AGENT_ACTIONS = frozenset(
+    {
+        "multi_agent_v1__spawn_agent",
+        "multi_agent_v1__wait_agent",
+        "multi_agent_v1__close_agent",
+        "multi_agent_v1__send_input",
+    }
+)
+
 
 def _output_is_error(output: object) -> bool:
     """True when a Codex tool output indicates a failed call.
@@ -213,6 +222,71 @@ def _message_text(payload: dict) -> str:
     return ""
 
 
+def _json_object(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str) and v]
+    return []
+
+
+def _multi_agent_call_input(name: str | None, payload: dict) -> dict | None:
+    """Return privacy-safe multi-agent routing metadata for in-memory counters.
+
+    Prompts, messages, and item payloads are deliberately ignored. Only opaque
+    agent IDs / routing targets are retained, and these are never serialized.
+    """
+    if name not in _MULTI_AGENT_ACTIONS:
+        return None
+    args = _json_object(payload.get("arguments"))
+    action = name.rsplit("__", 1)[-1]
+    out: dict = {"multi_agent_action": action}
+    if action == "wait_agent":
+        targets = _string_list(args.get("targets"))
+        if targets:
+            out["targets"] = targets
+    elif action in ("close_agent", "send_input"):
+        targets = _string_list(args.get("target"))
+        if targets:
+            out["targets"] = targets
+    return out
+
+
+def _multi_agent_result_input(name: str | None, output: object) -> dict | None:
+    """Return privacy-safe multi-agent output metadata for in-memory counters."""
+    if name not in _MULTI_AGENT_ACTIONS:
+        return None
+    data = _json_object(output)
+    action = name.rsplit("__", 1)[-1]
+    out: dict = {"multi_agent_result": action}
+    agent_id = data.get("agent_id")
+    if isinstance(agent_id, str) and agent_id:
+        out["agent_id"] = agent_id
+    status = data.get("status")
+    if isinstance(status, dict):
+        targets = [k for k in status.keys() if isinstance(k, str) and k]
+        if targets:
+            out["targets"] = targets
+    previous_status = data.get("previous_status")
+    if isinstance(previous_status, dict):
+        targets = [k for k in previous_status.keys() if isinstance(k, str) and k]
+        if targets:
+            out["targets"] = targets
+    return out
+
+
 def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
     """Compute the SHARED structural craft fields for a Codex tool call.
 
@@ -271,6 +345,10 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
             # In-memory ONLY — the revert + approval detectors read
             # ``raw_input["command"]``; it is never serialized.
             craft["raw_input"] = {"command": cmd}
+    elif name in _MULTI_AGENT_ACTIONS:
+        raw = _multi_agent_call_input(name, payload)
+        if raw:
+            craft["raw_input"] = raw
     return craft
 
 
@@ -321,6 +399,7 @@ def _read(
 
     # Map tool call_id -> tool_name so outputs can attach as TOOL_RESULT.
     call_names: dict[str, str] = {}
+    call_indices: dict[str, int] = {}
 
     # The active model id from the most recent ``turn_context`` row. Codex
     # carries the model per-turn there (e.g. "gpt-5-codex"); we stamp it
@@ -432,6 +511,8 @@ def _read(
                         **craft,
                     )
                 )
+                if call_id:
+                    call_indices[call_id] = len(events) - 1
                 turn_close_idx = len(events) - 1
                 continue
 
@@ -454,6 +535,8 @@ def _read(
                         stop_reason="tool_use",
                     )
                 )
+                if call_id:
+                    call_indices[call_id] = len(events) - 1
                 turn_close_idx = len(events) - 1
                 continue
 
@@ -461,13 +544,26 @@ def _read(
             if ptype in ("function_call_output", "custom_tool_call_output"):
                 call_id = payload.get("call_id")
                 call_id = call_id if isinstance(call_id, str) else None
+                tool_name = call_names.get(call_id) if call_id else None
+                raw_result = _multi_agent_result_input(tool_name, payload.get("output"))
+                subagent_id = None
+                if raw_result:
+                    agent_id = raw_result.get("agent_id")
+                    if isinstance(agent_id, str):
+                        subagent_id = agent_id
+                        idx = call_indices.get(call_id) if call_id else None
+                        if idx is not None:
+                            prev = events[idx]
+                            events[idx] = replace(prev, subagent_id=agent_id)
                 events.append(
                     Event(
                         kind=EventKind.TOOL_RESULT,
                         session_id=session_id,
                         timestamp_ms=ts_ms,
-                        tool_name=call_names.get(call_id) if call_id else None,
+                        tool_name=tool_name,
                         tool_use_id=call_id,
+                        subagent_id=subagent_id,
+                        raw_input=raw_result,
                         # Non-zero shell/exec exit code → tool error (feeds
                         # tool_error_count). Boolean only; output not stored.
                         is_error=_output_is_error(payload.get("output")),
