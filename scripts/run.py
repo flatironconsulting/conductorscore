@@ -572,8 +572,8 @@ def main() -> int:
         log = open(log_path, "w")
     except OSError:
         print(
-            "ConductorScore couldn't write its cache (read-only filesystem); "
-            "skipping the scan.",
+            "ConductorScore needs write access to its cache (read-only "
+            "filesystem) — allow the command and re-run to continue.",
             file=sys.stderr,
         )
         return 0
@@ -666,8 +666,8 @@ def _backstop_main() -> int:
         raise
     except OSError:
         print(
-            "ConductorScore couldn't write its cache (read-only filesystem); "
-            "skipping the scan.",
+            "ConductorScore needs write access to its cache (read-only "
+            "filesystem) — allow the command and re-run to continue.",
             file=sys.stderr,
         )
         return 0
