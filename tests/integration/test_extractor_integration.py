@@ -865,3 +865,49 @@ def test_unknown_codex_event_type_not_uploaded(codex_home):
     assert any(s.provider == "codex" for s in out.sessions)
     # The unknown-type marker NEVER crosses the wire.
     _assert_secret_absent(payload, unknown_marker, where="unknown codex event")
+
+
+def test_codex_agents_md_lines_surface_in_global_agents_field(
+    codex_home, isolated_claude_home
+):
+    """Planted Codex AGENTS.md line count surfaces in global_agents_md_lines,
+    NOT in global_claude_md_lines — end-to-end through the real extractor."""
+    # Write a minimal valid Codex rollout so the provider is recognised.
+    _write_codex_rollout(
+        codex_home,
+        "rollout-agents-md-lines.jsonl",
+        [
+            {"timestamp": _ts(0), "type": "session_meta",
+             "payload": {"id": "cx-agents-md", "cwd": "/p",
+                         "model_provider": "openai"}},
+            {"timestamp": _ts(1), "type": "turn_context",
+             "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+            {"timestamp": _ts(2), "type": "response_item",
+             "payload": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "hi"}]}},
+            {"timestamp": _ts(3), "type": "response_item",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "ok"}]}},
+        ],
+    )
+    # Plant a known 4-line AGENTS.md in the codex home.
+    (codex_home / "AGENTS.md").write_text("a\nb\nc\nd\n")
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+
+    # The Codex session was actually scanned (non-vacuous check).
+    assert any(s.provider == "codex" for s in out.sessions)
+
+    # The 4-line AGENTS.md surfaces in global_agents_md_lines …
+    assert out.config.global_agents_md_lines == 4, (
+        f"expected global_agents_md_lines=4, got {out.config.global_agents_md_lines}"
+    )
+    # … and does NOT bleed into global_claude_md_lines.
+    assert out.config.global_claude_md_lines == 0, (
+        f"expected global_claude_md_lines=0, got {out.config.global_claude_md_lines}"
+    )
