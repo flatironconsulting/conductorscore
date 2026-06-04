@@ -42,6 +42,7 @@ from scripts.agents.codex.taxonomy import (
     SHELL_TOOL_NAMES,
     normalize_shell_command,
     parse_apply_patch_files,
+    skill_names_from_shell_command,
 )
 
 # Top-level Codex rollout row types — presence of any of these is the
@@ -268,9 +269,14 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
     elif name in SHELL_TOOL_NAMES:
         cmd = normalize_shell_command(payload.get("arguments"))
         if cmd:
+            raw_input: dict = {"command": cmd}
+            skill_names = skill_names_from_shell_command(cmd)
+            if skill_names:
+                raw_input["skill_names"] = skill_names
+                craft["skill_name"] = skill_names[0]
             # In-memory ONLY — the revert + approval detectors read
             # ``raw_input["command"]``; it is never serialized.
-            craft["raw_input"] = {"command": cmd}
+            craft["raw_input"] = raw_input
     return craft
 
 

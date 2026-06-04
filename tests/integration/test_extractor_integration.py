@@ -678,6 +678,70 @@ def test_codex_planted_secrets_never_reach_wire_payload(
     assert expected in out.to_json()
 
 
+def test_codex_workflow_skill_read_marks_large_edit_session_planned(codex_home):
+    """A Codex SKILL.md read for a workflow/judge/evaluator skill is planning
+    evidence for a large edit session, without serializing raw command text."""
+    sec_skill_root = "CXSECRET_SKILLROOT_WORKFLOW"
+    sec_tool_out = "CXSECRET_WORKFLOW_SKILL_OUTPUT"
+    patch = "*** Begin Patch\n"
+    for i in range(6):
+        patch += f"*** Add File: src/workflow_{i}.py\n+value = {i}\n"
+    patch += "*** End Patch"
+    rows = [
+        {"timestamp": _ts(0), "type": "session_meta",
+         "payload": {"id": "cx-workflow-plan", "cwd": "/p",
+                     "model_provider": "openai"}},
+        {"timestamp": _ts(1), "type": "turn_context",
+         "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+        {"timestamp": _ts(2), "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "build"}]}},
+        {"timestamp": _ts(5), "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command",
+                     "call_id": "skill-read",
+                     "arguments": json.dumps({
+                         "cmd": (
+                             "sed -n '1,120p' "
+                             f"/Users/u/{sec_skill_root}/.codex/skills/"
+                             "report-evaluation-loop/SKILL.md "
+                             "/Users/u/.codex/skills/*/SKILL.md"
+                         )
+                     })}},
+        {"timestamp": _ts(6), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "skill-read",
+                     "output": sec_tool_out}},
+        {"timestamp": _ts(10), "type": "response_item",
+         "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                     "call_id": "patch", "input": patch}},
+        {"timestamp": _ts(11), "type": "response_item",
+         "payload": {"type": "custom_tool_call_output", "call_id": "patch",
+                     "output": "Success"}},
+        {"timestamp": _ts(15), "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+    ]
+    _write_codex_rollout(codex_home, "rollout-codex-workflow-plan.jsonl", rows)
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.provider == "codex"
+    assert s.is_significant_edit_session is True
+    assert s.files_modified == 6
+    assert s.is_planned is True
+    assert "workflow_skill_early" in s.strong_plan_signals
+
+    payload = json.loads(out.to_json())
+    _assert_secret_absent(payload, sec_skill_root, where="codex skill path")
+    _assert_secret_absent(payload, sec_tool_out, where="codex skill output")
+
+
 def test_claude_planted_secrets_still_safe_with_codex_consent(
     codex_home, isolated_claude_home
 ):

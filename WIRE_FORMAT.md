@@ -303,8 +303,8 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 
 | Field                          | Type             | Nullable | Notes                                                                                                                                |
 |--------------------------------|------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
-| `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`. |
+| `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"update_plan"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"workflow_skill_early"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
+| `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`, `"workflow_skill"`. |
 | `is_planned`                   | boolean          | no       | True iff `len(strong_plan_signals) >= 1` OR `len(weak_plan_signals) >= 2`. Per outline § "planned". |
 | `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding `.claude/`, `.git/`, and basename `CLAUDE.md`. Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
 | `total_lines_edited`           | integer          | no       | Outline approximation: `sum over Edit/Write/MultiEdit of max(line_count(new_string), line_count(old_string))`. For Write this collapses to `line_count(content)`. For MultiEdit the per-edit max is summed across the `edits` array. Excluded-path edits contribute 0. |
@@ -318,8 +318,10 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 | Signal name           | Trigger                                                                                                |
 |-----------------------|--------------------------------------------------------------------------------------------------------|
 | `EnterPlanMode`       | `tool_use` block with `name == "EnterPlanMode"` anywhere in the session.                               |
+| `update_plan`         | Codex `function_call` with `name == "update_plan"` anywhere in the session.                            |
 | `/writing-plans skill`| `tool_use` block with `name == "Skill"` and `input.skill` (or `input.name`) ∈ {`writing-plans`, `superpowers:writing-plans`}. |
 | `/brainstorming skill`| Same as above with `input.skill` ∈ {`brainstorming`, `superpowers:brainstorming`}.                     |
+| `workflow_skill_early`| Workflow/governance skill loaded in the first 10 tool calls. Matches categorical skill names containing terms such as `orchestrator`, `evaluation`, `evaluator`, `judge`, `judging`, `quality-review`, `repair`, `scaffold`, `skill-creator`, `document-assembly`, `source-ledger`, or `known-unknowns`. Codex derives the skill name from safe `.../skills/<name>/SKILL.md` reads; raw paths and file contents are not serialized. |
 | `TodoWrite>=3`        | `tool_use` block with `name == "TodoWrite"` and `len(input.todos) >= 3`, occurring within the first 10 tool calls of the session. |
 | `plan_file_write`     | `tool_use` block with `name ∈ {Edit, Write, MultiEdit}` writing to a path that ends in `.md` and matches the *plan-shaped path* pattern. |
 
@@ -330,6 +332,7 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 | `structured_first_prompt`| The session's FIRST `user` message has `>200` approximate tokens AND (≥2 markdown list lines matching `^[-*]\s` or `^\d+\.\s` OR ≥2 distinct sequence words from `{step, phase, first, then, next, finally}`). |
 | `plan_md_read_early`     | A `tool_use` block with `name == "Read"` reading a plan-shaped `.md` file within the first 5 tool calls of the session. |
 | `prior_24h_plan_artifact`| ANOTHER session in the SAME project (matched on un-hashed `project_root` locally, then hashed) produced a plan artifact within the 24h preceding this session's `started_at_ms`. Self-matches are excluded. |
+| `workflow_skill`         | Workflow/governance skill loaded later than the first 10 tool calls. This weak signal can combine with a prior project plan artifact or another weak signal. |
 
 ### Plan-shaped path pattern
 
