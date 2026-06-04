@@ -68,31 +68,6 @@ AUTO_COMPACT_BANNER = (
 # "trusting a hard-coded tool name across Claude Code versions."
 _SUBAGENT_DISPATCH_NAMES: frozenset[str] = frozenset({"Task", "Agent"})
 
-# Codex records MCP / connector tools by namespace + name rather than using the
-# Claude ``Task`` / ``Agent`` dispatch tools. The multi-agent connector's
-# ``spawn_agent`` call is the structural subagent-dispatch event.
-_CODEX_AGENT_DISPATCH_TOOLS: frozenset[str] = frozenset(
-    {"multi_agent_v1__spawn_agent"}
-)
-
-# Codex has no Claude-style ``<command-name>`` skill marker. The most stable
-# local signal that a skill was actually loaded is a shell read of
-# ``.../skills/<name>/SKILL.md``. We emit only the skill directory name, after
-# rejecting globs / variable placeholders.
-CODEX_SKILL_MD_RE = re.compile(
-    r"(?:^|[\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md"
-)
-_SAFE_CODEX_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
-
-
-def _codex_skill_names_from_command(cmd: str) -> list[str]:
-    names: list[str] = []
-    for m in CODEX_SKILL_MD_RE.finditer(cmd):
-        name = m.group(1)
-        if _SAFE_CODEX_SKILL_NAME_RE.match(name):
-            names.append(name)
-    return names
-
 
 @dataclass(frozen=True)
 class ToolCounts:
@@ -355,7 +330,7 @@ def count_codex_tools(events) -> ToolCounts:
     multi-agent MCP connector's ``spawn_agent`` call is counted as a subagent
     dispatch.
     """
-    from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES
+    from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES, multi_agent_action, skill_names_from_shell_command
     from scripts.core.normalized import EventKind
 
     mcp: set[str] = set()
@@ -380,15 +355,19 @@ def count_codex_tools(events) -> ToolCounts:
             if isinstance(raw, dict):
                 cmd = raw.get("command")
                 if isinstance(cmd, str):
-                    for skill_name in _codex_skill_names_from_command(cmd):
+                    for skill_name in skill_names_from_shell_command(cmd):
                         skills.add(skill_name)
                         skill_invocations += 1
                         skills_by_name[skill_name] = (
                             skills_by_name.get(skill_name, 0) + 1
                         )
-        elif name in _CODEX_AGENT_DISPATCH_TOOLS:
+        elif multi_agent_action(name) == "spawn_agent":
             mcp.add(name)
             agent_dispatches += 1
+        elif name.startswith("multi_agent_") and multi_agent_action(name) is None:
+            # Unknown multi-agent shape (future version / action) — surface it
+            # so drift is detected, not silently zero-counted.
+            diagnostics[name] = diagnostics.get(name, 0) + 1
         elif "__" in name:
             # MCP session invocation. Codex names MCP tools as
             # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix is

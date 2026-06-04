@@ -40,6 +40,7 @@ from scripts.core.normalized import Event, EventKind
 from scripts.agents.codex.taxonomy import (
     EDIT_TOOL_NAMES,
     SHELL_TOOL_NAMES,
+    multi_agent_action,
     normalize_shell_command,
     parse_apply_patch_files,
 )
@@ -131,16 +132,6 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
 # "Process exited with code N" trailer; a non-zero code is a tool error. We
 # parse ONLY this boolean signal transiently — the raw output is never stored.
 _EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
-
-_MULTI_AGENT_ACTIONS = frozenset(
-    {
-        "multi_agent_v1__spawn_agent",
-        "multi_agent_v1__wait_agent",
-        "multi_agent_v1__close_agent",
-        "multi_agent_v1__send_input",
-    }
-)
-
 
 def _output_is_error(output: object) -> bool:
     """True when a Codex tool output indicates a failed call.
@@ -248,10 +239,10 @@ def _multi_agent_call_input(name: str | None, payload: dict) -> dict | None:
     Prompts, messages, and item payloads are deliberately ignored. Only opaque
     agent IDs / routing targets are retained, and these are never serialized.
     """
-    if name not in _MULTI_AGENT_ACTIONS:
+    action = multi_agent_action(name)
+    if action is None:
         return None
     args = _json_object(payload.get("arguments"))
-    action = name.rsplit("__", 1)[-1]
     out: dict = {"multi_agent_action": action}
     if action == "wait_agent":
         targets = _string_list(args.get("targets"))
@@ -266,12 +257,13 @@ def _multi_agent_call_input(name: str | None, payload: dict) -> dict | None:
 
 def _multi_agent_result_input(name: str | None, output: object) -> dict | None:
     """Return privacy-safe multi-agent output metadata for in-memory counters."""
-    if name not in _MULTI_AGENT_ACTIONS:
+    action = multi_agent_action(name)
+    if action is None:
         return None
     data = _json_object(output)
-    action = name.rsplit("__", 1)[-1]
     out: dict = {"multi_agent_result": action}
-    agent_id = data.get("agent_id")
+    # Accept v1 ``agent_id`` OR v2 ``task_name`` as the opaque agent handle.
+    agent_id = data.get("agent_id") or data.get("task_name")
     if isinstance(agent_id, str) and agent_id:
         out["agent_id"] = agent_id
     status = data.get("status")
@@ -345,7 +337,7 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
             # In-memory ONLY — the revert + approval detectors read
             # ``raw_input["command"]``; it is never serialized.
             craft["raw_input"] = {"command": cmd}
-    elif name in _MULTI_AGENT_ACTIONS:
+    elif multi_agent_action(name) is not None:
         raw = _multi_agent_call_input(name, payload)
         if raw:
             craft["raw_input"] = raw
