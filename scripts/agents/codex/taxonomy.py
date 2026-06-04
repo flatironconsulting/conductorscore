@@ -201,6 +201,23 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
+_MULTI_AGENT_TOOL_RE = re.compile(
+    r"^multi_agent_v\d+__(spawn_agent|wait_agent|close_agent|send_input)$"
+)
+
+
+def multi_agent_action(name: str | None) -> str | None:
+    """Return the multi-agent action ('spawn_agent'…) for any versioned name.
+
+    Matches v1 and v2 (e.g. ``multi_agent_v1__spawn_agent``,
+    ``multi_agent_v2__wait_agent``). Returns None for non-multi-agent tools.
+    """
+    if not name:
+        return None
+    m = _MULTI_AGENT_TOOL_RE.match(name)
+    return m.group(1) if m else None
+
+
 __all__ = [
     "CODEX_SKILL_MD_RE",
     "EDIT_TOOL_NAMES",
@@ -208,6 +225,7 @@ __all__ = [
     "PLAN_TOOL_NAMES",
     "RAW_INPUT_TOOLS",
     "SHELL_TOOL_NAMES",
+    "multi_agent_action",
     "normalize_shell_command",
     "parse_apply_patch_files",
     "skill_names_from_shell_command",

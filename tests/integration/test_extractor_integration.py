@@ -923,6 +923,41 @@ def test_corrupt_claude_does_not_break_valid_codex(
     json.loads(out.to_json())
 
 
+def test_codex_multi_agent_v2_spawn_counts_as_dispatch(codex_home):
+    """A multi_agent_v2 spawn (returns task_name, not agent_id) must still
+    count as one subagent dispatch — not silently dropped."""
+    rows = [
+        {"timestamp": _ts(0), "type": "session_meta",
+         "payload": {"id": "cx-v2", "cwd": "/p", "model_provider": "openai"}},
+        {"timestamp": _ts(1), "type": "turn_context",
+         "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+        {"timestamp": _ts(2), "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "go"}]}},
+        {"timestamp": _ts(5), "type": "response_item",
+         "payload": {"type": "function_call", "namespace": "multi_agent_v2",
+                     "name": "spawn_agent", "call_id": "s1",
+                     "arguments": json.dumps({"agent_type": "worker",
+                                              "message": "secret v2 prompt"})}},
+        {"timestamp": _ts(6), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "s1",
+                     "output": json.dumps({"task_name": "task-xyz"})}},
+        {"timestamp": _ts(9), "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+        {"timestamp": _ts(10), "type": "event_msg",
+         "payload": {"type": "task_complete"}},
+    ]
+    _write_codex_rollout(codex_home, "rollout-cx-v2.jsonl", rows)
+    out = extract(device_id="dev-1", client_version="0.1.0",
+                  now_ms=_now_ms(), consent_decision=_codex_consent())
+    s = out.sessions[0]
+    assert s.agent_dispatches == 1
+    payload = json.loads(out.to_json())
+    _assert_secret_absent(payload, "secret v2 prompt", where="codex v2 prompt")
+    _assert_secret_absent(payload, "task-xyz", where="codex v2 task id")
+
+
 def test_unknown_codex_event_type_not_uploaded(codex_home):
     """An unknown Codex event type must be ignored (local-only) and its marker
     must NEVER appear in the uploaded numbers-only payload."""

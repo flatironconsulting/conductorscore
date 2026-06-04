@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.agents.codex.taxonomy import multi_agent_action
 from scripts.events import Event, EventKind
 
 
@@ -53,8 +54,6 @@ K_BRIDGE_IDLE_SECONDS = 1800  # 30 min
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.
 DISPATCH_TOOLS: frozenset[str] = frozenset({"Task", "Agent"})
-
-MULTI_AGENT_SPAWN_TOOL = "multi_agent_v1__spawn_agent"
 
 # The AskUserQuestion tool is special: dispatching it ends the agent
 # turn, and its tool_result is a soft-USER event.
@@ -302,7 +301,7 @@ def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
         raw = getattr(ev, "raw_input", None) or {}
         if not isinstance(raw, dict):
             raw = {}
-        if ev.kind == EventKind.ASSISTANT_TOOL and ev.tool_name == MULTI_AGENT_SPAWN_TOOL:
+        if ev.kind == EventKind.ASSISTANT_TOOL and multi_agent_action(ev.tool_name) == "spawn_agent":
             sid = ev.subagent_id
             if isinstance(sid, str) and sid:
                 starts.setdefault(sid, ev.timestamp_ms)
@@ -646,6 +645,7 @@ __all__ = [
     "compute_turn_aggregates",
     "hitl_minute_set",
     "longest_afk_streak_seconds",
+    "multi_agent_spans",
     "segment_turns",
     "subagent_intervals",
     "top_afk_streaks",

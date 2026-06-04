@@ -36,7 +36,6 @@ def test_multiagent_v1_min(codex_home):
     assert s.agent_dispatches == 1
 
 
-@pytest.mark.xfail(reason="v2 matching lands in Task 2", strict=True)
 def test_multiagent_v2_min(codex_home):
     s = _scan(codex_home, "multiagent_v2_min")
     assert s.agent_dispatches == 1

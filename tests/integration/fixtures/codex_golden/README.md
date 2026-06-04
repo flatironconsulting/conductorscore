@@ -78,13 +78,13 @@ still arrives later — `test_interleaved_tool_min_tool` remains `xfail` because
 that field does not yet exist on `PerSession`.
 
 Remaining `xfail`s (expected, strict):
-- `test_multiagent_v2_min` — `agent_dispatches == 1`: the current
-  `_CODEX_AGENT_DISPATCH_TOOLS` set is v1-only
-  (`{"multi_agent_v1__spawn_agent"}`), so a `multi_agent_v2__spawn_agent` call
-  falls through to the MCP branch and is NOT counted (measured: 0). Flips to pass
-  in Task 2.
 - `test_interleaved_tool_min_tool` — `afk_tool_minutes >= 11`: the
   `afk_tool_minutes` field is not yet on `PerSession` (added in Task 5).
+
+`test_multiagent_v2_min` — **ACHIEVED in Task 2**. Matching is now
+version-agnostic via `multi_agent_action()` (v1+v2), so both
+`multi_agent_v1__spawn_agent` and `multi_agent_v2__spawn_agent` are counted as
+`agent_dispatches`. This test is no longer xfail.
 
 ## Real-log shape report (evidence)
 
