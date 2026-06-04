@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-SCHEMA_VERSION = "0.11"
+SCHEMA_VERSION = "0.12"
 # Client build version — kept in sync with ``version`` in pyproject.toml (see
 # RELEASING.md step 1). Distinct from SCHEMA_VERSION, which only moves when the
 # wire shape changes. Lives here (a shipped module) so scan.py can stamp the
@@ -38,6 +38,10 @@ class ConfigCounts:
     hooks: int = 0
     custom_commands: int = 0
     global_claude_md_lines: int = 0
+    # AGENTS.md (Codex instruction file) global line count. Kept SEPARATE
+    # from global_claude_md_lines (v0.12) so the profile can show per-file
+    # counts; both still sum into the instruction-bloat metric.
+    global_agents_md_lines: int = 0
     project_claude_md_lines_avg: int = 0
     # v0.7 — Plugins customization surface. ``plugin_count`` is the
     # number of installed plugins (read from ~/.claude/plugins/...). Plugin

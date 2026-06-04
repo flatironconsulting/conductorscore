@@ -11,10 +11,9 @@ customization identically to Claude:
     ``superpowers/skills/``, plugin-cache ``plugins/cache/**/skills/``).
     Mapped to the provider-neutral "custom commands / installed skills"
     field so it feeds the same Customization surface as Claude commands.
-  * ``global_claude_md_lines`` — line count of the project-instruction file
-    ``AGENTS.md`` (Codex's CLAUDE.md analog). This is the provider-neutral
-    instruction-file field on the wire; reusing it keeps schema 0.11
-    additive and the Claude payload byte-identical.
+  * ``global_agents_md_lines`` — line count of the project-instruction file
+    ``AGENTS.md`` (Codex's CLAUDE.md analog). Tracked in its own dedicated
+    field so Claude and Codex instruction files are counted separately.
 
 Parsed with ``tomllib`` (Python 3.11+). Never raises — returns all-zero
 ``ConfigCounts`` when the config / dirs are absent or unparseable.
@@ -117,8 +116,8 @@ def scan_config(home: Path | None = None) -> ConfigCounts:
         plugin_count=_count_table(data, "plugins"),
         # Provider-neutral "installed skills / custom commands" field.
         custom_commands=_count_skills(base),
-        # Provider-neutral instruction-file line count (Codex AGENTS.md).
-        global_claude_md_lines=_count_agents_md_lines(base),
+        # AGENTS.md instruction-file line count goes to its own dedicated field.
+        global_agents_md_lines=_count_agents_md_lines(base),
     )
 
 
