@@ -38,6 +38,10 @@ class ConfigCounts:
     hooks: int = 0
     custom_commands: int = 0
     global_claude_md_lines: int = 0
+    # AGENTS.md (Codex instruction file) global line count. Kept SEPARATE
+    # from global_claude_md_lines (v0.12) so the profile can show per-file
+    # counts; both still sum into the instruction-bloat metric.
+    global_agents_md_lines: int = 0
     project_claude_md_lines_avg: int = 0
     # v0.7 — Plugins customization surface. ``plugin_count`` is the
     # number of installed plugins (read from ~/.claude/plugins/...). Plugin
