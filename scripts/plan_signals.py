@@ -149,6 +149,27 @@ _BRAINSTORM_SKILL_NAMES: frozenset[str] = frozenset(
     {"brainstorming", "superpowers:brainstorming"}
 )
 
+# Workflow/governance skills are structured planning context even when the
+# work is not expressed through a literal plan file. Keep this as semantic
+# skill-name matching, not prompt/content inspection.
+_WORKFLOW_SKILL_TERMS: tuple[str, ...] = (
+    "orchestrator",
+    "evaluation",
+    "evaluator",
+    "judge",
+    "judging",
+    "quality-review",
+    "readiness-repair",
+    "repair",
+    "scaffold",
+    "skill-creator",
+    "document-assembly",
+    "source-ledger",
+    "known-unknowns",
+)
+WORKFLOW_SKILL_EARLY_SIGNAL = "workflow_skill_early"
+WORKFLOW_SKILL_SIGNAL = "workflow_skill"
+
 # Cap for "first N tool calls" rules (per outline).
 TODOWRITE_TOOL_CALL_WINDOW = 10
 PLAN_MD_READ_TOOL_CALL_WINDOW = 5
@@ -168,6 +189,32 @@ class PlanSignals:
     strong: tuple[str, ...]
     weak: tuple[str, ...]
     is_planned: bool
+
+
+def _skill_names_for_event(e: Event) -> tuple[str, ...]:
+    names: list[str] = []
+    if e.skill_name:
+        names.append(e.skill_name)
+    raw = getattr(e, "raw_input", None)
+    if isinstance(raw, dict):
+        raw_names = raw.get("skill_names")
+        if isinstance(raw_names, (list, tuple)):
+            names.extend(n for n in raw_names if isinstance(n, str) and n)
+    return tuple(dict.fromkeys(names))
+
+
+def is_workflow_plan_skill(name: str | None) -> bool:
+    """Return True for skills that encode workflow, judging, or governance.
+
+    This intentionally does not treat every skill invocation as planning. A
+    drafting or formatting skill may be execution-only; scaffold/evaluator/
+    judge/orchestrator/repair skills are stronger evidence that the session is
+    operating under a structured workflow.
+    """
+    if not name:
+        return False
+    normalized = name.lower().replace("_", "-")
+    return any(term in normalized for term in _WORKFLOW_SKILL_TERMS)
 
 
 def detect_plan_signals(
@@ -212,6 +259,22 @@ def detect_plan_signals(
     if seen_brainstorming:
         strong.append("/brainstorming skill")
 
+    # 3b. Structured workflow / governance skills. Early use is a strong
+    # plan signal; later use is weak evidence that can combine with a prior
+    # project plan artifact.
+    workflow_skill_seen = any(
+        is_workflow_plan_skill(name)
+        for e in tool_events
+        for name in _skill_names_for_event(e)
+    )
+    workflow_skill_early = any(
+        is_workflow_plan_skill(name)
+        for e in first_n_tools
+        for name in _skill_names_for_event(e)
+    )
+    if workflow_skill_early:
+        strong.append(WORKFLOW_SKILL_EARLY_SIGNAL)
+
     # 4. TodoWrite with ≥3 items in the first 10 tool calls.
     for e in first_n_tools:
         if e.tool_name == "TodoWrite" and e.todo_count >= TODOWRITE_MIN_ITEMS:
@@ -238,6 +301,10 @@ def detect_plan_signals(
     if project_had_plan_artifact_prior_24h:
         weak.append("prior_24h_plan_artifact")
 
+    # 4. Workflow skill appeared, but not early enough to be a strong signal.
+    if workflow_skill_seen and not workflow_skill_early:
+        weak.append(WORKFLOW_SKILL_SIGNAL)
+
     is_planned = len(strong) >= 1 or len(weak) >= 2
     return PlanSignals(strong=tuple(strong), weak=tuple(weak), is_planned=is_planned)
 
@@ -250,6 +317,7 @@ def session_produced_plan_artifact(events: list[Event]) -> bool:
       * ``EnterPlanMode`` tool call,
       * ``writing-plans`` skill invocation,
       * ``brainstorming`` skill invocation,
+      * early workflow/governance skill invocation,
       * ``TodoWrite`` with ≥3 items in the first 10 tool calls,
       * a file written to a plan-shaped ``.md`` path.
 
@@ -266,8 +334,11 @@ __all__ = [
     "STRUCTURED_PROMPT_TOKEN_FLOOR",
     "TODOWRITE_MIN_ITEMS",
     "TODOWRITE_TOOL_CALL_WINDOW",
+    "WORKFLOW_SKILL_EARLY_SIGNAL",
+    "WORKFLOW_SKILL_SIGNAL",
     "detect_plan_signals",
     "is_plan_shaped_path",
     "is_structured_prompt",
+    "is_workflow_plan_skill",
     "session_produced_plan_artifact",
 ]

@@ -31,6 +31,33 @@ EDIT_TOOL_NAMES: frozenset[str] = frozenset({"apply_patch"})
 # revert / approval detectors.
 SHELL_TOOL_NAMES: frozenset[str] = frozenset({"shell", "exec_command"})
 
+# Codex does not emit Claude-style ``Skill`` tool calls. A shell read of
+# ``.../skills/<name>/SKILL.md`` is the stable local signal that a skill was
+# loaded. Only the skill directory name is retained, and only when it is a safe
+# categorical token (no globs or shell variables).
+CODEX_SKILL_MD_RE = re.compile(
+    r"(?:^|[\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md"
+)
+_SAFE_CODEX_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def skill_names_from_shell_command(cmd: str) -> tuple[str, ...]:
+    """Return safe skill names from Codex shell reads of ``SKILL.md`` files.
+
+    The command text is consumed in-memory only. The returned values are
+    categorical skill directory names, suitable for plan-signal detection.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in CODEX_SKILL_MD_RE.finditer(cmd):
+        name = m.group(1)
+        if name in seen:
+            continue
+        if _SAFE_CODEX_SKILL_NAME_RE.match(name):
+            names.append(name)
+            seen.add(name)
+    return tuple(names)
+
 # ---------------------------------------------------------------------------
 # apply_patch structural header parsing.
 # ---------------------------------------------------------------------------
