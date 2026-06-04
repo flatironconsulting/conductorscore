@@ -483,7 +483,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="conductorscore", add_help=False)
     parser.add_argument("--providers", choices=["all", "claude", "codex"], default=None)
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
-    parser.add_argument("--pair", default=None)  # back-compat (unused here)
     ns, _unknown = parser.parse_known_args(argv)
     return ns
 
@@ -580,8 +579,13 @@ def main() -> int:
         return 0
 
     print("Scanning your transcripts…")
-    # Share the chosen writable dir with the scan subprocess so the scanner
-    # writes status.json / last-run.log to the exact same place we read.
+    # Runs OUR OWN local scanner (scripts/scan.py) as a child so this process can
+    # stream progress while it works. scan.py reads transcripts on-device and uploads
+    # only per-metric numbers + invoked names (see WIRE_FORMAT.md), and only after the
+    # device is paired + the user consents to the providers scanned. Output is captured
+    # to a log file (not hidden) so the foreground UI can tail it.
+    # Share the chosen writable dir with the scan subprocess so the scanner writes
+    # status.json / last-run.log to the exact same place we read (log already opened above).
     scan_env = dict(os.environ)
     scan_env["CONDUCTORSCORE_CACHE_DIR"] = str(cache)
     proc = subprocess.Popen(

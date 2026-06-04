@@ -27,6 +27,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+from scripts._http import open_url
 from scripts.agents import consent as consent_mod
 from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
@@ -73,7 +74,7 @@ def _upload(features_json: str, device_token: str):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with open_url(req, timeout=30) as r:
             return "ok", json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") or "{}"

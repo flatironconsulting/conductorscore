@@ -25,10 +25,13 @@ Schema bumps are coordinated 2-PR rollouts (client first, server follows).
    python3 scripts/build_skill_package.py
    ```
 
-   This regenerates `skills/conductorscore/` (SKILL.md + scripts/ + VERSION) from
-   the canonical repo-root sources. The directory is a committed build artifact —
-   CI (`skill-package-sync` job) hard-fails if it ever drifts from a fresh build,
-   so always rebuild and commit it as part of the release.
+   This regenerates `skills/conductorscore/scripts/` and `VERSION` from the
+   canonical repo-root sources. `skills/conductorscore/SKILL.md` is the canonical,
+   hand-authored skill body and is left untouched (there is deliberately no
+   root-level `SKILL.md` — one would make `npx skills add` treat the whole repo as
+   the skill). The directory is a committed build artifact — CI
+   (`skill-package-sync` job) hard-fails if it drifts from a fresh build or if a
+   root `SKILL.md` reappears, so always rebuild and commit it as part of the release.
 4. (Optional, recommended) Validate the skill layout locally with the `gh skill`
    preview before tagging (the `publish --dry-run` form validates without
    publishing):
