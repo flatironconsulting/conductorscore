@@ -25,6 +25,22 @@ def test_long_tool_call_credited_in_full_despite_interleaving():
     assert agg.afk_tool_minutes >= 11
 
 
+def test_afk_dispatch_minutes_splits_out_dispatch():
+    evs = [
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
+        Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
+              tool_name="Agent", tool_use_id="d1"),
+        Event(kind=EventKind.TOOL_RESULT, session_id="s", timestamp_ms=1_621_000,
+              tool_use_id="d1"),  # 27-min dispatch
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+              timestamp_ms=1_622_000, stop_reason="end_turn"),
+    ]
+    agg = compute_turn_aggregates(evs)
+    assert agg.afk_minutes >= 27          # dispatch still in afk (longest run unaffected)
+    assert agg.afk_dispatch_minutes >= 26 # and it's identified as dispatch
+    assert agg.afk_tool_minutes >= 26     # dispatch is a subset of tool
+
+
 def test_unbracketed_long_gap_excluded_entirely_as_idle():
     # A +1h UNBRACKETED (non-tool) gap is Idle and contributes NOTHING — it is
     # excluded entirely, not clipped to 5 min. So the turn's active time is just

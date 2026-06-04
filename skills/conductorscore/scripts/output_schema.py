@@ -103,6 +103,7 @@ class PerSession:
     idle_minutes: int = 0
     hitl_tool_minutes: int = 0
     afk_tool_minutes: int = 0
+    afk_dispatch_minutes: int = 0
     afk_parallel_minutes_foreground: int = 0
     cron_parallel_minutes: int = 0
     afk_max_streak_minutes: int = 0
@@ -204,6 +205,7 @@ class ExtractorOutput:
                     "idle_minutes": s.idle_minutes,
                     "hitl_tool_minutes": s.hitl_tool_minutes,
                     "afk_tool_minutes": s.afk_tool_minutes,
+                    "afk_dispatch_minutes": s.afk_dispatch_minutes,
                     "afk_parallel_minutes_foreground": s.afk_parallel_minutes_foreground,
                     "cron_parallel_minutes": s.cron_parallel_minutes,
                     "afk_max_streak_minutes": s.afk_max_streak_minutes,
