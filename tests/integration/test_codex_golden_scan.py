@@ -60,3 +60,12 @@ def test_walked_away_guard(codex_home):
     s = _scan(codex_home, "walked_away_min")
     assert getattr(s, "afk_tool_minutes", 0) == 0
     assert s.afk_minutes <= 6
+
+
+def test_aborted_exec_not_credited_as_runtime(codex_home):
+    # A 12-min exec_command the user aborted ("aborted by user after …") must
+    # NOT be credited as tool runtime — its gap reverts to the idle cap, so it
+    # never shows up as a long autonomous run.
+    s = _scan(codex_home, "aborted_exec_min")
+    assert s.afk_tool_minutes == 0
+    assert s.afk_minutes <= 6

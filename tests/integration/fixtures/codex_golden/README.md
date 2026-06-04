@@ -21,6 +21,8 @@ the REAL in-process scanner (`scripts.scanner.extract`) over each fixture.
 | interleaved_tool_min      | `afk_tool_minutes`                  | n/a (field absent)        | ≥11                  | Task 4/5 |
 | walked_away_min (guard)   | `afk_tool_minutes`                  | 0                         | 0 (must stay)        | Task 4 |
 | walked_away_min (guard)   | `afk_minutes` (1-h idle gap)        | ≤6                        | ≤6 (must stay)       | Task 4 |
+| aborted_exec_min          | `afk_tool_minutes` (12-min aborted) | ~12 (wrongly credited)    | 0                    | Abort refinement |
+| aborted_exec_min          | `afk_minutes`                       | ~12 (inflated)            | ≤6                   | Abort refinement |
 
 The multi-agent fixtures (`multiagent_v1_min`, `multiagent_v2_min`) are
 **SYNTHETIC** — there is NO `multi_agent_*` usage in the real `~/.codex` logs on

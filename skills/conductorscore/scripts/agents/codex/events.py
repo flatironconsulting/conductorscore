@@ -133,6 +133,29 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
 # parse ONLY this boolean signal transiently — the raw output is never stored.
 _EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
 
+# A Codex tool call the user interrupted/killed mid-run reports an abort in its
+# output (e.g. "aborted by user after 11399.5s"). We parse ONLY this boolean
+# signal transiently — the raw output is never stored.
+_ABORTED_RE = re.compile(r"aborted by user", re.IGNORECASE)
+
+
+def _output_is_aborted(output: object) -> bool:
+    """True when a Codex tool output indicates a user-aborted/interrupted call.
+
+    A hung command the user kills (or a turn the user aborts mid-tool) yields an
+    "aborted by user …" output. Only a boolean crosses out of here — never the
+    raw output text. Used to exclude the call→result interval from tool-runtime
+    crediting so a hung-then-killed command doesn't count as active runtime.
+    """
+    text = output if isinstance(output, str) else None
+    if text is None and isinstance(output, dict):
+        inner = output.get("output")
+        text = inner if isinstance(inner, str) else None
+    if not text:
+        return False
+    return bool(_ABORTED_RE.search(text))
+
+
 def _output_is_error(output: object) -> bool:
     """True when a Codex tool output indicates a failed call.
 
@@ -559,6 +582,9 @@ def _read(
                         # Non-zero shell/exec exit code → tool error (feeds
                         # tool_error_count). Boolean only; output not stored.
                         is_error=_output_is_error(payload.get("output")),
+                        # User aborted/killed the call mid-run → exclude its
+                        # call→result span from tool-runtime crediting.
+                        is_aborted=_output_is_aborted(payload.get("output")),
                     )
                 )
                 continue

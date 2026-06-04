@@ -258,6 +258,8 @@ def _tool_runtime_intervals(
     A gap inside any returned interval is real tool runtime and is credited
     in full — even when reasoning / token-count rows interleave (Codex) — so
     long ``exec_command``/MCP-wait calls are not capped at K_TURN_SECONDS.
+    Aborted/interrupted calls (``TOOL_RESULT.is_aborted``) are excluded: a hung
+    command the user killed is not runtime, so its gap stays capped as idle.
     """
     calls: dict[str, int] = {}
     intervals: list[tuple[int, int]] = []
@@ -268,7 +270,10 @@ def _tool_runtime_intervals(
             calls[ev.tool_use_id] = ev.timestamp_ms
         elif ev.kind == EventKind.TOOL_RESULT and ev.tool_use_id in calls:
             c = calls.pop(ev.tool_use_id)
-            if ev.timestamp_ms > c:
+            # An aborted/interrupted call (a hung command the user killed) is
+            # NOT real runtime — drop its interval so the gap reverts to the
+            # K_TURN_SECONDS idle cap instead of crediting the full hang.
+            if ev.timestamp_ms > c and not getattr(ev, "is_aborted", False):
                 intervals.append((c, ev.timestamp_ms))
     return intervals
 

@@ -40,6 +40,24 @@ def test_unbracketed_long_gap_still_capped_as_idle():
     assert agg.afk_minutes <= 6
 
 
+def test_aborted_tool_call_not_credited_as_runtime():
+    # Same shape as the full-credit interleave test, but the 12-min call was
+    # ABORTED by the user → its interval is dropped, so the gap reverts to the
+    # K_TURN_SECONDS cap (not credited as 12 min of tool runtime).
+    evs = [
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
+        Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
+              tool_name="exec_command", tool_use_id="t1"),
+        Event(kind=EventKind.TOOL_RESULT, session_id="s", timestamp_ms=721_000,
+              tool_use_id="t1", is_aborted=True),
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+              timestamp_ms=722_000, stop_reason="end_turn"),
+    ]
+    agg = compute_turn_aggregates(evs)
+    assert agg.afk_tool_minutes == 0
+    assert agg.afk_minutes <= 6
+
+
 def test_multi_agent_spans_only_track_explicit_ids():
     evs = [
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=10,
