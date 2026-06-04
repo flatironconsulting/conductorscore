@@ -77,9 +77,11 @@ on this branch is 12 (already at goal). `afk_tool_minutes` (the dedicated field)
 still arrives later — `test_interleaved_tool_min_tool` remains `xfail` because
 that field does not yet exist on `PerSession`.
 
-Remaining `xfail`s (expected, strict):
-- `test_interleaved_tool_min_tool` — `afk_tool_minutes >= 11`: the
-  `afk_tool_minutes` field is not yet on `PerSession` (added in Task 5).
+Remaining `xfail`s: **none** — all accuracy goals achieved.
+
+- `test_interleaved_tool_min_tool` — **ACHIEVED in Task 5**. `hitl_tool_minutes`
+  and `afk_tool_minutes` are now fields on `PerSession`, populated from
+  `TurnAggregates` and serialized to the wire. `afk_tool_minutes >= 11` passes.
 
 `test_multiagent_v2_min` — **ACHIEVED in Task 2**. Matching is now
 version-agnostic via `multi_agent_action()` (v1+v2), so both

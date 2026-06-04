@@ -993,3 +993,12 @@ def test_unknown_codex_event_type_not_uploaded(codex_home):
     assert any(s.provider == "codex" for s in out.sessions)
     # The unknown-type marker NEVER crosses the wire.
     _assert_secret_absent(payload, unknown_marker, where="unknown codex event")
+
+
+def test_tool_minutes_present_in_wire(codex_home):
+    out = extract(device_id="dev-1", client_version="0.1.0",
+                  now_ms=_now_ms(), consent_decision=_codex_consent())
+    payload = json.loads(out.to_json())
+    if payload["sessions"]:
+        assert "afk_tool_minutes" in payload["sessions"][0]
+        assert "hitl_tool_minutes" in payload["sessions"][0]

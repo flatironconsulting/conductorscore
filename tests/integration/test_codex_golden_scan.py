@@ -51,7 +51,6 @@ def test_interleaved_tool_min_afk(codex_home):
     assert s.afk_minutes >= 12
 
 
-@pytest.mark.xfail(reason="afk_tool_minutes threaded to PerSession in Task 5", strict=True)
 def test_interleaved_tool_min_tool(codex_home):
     s = _scan(codex_home, "interleaved_tool_min")
     assert s.afk_tool_minutes >= 11
