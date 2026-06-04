@@ -78,6 +78,7 @@ class Turn:
     end_ts_ms: int
     end_reason: str  # 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'
     active_seconds: float = 0.0  # engaged time within the turn
+    tool_seconds: float = 0.0  # active seconds attributable to tool runtime
     label: str = ""  # 'HITL' | 'AFK', filled after classification
 
     @property
@@ -195,15 +196,13 @@ def segment_turns(events: list[Event]) -> list[Turn]:
 def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None:
     """Populate ``turn.active_seconds`` for each turn in place.
 
-    Within a turn ``[start, end]``, sum consecutive-event gaps. Each
-    gap longer than ``K_TURN_SECONDS`` (5 min) is treated as Idle and
-    excluded entirely — not clipped. Rationale: legitimate tool calls
-    (long bash, big file read) take seconds-to-minutes; > 5 min without
-    a single event in a session means nothing was happening, regardless
-    of how long the turn formally remained open. This is what stops a
-    session you left open overnight from counting an entire 18-hour
-    idle gap (or even the streak-bridge 30 min of it) as autonomous
-    work.
+    Within a turn ``[start, end]``, sum consecutive-event gaps.
+    A gap longer than ``K_TURN_SECONDS`` (5 min) is clipped — the first
+    5 min count as active, the rest is Idle. A gap fully contained in a
+    paired tool-call interval (``_tool_runtime_intervals``) is credited
+    in full (real tool runtime). This is what stops a session you left
+    open overnight from counting an entire 18-hour idle gap (or even the
+    streak-bridge 30 min of it) as autonomous work.
     """
     if not turns or not main_events:
         return
@@ -215,47 +214,67 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
         while i < n and main_events[i].timestamp_ms < t.start_ts_ms:
             i += 1
         # Collect event timestamps inside [start, end], plus implicit
-        # boundaries at start and end so we can sum gap-by-gap.
-        boundaries: list[tuple[int, Event | None]] = [(t.start_ts_ms, None)]
+        # boundary_ts at start and end so we can sum gap-by-gap.
+        boundary_ts: list[int] = [t.start_ts_ms]
         j = i
         while j < n and main_events[j].timestamp_ms <= t.end_ts_ms:
             ts = main_events[j].timestamp_ms
-            if ts != boundaries[-1][0]:
-                boundaries.append((ts, main_events[j]))
+            if ts != boundary_ts[-1]:
+                boundary_ts.append(ts)
             j += 1
-        if boundaries[-1][0] != t.end_ts_ms:
-            boundaries.append((t.end_ts_ms, None))
-        # Sum gaps; each gap is clipped at K_TURN_SECONDS (5 min). A
-        # legitimate long-running tool call (a Bash that takes 8 min)
-        # contributes its first 5 min as active; the rest is treated as
-        # Idle. Overnight gaps of any length cap at 5 min — so a session
-        # left open for 18 hours contributes at most 5 min per gap, not
-        # 18 hours.
+        if boundary_ts[-1] != t.end_ts_ms:
+            boundary_ts.append(t.end_ts_ms)
+
+        # A gap fully CONTAINED in a tool-call interval (call_ts→result_ts,
+        # paired by tool_use_id) is real tool runtime and is credited in
+        # full — even when reasoning / assistant rows interleave between the
+        # call and its result. Every other gap is clipped at K_TURN_SECONDS
+        # (5 min): a long-running tool call's first 5 min count, the rest is
+        # Idle; overnight / walk-away gaps cap at 5 min per gap, so a session
+        # left open for 18 hours contributes at most 5 min per gap.
+        intervals = _tool_runtime_intervals(main_events, t.start_ts_ms, t.end_ts_ms)
         active = 0.0
-        for k in range(len(boundaries) - 1):
-            gap_s = (boundaries[k + 1][0] - boundaries[k][0]) / 1000.0
-            if gap_s > 0:
-                if _is_tool_runtime_gap(boundaries[k][1], boundaries[k + 1][1]):
-                    active += gap_s
-                else:
-                    active += min(gap_s, K_TURN_SECONDS)
+        tool_active = 0.0
+        for k in range(len(boundary_ts) - 1):
+            lo, hi = boundary_ts[k], boundary_ts[k + 1]
+            gap_s = (hi - lo) / 1000.0
+            if gap_s <= 0:
+                continue
+            if _within_any_interval(lo, hi, intervals):
+                active += gap_s
+                tool_active += gap_s
+            else:
+                active += min(gap_s, K_TURN_SECONDS)
         t.active_seconds = active
+        t.tool_seconds = tool_active
 
 
-def _is_tool_runtime_gap(prev: Event | None, nxt: Event | None) -> bool:
-    """True when a gap is a single tool call running until its result.
+def _tool_runtime_intervals(
+    main_events: list[Event], start_ms: int, end_ms: int
+) -> list[tuple[int, int]]:
+    """``[(call_ts, result_ts)]`` for tool calls bracketed within the turn.
 
-    Codex can have long-running ``exec_command`` / MCP waits with no
-    intermediate transcript rows. Treating those gaps as idle caps real agent
-    work at five minutes and undercounts longest-run / AFK time.
+    Pairs ASSISTANT_TOOL with its matching TOOL_RESULT by ``tool_use_id``.
+    A gap inside any returned interval is real tool runtime and is credited
+    in full — even when reasoning / token-count rows interleave (Codex) — so
+    long ``exec_command``/MCP-wait calls are not capped at K_TURN_SECONDS.
     """
-    if prev is None or nxt is None:
-        return False
-    if prev.kind != EventKind.ASSISTANT_TOOL or nxt.kind != EventKind.TOOL_RESULT:
-        return False
-    if not prev.tool_use_id or not nxt.tool_use_id:
-        return False
-    return prev.tool_use_id == nxt.tool_use_id
+    calls: dict[str, int] = {}
+    intervals: list[tuple[int, int]] = []
+    for ev in main_events:
+        if ev.timestamp_ms < start_ms or ev.timestamp_ms > end_ms:
+            continue
+        if ev.kind == EventKind.ASSISTANT_TOOL and ev.tool_use_id:
+            calls[ev.tool_use_id] = ev.timestamp_ms
+        elif ev.kind == EventKind.TOOL_RESULT and ev.tool_use_id in calls:
+            c = calls.pop(ev.tool_use_id)
+            if ev.timestamp_ms > c:
+                intervals.append((c, ev.timestamp_ms))
+    return intervals
+
+
+def _within_any_interval(lo: int, hi: int, intervals: list[tuple[int, int]]) -> bool:
+    return any(s <= lo and hi <= e for (s, e) in intervals)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +548,8 @@ class TurnAggregates:
 
     hitl_minutes: int
     afk_minutes: int
+    hitl_tool_minutes: int  # of hitl/afk active minutes, the portion inside tool-call runtime
+    afk_tool_minutes: int  # of hitl/afk active minutes, the portion inside tool-call runtime
     afk_parallel_minutes_foreground: int
     afk_max_streak_minutes: int
     turns: tuple[Turn, ...]
@@ -554,6 +575,8 @@ def compute_turn_aggregates(
     turns = segment_turns(events)
     hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
     afk_s = sum(t.active_seconds for t in turns if t.label == "AFK")
+    hitl_tool_s = sum(t.tool_seconds for t in turns if t.label == "HITL")
+    afk_tool_s = sum(t.tool_seconds for t in turns if t.label == "AFK")
     extra_spans = subagent_spans_from_disk(jsonl_path) if jsonl_path else None
     parallel_s = afk_parallel_subagent_seconds(turns, events, extra_spans)
     streaks = top_afk_streaks(turns, n=5)
@@ -561,6 +584,8 @@ def compute_turn_aggregates(
     return TurnAggregates(
         hitl_minutes=round(hitl_s / 60),
         afk_minutes=round(afk_s / 60),
+        hitl_tool_minutes=round(hitl_tool_s / 60),
+        afk_tool_minutes=round(afk_tool_s / 60),
         afk_parallel_minutes_foreground=round(parallel_s / 60),
         afk_max_streak_minutes=round(streak_s / 60),
         turns=tuple(turns),
