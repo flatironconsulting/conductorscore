@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.11"
+    assert out.device.schema_version == "0.12"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -255,6 +255,7 @@ def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
         "hooks",
         "custom_commands",
         "global_claude_md_lines",
+        "global_agents_md_lines",
         "project_claude_md_lines_avg",
         "plugin_count",
     }
@@ -1509,3 +1510,11 @@ def test_extract_v0_6_assistant_msgs_unknown_model_omitted(
     )
     s = out.sessions[0]
     assert s.assistant_msgs_by_model == {}
+
+
+def test_merge_config_counts_sums_global_agents_md_lines():
+    from scripts.scanner import _merge_config_counts
+    from scripts.output_schema import ConfigCounts
+    a = ConfigCounts(global_agents_md_lines=4)
+    b = ConfigCounts(global_agents_md_lines=6)
+    assert _merge_config_counts(a, b).global_agents_md_lines == 10

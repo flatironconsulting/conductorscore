@@ -23,6 +23,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.9 | Turn-rule classifier — replaces v0.3 minute rule | `sessions[].{hitl_minutes, afk_minutes, idle_minutes, afk_parallel_minutes_foreground, afk_max_streak_minutes, afk_intervals}` now derived from **turn segmentation** (turn ≤ 5 min → HITL, else AFK), matching the megarun renderer. Field shapes unchanged; semantics shift. |
 | 0.10 | "Longest agent run" L4 table | `sessions[].top_afk_streaks` (top-5 AFK streaks per session, descending by `active_minutes`) |
 | 0.11 | Customization "Top by invocations" table | `sessions[].{skill_invocations_by_name, mcp_invocations_by_name, plugin_invocations_by_name}` — per-name invocation maps. MCP and plugin keys are **raw names in plaintext**. |
+| 0.12 | Codex AGENTS.md line-count split | `config.global_agents_md_lines` — AGENTS.md lines tracked separately; `global_claude_md_lines` is now CLAUDE.md-only. |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
@@ -442,7 +443,8 @@ now populated:
 
 | Field                          | Type    | Nullable | Notes                                                                                  |
 |--------------------------------|---------|----------|----------------------------------------------------------------------------------------|
-| `global_claude_md_lines`       | integer | no       | Number of newline-separated lines in `<home>/.claude/CLAUDE.md`. `0` if file missing/unreadable. Trailing newlines are NOT counted as a phantom extra line. |
+| `global_claude_md_lines`       | integer | no       | Number of newline-separated lines in `<home>/.claude/CLAUDE.md`. `0` if file missing/unreadable. Trailing newlines are NOT counted as a phantom extra line. From v0.12, this field is CLAUDE.md-only; Codex AGENTS.md lines moved to `global_agents_md_lines`. |
+| `global_agents_md_lines`       | integer | no       | Number of newline-separated lines in the Codex instruction file `<codex_home>/AGENTS.md`. `0` if missing/unreadable. Trailing newlines are NOT counted as a phantom extra line. **(v0.12)** Before v0.12 these lines were folded into `global_claude_md_lines`; from v0.12 `global_claude_md_lines` is CLAUDE.md-only and AGENTS.md has its own field so the profile can show per-file counts. Both still sum into instruction-bloat scoring. |
 | `project_claude_md_lines_avg`  | integer | no       | Integer floor of the average line count of `<root>/CLAUDE.md` across distinct `project_root`s observed in the current 30-day session window. Roots without a `CLAUDE.md` are excluded from both numerator and denominator. `0` if no roots have a `CLAUDE.md`. |
 
 ### `sessions[]` — PerSession (v0.5 additions)
@@ -524,6 +526,7 @@ only counts / booleans / hashed grouping keys:
 {
   "config": {
     "custom_commands": 2,
+    "global_agents_md_lines": 58,
     "global_claude_md_lines": 142,
     "hooks": 3,
     "mcp_servers": 4,
@@ -638,6 +641,7 @@ following are added:
 {
   "config": {
     "custom_commands": 2,
+    "global_agents_md_lines": 58,
     "global_claude_md_lines": 142,
     "hooks": 3,
     "mcp_servers": 4,
@@ -881,3 +885,45 @@ ids.
   defaults.
 - `provider` values are a CLOSED enum (`"claude"`, `"codex"`). Unknown
   provider strings indicate a drift the server hasn't acknowledged.
+
+## Schema v0.12 — Codex AGENTS.md line-count split
+
+Released with Codex AGENTS.md line-count tracking (Slice 2 follow-up).
+Adds one new `config` field (`global_agents_md_lines`) and narrows the
+semantics of the existing `global_claude_md_lines` field. The per-session
+shape is unchanged.
+
+### `config` — ConfigCounts (v0.12 changes)
+
+| Field                     | Type    | Nullable | Notes                                                                                                                                                                                                                                                                                                 |
+|---------------------------|---------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `global_agents_md_lines`  | integer | no       | Number of newline-separated lines in the Codex instruction file `<codex_home>/AGENTS.md`. `0` if missing/unreadable. Trailing newlines are NOT counted as a phantom extra line. **(v0.12)** Before v0.12 these lines were folded into `global_claude_md_lines`; from v0.12 `global_claude_md_lines` is CLAUDE.md-only and AGENTS.md has its own field so the profile can show per-file counts. Both still sum into instruction-bloat scoring. |
+| `global_claude_md_lines`  | integer | no       | **Semantics narrowed from v0.12.** Now counts lines in `<home>/.claude/CLAUDE.md` only (was previously the sum of CLAUDE.md + AGENTS.md on Codex-enabled devices). `0` if file missing/unreadable. Shape and defaults unchanged. |
+
+### Example `config` block
+
+```json
+{
+  "config": {
+    "custom_commands": 2,
+    "global_agents_md_lines": 58,
+    "global_claude_md_lines": 142,
+    "hooks": 3,
+    "mcp_servers": 4,
+    "plugin_count": 0,
+    "project_claude_md_lines_avg": 87
+  }
+}
+```
+
+### Compatibility
+
+- The server SHOULD accept `schema_version` of `"0.11"` or `"0.12"`
+  during the deprecation window.
+- `global_agents_md_lines` defaults to `0`. The server MUST treat absence
+  and `0` identically — a `"0.11"` envelope has no `global_agents_md_lines`
+  key; the server should treat it as `0`.
+- On a `"0.11"` envelope from a device that had Codex installed, the
+  `global_claude_md_lines` value may include AGENTS.md lines (pre-split
+  behaviour). The server SHOULD NOT attempt to retroactively split those
+  counts; they are used as-is for instruction-bloat scoring.

@@ -44,3 +44,9 @@ def test_afk_streak_wire_already_minute_aligned_is_unchanged():
     )
     assert st.start_ts_ms == aligned
     assert st.end_ts_ms == aligned
+
+
+def test_config_counts_has_global_agents_md_lines_default_zero():
+    from scripts.output_schema import ConfigCounts
+    cc = ConfigCounts()
+    assert cc.global_agents_md_lines == 0
