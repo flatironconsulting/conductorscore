@@ -25,7 +25,10 @@ def test_long_tool_call_credited_in_full_despite_interleaving():
     assert agg.afk_tool_minutes >= 11
 
 
-def test_unbracketed_long_gap_still_capped_as_idle():
+def test_unbracketed_long_gap_excluded_entirely_as_idle():
+    # A +1h UNBRACKETED (non-tool) gap is Idle and contributes NOTHING — it is
+    # excluded entirely, not clipped to 5 min. So the turn's active time is just
+    # the 1s tool span → HITL, and there are zero AFK minutes.
     evs = [
         Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
@@ -37,13 +40,14 @@ def test_unbracketed_long_gap_still_capped_as_idle():
     ]
     agg = compute_turn_aggregates(evs)
     assert agg.afk_tool_minutes == 0
-    assert agg.afk_minutes <= 6
+    assert agg.afk_minutes == 0  # long non-tool gap excluded entirely
 
 
 def test_aborted_tool_call_not_credited_as_runtime():
     # Same shape as the full-credit interleave test, but the 12-min call was
-    # ABORTED by the user → its interval is dropped, so the gap reverts to the
-    # K_TURN_SECONDS cap (not credited as 12 min of tool runtime).
+    # ABORTED by the user → its interval is dropped, so the gap is a non-tool
+    # gap > 5 min and is EXCLUDED entirely as Idle (not credited as runtime,
+    # not clipped to 5 min) → zero AFK minutes.
     evs = [
         Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
@@ -55,12 +59,13 @@ def test_aborted_tool_call_not_credited_as_runtime():
     ]
     agg = compute_turn_aggregates(evs)
     assert agg.afk_tool_minutes == 0
-    assert agg.afk_minutes <= 6
+    assert agg.afk_minutes == 0  # aborted gap excluded entirely as idle
 
 
 def test_interrupted_claude_tool_call_not_credited_as_runtime():
     # Claude flags a user-interrupted tool via is_denied (not is_aborted). A
-    # 12-min Bash the user interrupted must likewise be excluded from runtime.
+    # 12-min Bash the user interrupted is excluded from runtime, leaving a
+    # non-tool gap > 5 min that is EXCLUDED entirely as Idle → zero AFK minutes.
     evs = [
         Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
@@ -72,7 +77,29 @@ def test_interrupted_claude_tool_call_not_credited_as_runtime():
     ]
     agg = compute_turn_aggregates(evs)
     assert agg.afk_tool_minutes == 0
-    assert agg.afk_minutes <= 6
+    assert agg.afk_minutes == 0  # interrupted gap excluded entirely as idle
+
+
+def test_long_nontool_gap_excluded_entirely():
+    # Pins the session-viewer MECE rule directly: a single non-tool gap > 5 min
+    # between two events in one turn contributes NOTHING (excluded as Idle),
+    # whereas a ≤ 5 min gap is credited as engaged work.
+    def _turn_with_gap(gap_ms):
+        return [
+            Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
+            Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+                  timestamp_ms=gap_ms, stop_reason="end_turn"),
+        ]
+
+    # ~12-min non-tool gap → excluded entirely → zero engaged minutes.
+    excluded = compute_turn_aggregates(_turn_with_gap(12 * 60_000))
+    assert excluded.afk_minutes == 0
+    assert excluded.hitl_minutes == 0
+
+    # ~4-min non-tool gap → credited as engaged work (HITL, since ≤ 5 min).
+    credited = compute_turn_aggregates(_turn_with_gap(4 * 60_000))
+    assert credited.afk_minutes == 0
+    assert credited.hitl_minutes == 4
 
 
 def test_multi_agent_spans_only_track_explicit_ids():

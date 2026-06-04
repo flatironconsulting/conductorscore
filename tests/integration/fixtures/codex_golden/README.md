@@ -20,9 +20,9 @@ the REAL in-process scanner (`scripts.scanner.extract`) over each fixture.
 | interleaved_tool_min      | `afk_minutes` (12-min call)         | ≈5 (capped)               | ≥12                  | Task 4 |
 | interleaved_tool_min      | `afk_tool_minutes`                  | n/a (field absent)        | ≥11                  | Task 4/5 |
 | walked_away_min (guard)   | `afk_tool_minutes`                  | 0                         | 0 (must stay)        | Task 4 |
-| walked_away_min (guard)   | `afk_minutes` (1-h idle gap)        | ≤6                        | ≤6 (must stay)       | Task 4 |
+| walked_away_min (guard)   | `afk_minutes` (1-h idle gap)        | ≤6                        | ≤6 (must stay) — now **0** (long non-tool gap excluded entirely, MECE port) | Task 4 / MECE |
 | aborted_exec_min          | `afk_tool_minutes` (12-min aborted) | ~12 (wrongly credited)    | 0                    | Abort refinement |
-| aborted_exec_min          | `afk_minutes`                       | ~12 (inflated)            | ≤6                   | Abort refinement |
+| aborted_exec_min          | `afk_minutes`                       | ~12 (inflated)            | ≤6 — now **0** (aborted → non-tool gap > 5 min excluded entirely, MECE port) | Abort refinement / MECE |
 
 The multi-agent fixtures (`multiagent_v1_min`, `multiagent_v2_min`) are
 **SYNTHETIC** — there is NO `multi_agent_*` usage in the real `~/.codex` logs on
@@ -56,7 +56,7 @@ tests/integration/test_codex_golden_scan.py::test_walked_away_guard PASSED
 | Fixture               | `afk_minutes` | `agent_dispatches` | `distinct_skills`            | `user_skill_invocations` | `afk_tool_minutes` |
 |-----------------------|---------------|--------------------|------------------------------|--------------------------|--------------------|
 | interleaved_tool_min  | **12**        | 0                  | `()`                         | 0                        | (field ABSENT)     |
-| walked_away_min       | 5             | 0                  | `()`                         | 0                        | (field ABSENT → 0) |
+| walked_away_min       | 5 → **0** (MECE) | 0               | `()`                         | 0                        | (field ABSENT → 0) |
 | skills_min            | 0             | 0                  | `("report-quality-review",)` | 1                        | (field ABSENT)     |
 | multiagent_v1_min     | 6             | 1                  | `()`                         | 0                        | (field ABSENT)     |
 | multiagent_v2_min     | 0             | 0                  | `()`                         | 0                        | (field ABSENT)     |
@@ -134,5 +134,6 @@ closing assistant message / `task_complete`.
 - `multiagent_v2_min.jsonl` (SYNTHETIC) — `multi_agent_v2__spawn_agent` (not yet
   matched on the current branch).
 - `walked_away_min.jsonl` — a quick `exec_command` + output, then a 1-hour idle
-  gap before the closing assistant message (the intra-turn idle is excluded, so
-  `afk_minutes` stays low).
+  gap before the closing assistant message. The 1-h non-tool gap is > 5 min, so
+  under the session-viewer MECE model it is EXCLUDED entirely (not clipped to
+  5 min): `afk_minutes` is 0.

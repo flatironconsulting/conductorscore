@@ -1440,7 +1440,10 @@ def test_extract_v0_6_hitl_mcp_invocations_populated(isolated_claude_home):
                     "content": [{"type": "text", "text": "done"}],
                 },
             },
-            # Turn 2 (AFK): 10 min wallclock — second MCP must NOT count.
+            # Turn 2 (AFK): a ~10-min PAIRED MCP tool call (id-matched
+            # tool_result) is real tool runtime credited in full, so the
+            # turn's active time exceeds K_TURN_SECONDS → AFK → its MCP must
+            # NOT count as a HITL invocation.
             {
                 "type": "user",
                 "timestamp": _iso(base_ms + 30 * 60_000),
@@ -1455,6 +1458,7 @@ def test_extract_v0_6_hitl_mcp_invocations_populated(isolated_claude_home):
                     "content": [
                         {
                             "type": "tool_use",
+                            "id": "tu_afk",
                             "name": "mcp__github__add_comment",
                             "input": {"body": "hi"},
                         }
@@ -1462,8 +1466,22 @@ def test_extract_v0_6_hitl_mcp_invocations_populated(isolated_claude_home):
                 },
             },
             {
-                "type": "assistant",
+                "type": "user",
                 "timestamp": _iso(base_ms + 40 * 60_000),
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_afk",
+                            "content": "ok",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": _iso(base_ms + 40 * 60_000 + 1000),
                 "message": {
                     "role": "assistant",
                     "stop_reason": "end_turn",

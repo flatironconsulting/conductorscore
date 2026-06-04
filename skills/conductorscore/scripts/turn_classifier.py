@@ -49,7 +49,7 @@ class MinuteBucket(str, Enum):
 K_TURN_SECONDS = 300
 
 # Idle longer than this between same-label turns splits the streak.
-K_BRIDGE_IDLE_SECONDS = 1800  # 30 min
+K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AFK streak
 
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.
@@ -65,9 +65,9 @@ class Turn:
     """A turn between two human handoff points.
 
     ``duration_s`` is the wallclock span (start → end). ``active_seconds``
-    is the *engaged* time within the turn — gaps > K_BRIDGE_IDLE_SECONDS
-    between consecutive main-thread events count as Idle and are
-    excluded. The label (HITL vs AFK) and all leverage math use
+    is the *engaged* time within the turn — non-tool gaps > K_TURN_SECONDS
+    (5 min) between consecutive main-thread events are excluded entirely
+    (Idle), not clipped. The label (HITL vs AFK) and all leverage math use
     ``active_seconds``; ``duration_s`` is informational only.
 
     This is what stops "user opened Claude, walked away overnight, came
@@ -197,12 +197,12 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
     """Populate ``turn.active_seconds`` for each turn in place.
 
     Within a turn ``[start, end]``, sum consecutive-event gaps.
-    A gap longer than ``K_TURN_SECONDS`` (5 min) is clipped — the first
-    5 min count as active, the rest is Idle. A gap fully contained in a
-    paired tool-call interval (``_tool_runtime_intervals``) is credited
-    in full (real tool runtime). This is what stops a session you left
-    open overnight from counting an entire 18-hour idle gap (or even the
-    streak-bridge 30 min of it) as autonomous work.
+    A non-tool gap > ``K_TURN_SECONDS`` (5 min) is excluded entirely
+    (Idle), not clipped — a hung/walk-away gap contributes NOTHING, not
+    "5 min of work". A gap fully contained in a paired tool-call interval
+    (``_tool_runtime_intervals``) is credited in full (real tool runtime).
+    This is what stops a session you left open overnight from counting an
+    entire 18-hour idle gap as autonomous work.
     """
     if not turns or not main_events:
         return
@@ -228,10 +228,10 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
         # A gap fully CONTAINED in a tool-call interval (call_ts→result_ts,
         # paired by tool_use_id) is real tool runtime and is credited in
         # full — even when reasoning / assistant rows interleave between the
-        # call and its result. Every other gap is clipped at K_TURN_SECONDS
-        # (5 min): a long-running tool call's first 5 min count, the rest is
-        # Idle; overnight / walk-away gaps cap at 5 min per gap, so a session
-        # left open for 18 hours contributes at most 5 min per gap.
+        # call and its result. Every other (non-tool) gap > K_TURN_SECONDS
+        # (5 min) is EXCLUDED entirely as Idle: a long non-tool gap is a
+        # hung/walk-away gap, not work, so a session left open for 18 hours
+        # contributes nothing for that gap.
         intervals = _tool_runtime_intervals(main_events, t.start_ts_ms, t.end_ts_ms)
         active = 0.0
         tool_active = 0.0
@@ -244,7 +244,11 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
                 active += gap_s
                 tool_active += gap_s
             else:
-                active += min(gap_s, K_TURN_SECONDS)
+                # A non-tool gap ≤ 5 min is engaged work; a longer gap is Idle
+                # and contributes NOTHING (a hung/walk-away gap is not "5 min of
+                # work"). Tool runtime is credited in full above. Matches the
+                # session-viewer MECE model.
+                active += gap_s if gap_s <= K_TURN_SECONDS else 0.0
         t.active_seconds = active
         t.tool_seconds = tool_active
 
@@ -467,7 +471,7 @@ def afk_parallel_subagent_seconds(
 
 @dataclass(frozen=True)
 class AfkStreak:
-    """A contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS idle.
+    """A contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS (5 min) idle.
 
     ``active_seconds`` is the sum of ``turn.active_seconds`` across the
     streak — what the dashboard's "Longest agent run" L4 surfaces.
@@ -482,7 +486,7 @@ class AfkStreak:
 
 
 def afk_streaks(turns: list[Turn]) -> list[AfkStreak]:
-    """Group consecutive AFK turns into streaks (bridged by ≤ 30 min idle).
+    """Group consecutive AFK turns into streaks (bridged by ≤ 5 min idle).
 
     Sums ``turn.active_seconds`` across each streak — idle stretches
     inside an open turn are already excluded by ``segment_turns``.
@@ -572,8 +576,8 @@ def compute_turn_aggregates(
     """Compute the live card's leverage inputs.
 
     HITL/AFK minute counts and the longest-streak number are derived
-    from per-turn ``active_seconds`` (intra-turn idle > 30 min is
-    excluded), so a session left open overnight doesn't inflate the
+    from per-turn ``active_seconds`` (intra-turn non-tool idle > 5 min is
+    excluded entirely), so a session left open overnight doesn't inflate the
     "longest agent run". ``top_afk_streaks`` carries the L4 top-N
     table's per-streak rows.
 
