@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-SCHEMA_VERSION = "0.11"
+SCHEMA_VERSION = "0.12"
 # Client build version — kept in sync with ``version`` in pyproject.toml (see
 # RELEASING.md step 1). Distinct from SCHEMA_VERSION, which only moves when the
 # wire shape changes. Lives here (a shipped module) so scan.py can stamp the
