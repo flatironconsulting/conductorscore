@@ -258,8 +258,9 @@ def _tool_runtime_intervals(
     A gap inside any returned interval is real tool runtime and is credited
     in full — even when reasoning / token-count rows interleave (Codex) — so
     long ``exec_command``/MCP-wait calls are not capped at K_TURN_SECONDS.
-    Aborted/interrupted calls (``TOOL_RESULT.is_aborted``) are excluded: a hung
-    command the user killed is not runtime, so its gap stays capped as idle.
+    Aborted/interrupted calls are excluded (``TOOL_RESULT.is_aborted`` for Codex
+    "aborted by user", ``is_denied`` for a Claude user-interrupt mid-tool): a
+    hung command the user killed is not runtime, so its gap stays capped as idle.
     """
     calls: dict[str, int] = {}
     intervals: list[tuple[int, int]] = []
@@ -270,10 +271,13 @@ def _tool_runtime_intervals(
             calls[ev.tool_use_id] = ev.timestamp_ms
         elif ev.kind == EventKind.TOOL_RESULT and ev.tool_use_id in calls:
             c = calls.pop(ev.tool_use_id)
-            # An aborted/interrupted call (a hung command the user killed) is
-            # NOT real runtime — drop its interval so the gap reverts to the
-            # K_TURN_SECONDS idle cap instead of crediting the full hang.
-            if ev.timestamp_ms > c and not getattr(ev, "is_aborted", False):
+            # A call the user aborted/interrupted mid-run is NOT real runtime —
+            # drop its interval so the gap reverts to the K_TURN_SECONDS idle
+            # cap instead of crediting the full hang. ``is_aborted`` is the
+            # Codex signal ("aborted by user after Ns"); ``is_denied`` is the
+            # Claude signal (user interrupt mid-tool). Either excludes it.
+            aborted = getattr(ev, "is_aborted", False) or getattr(ev, "is_denied", False)
+            if ev.timestamp_ms > c and not aborted:
                 intervals.append((c, ev.timestamp_ms))
     return intervals
 

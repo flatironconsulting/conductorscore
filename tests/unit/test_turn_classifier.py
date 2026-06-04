@@ -58,6 +58,23 @@ def test_aborted_tool_call_not_credited_as_runtime():
     assert agg.afk_minutes <= 6
 
 
+def test_interrupted_claude_tool_call_not_credited_as_runtime():
+    # Claude flags a user-interrupted tool via is_denied (not is_aborted). A
+    # 12-min Bash the user interrupted must likewise be excluded from runtime.
+    evs = [
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
+        Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=1_000,
+              tool_name="Bash", tool_use_id="t1"),
+        Event(kind=EventKind.TOOL_RESULT, session_id="s", timestamp_ms=721_000,
+              tool_use_id="t1", is_denied=True),
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+              timestamp_ms=722_000, stop_reason="end_turn"),
+    ]
+    agg = compute_turn_aggregates(evs)
+    assert agg.afk_tool_minutes == 0
+    assert agg.afk_minutes <= 6
+
+
 def test_multi_agent_spans_only_track_explicit_ids():
     evs = [
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=10,
