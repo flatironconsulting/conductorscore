@@ -71,6 +71,7 @@ def _merge_config_counts(a: ConfigCounts, b: ConfigCounts) -> ConfigCounts:
         hooks=a.hooks + b.hooks,
         custom_commands=a.custom_commands + b.custom_commands,
         global_claude_md_lines=a.global_claude_md_lines + b.global_claude_md_lines,
+        global_agents_md_lines=a.global_agents_md_lines + b.global_agents_md_lines,
         project_claude_md_lines_avg=a.project_claude_md_lines_avg
         + b.project_claude_md_lines_avg,
         plugin_count=a.plugin_count + b.plugin_count,

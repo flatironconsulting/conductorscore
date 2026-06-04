@@ -1510,3 +1510,11 @@ def test_extract_v0_6_assistant_msgs_unknown_model_omitted(
     )
     s = out.sessions[0]
     assert s.assistant_msgs_by_model == {}
+
+
+def test_merge_config_counts_sums_global_agents_md_lines():
+    from scripts.scanner import _merge_config_counts
+    from scripts.output_schema import ConfigCounts
+    a = ConfigCounts(global_agents_md_lines=4)
+    b = ConfigCounts(global_agents_md_lines=6)
+    assert _merge_config_counts(a, b).global_agents_md_lines == 10
