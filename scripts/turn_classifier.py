@@ -315,8 +315,6 @@ def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
         if not isinstance(targets, list):
             continue
         target_ids = [t for t in targets if isinstance(t, str) and t]
-        if any(t == "all" for t in target_ids):
-            target_ids = list(starts)
         for sid in target_ids:
             if sid in starts:
                 last_seen[sid] = max(last_seen.get(sid, starts[sid]), ev.timestamp_ms)
