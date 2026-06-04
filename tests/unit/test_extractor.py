@@ -255,6 +255,7 @@ def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
         "hooks",
         "custom_commands",
         "global_claude_md_lines",
+        "global_agents_md_lines",
         "project_claude_md_lines_avg",
         "plugin_count",
     }
