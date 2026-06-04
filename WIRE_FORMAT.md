@@ -217,6 +217,8 @@ All v0.1 + v0.2 fields remain unchanged. The following are added:
 | `hitl_minutes`                     | integer           | no       | Minutes in the foreground session window classified as HITL (user-in-the-loop). A user message at minute X marks both X and X+1 as HITL. `0` for Cron-only sessions. |
 | `afk_minutes`                      | integer           | no       | Minutes classified as AFK (foreground agent activity, no recent user msg). `0` for Cron-only sessions.                               |
 | `idle_minutes`                     | integer           | no       | Minutes inside the window with neither HITL nor AFK activity. `0` for Cron-only sessions.                                            |
+| `hitl_tool_minutes`                | integer           | no       | Of `hitl_minutes`, the portion spent inside tool execution (Σ of `tool_use_id`-paired call→result intervals in HITL turns). Display-only: carved out of "Human" in the Leverage table; does NOT change the leverage score. |
+| `afk_tool_minutes`                 | integer           | no       | Of `afk_minutes`, the portion spent inside tool execution. Display-only: carved out of "Agent".                                      |
 | `afk_parallel_minutes_foreground`  | integer           | no       | Sum over AFK minutes of distinct foreground tracks active in `{m-1, m}`. The Task dispatch tool is excluded from track activity so main-waiting-on-subagents contributes 0 (matches outline Example 1 exactly). |
 | `cron_parallel_minutes`            | integer           | no       | Sum over Cron-event minutes of distinct Cron tracks active AT that minute (no 2-minute spread — Cron runs are discrete). Counted even outside the foreground window. |
 | `afk_max_streak_minutes`           | integer           | no       | Length of the longest contiguous run of AFK minutes. Foreground-only by construction (Cron events live outside the foreground window and cannot extend an AFK streak). |
@@ -870,6 +872,14 @@ commands / `apply_patch` file paths are never serialized. The Codex model
 id (e.g. `gpt-5-codex`) is a public categorical and rides plaintext in
 `assistant_msgs_by_model` / `tokens_by_model`, exactly like Anthropic model
 ids.
+
+### Skill-count approximation (Codex)
+
+> **Codex skill counts are approximate.** Codex emits no skill marker, so skill
+> usage is inferred from shell reads of `.agents/skills/<name>/SKILL.md`. Progressive
+> disclosure means a skill may be used without reading its `SKILL.md` (under-count),
+> and a read does not guarantee use (over-count). Do not compare Codex skill counts
+> 1:1 with Claude's directly-observed counts.
 
 ### Compatibility
 
