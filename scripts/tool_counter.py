@@ -75,24 +75,6 @@ _CODEX_AGENT_DISPATCH_TOOLS: frozenset[str] = frozenset(
     {"multi_agent_v1__spawn_agent"}
 )
 
-# Codex has no Claude-style ``<command-name>`` skill marker. The most stable
-# local signal that a skill was actually loaded is a shell read of
-# ``.../skills/<name>/SKILL.md``. We emit only the skill directory name, after
-# rejecting globs / variable placeholders.
-CODEX_SKILL_MD_RE = re.compile(
-    r"(?:^|[\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md"
-)
-_SAFE_CODEX_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
-
-
-def _codex_skill_names_from_command(cmd: str) -> list[str]:
-    names: list[str] = []
-    for m in CODEX_SKILL_MD_RE.finditer(cmd):
-        name = m.group(1)
-        if _SAFE_CODEX_SKILL_NAME_RE.match(name):
-            names.append(name)
-    return names
-
 
 @dataclass(frozen=True)
 class ToolCounts:
@@ -355,7 +337,7 @@ def count_codex_tools(events) -> ToolCounts:
     multi-agent MCP connector's ``spawn_agent`` call is counted as a subagent
     dispatch.
     """
-    from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES
+    from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES, skill_names_from_shell_command
     from scripts.core.normalized import EventKind
 
     mcp: set[str] = set()
@@ -380,7 +362,7 @@ def count_codex_tools(events) -> ToolCounts:
             if isinstance(raw, dict):
                 cmd = raw.get("command")
                 if isinstance(cmd, str):
-                    for skill_name in _codex_skill_names_from_command(cmd):
+                    for skill_name in skill_names_from_shell_command(cmd):
                         skills.add(skill_name)
                         skill_invocations += 1
                         skills_by_name[skill_name] = (

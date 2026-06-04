@@ -138,6 +138,40 @@ def normalize_shell_command(arguments: object) -> str | None:
         return " ".join(parts)
     return None
 
+# ---------------------------------------------------------------------------
+# Codex skill-name extraction from SKILL.md shell reads.
+# ---------------------------------------------------------------------------
+#
+# Codex has no ``<command-name>`` skill marker. The most stable structural
+# signal that a skill was loaded is a shell read of
+# ``.../skills/<name>/SKILL.md`` (canonical: ``.agents/skills/...``). The
+# flexible prefix matches ``.agents/``, ``.codex/``, plugin caches, etc.
+# Globs / shell vars are rejected via ``_SAFE_CODEX_SKILL_NAME_RE``.
+
+CODEX_SKILL_MD_RE = re.compile(
+    r"(?:^|[\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md"
+)
+_SAFE_CODEX_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def skill_names_from_shell_command(cmd: str) -> tuple[str, ...]:
+    """Safe, de-duplicated skill names from Codex shell reads of ``SKILL.md``.
+
+    Codex has no skill marker; a shell read of ``.../skills/<name>/SKILL.md``
+    (canonical: ``.agents/skills/...``) is the stable structural signal. The
+    flexible prefix matches ``.agents/``, ``.codex/``, plugin caches, etc.
+    Globs / shell vars are rejected. Consumed in-memory only.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in CODEX_SKILL_MD_RE.finditer(cmd):
+        name = m.group(1)
+        if name not in seen and _SAFE_CODEX_SKILL_NAME_RE.match(name):
+            names.append(name)
+            seen.add(name)
+    return tuple(names)
+
+
 # The shell tools are the Codex Bash analog (``shell`` = old ``{"command"}``
 # arg shape, ``exec_command`` = new ``{"cmd"}`` shape); apply_patch carries
 # file edits. These are the calls whose (in-memory only) raw input the
@@ -168,6 +202,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
 
 
 __all__ = [
+    "CODEX_SKILL_MD_RE",
     "EDIT_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
     "PLAN_TOOL_NAMES",
@@ -175,4 +210,5 @@ __all__ = [
     "SHELL_TOOL_NAMES",
     "normalize_shell_command",
     "parse_apply_patch_files",
+    "skill_names_from_shell_command",
 ]
