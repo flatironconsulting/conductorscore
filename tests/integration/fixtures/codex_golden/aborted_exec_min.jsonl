@@ -1,0 +1,7 @@
+{"timestamp":"2026-06-01T00:00:00.000Z","type":"session_meta","payload":{"id":"g-aborted","cwd":"/p","model_provider":"openai"}}
+{"timestamp":"2026-06-01T00:00:01.000Z","type":"turn_context","payload":{"cwd":"/p","model":"gpt-5-codex"}}
+{"timestamp":"2026-06-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run the skill"}]}}
+{"timestamp":"2026-06-01T00:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"bash install.sh\"}"}}
+{"timestamp":"2026-06-01T00:12:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"aborted by user after 720.0s"}}
+{"timestamp":"2026-06-01T00:12:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"stopped"}]}}
+{"timestamp":"2026-06-01T00:12:06.000Z","type":"event_msg","payload":{"type":"turn_aborted"}}

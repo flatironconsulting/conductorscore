@@ -1,0 +1,8 @@
+{"timestamp":"2026-06-01T00:00:00.000Z","type":"session_meta","payload":{"id":"g-interleave","cwd":"/p","model_provider":"openai"}}
+{"timestamp":"2026-06-01T00:00:01.000Z","type":"turn_context","payload":{"cwd":"/p","model":"gpt-5-codex"}}
+{"timestamp":"2026-06-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run the long build"}]}}
+{"timestamp":"2026-06-01T00:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"make all\"}"}}
+{"timestamp":"2026-06-01T00:03:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_tokens":1234}}}
+{"timestamp":"2026-06-01T00:12:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"build ok"}}
+{"timestamp":"2026-06-01T00:12:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}
+{"timestamp":"2026-06-01T00:12:06.000Z","type":"event_msg","payload":{"type":"task_complete"}}

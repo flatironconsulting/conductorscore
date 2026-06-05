@@ -244,6 +244,9 @@ def extract(
         hitl_minutes = 0
         afk_minutes = 0
         idle_minutes = 0
+        hitl_tool_minutes = 0
+        afk_tool_minutes = 0
+        afk_dispatch_minutes = 0
         afk_parallel_fg = 0
         afk_max_streak = 0
         intervals: list[AfkInterval] = []
@@ -254,6 +257,9 @@ def extract(
             agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
             hitl_minutes = agg.hitl_minutes
             afk_minutes = agg.afk_minutes
+            hitl_tool_minutes = agg.hitl_tool_minutes
+            afk_tool_minutes = agg.afk_tool_minutes
+            afk_dispatch_minutes = agg.afk_dispatch_minutes
             afk_parallel_fg = agg.afk_parallel_minutes_foreground
             afk_max_streak = agg.afk_max_streak_minutes
             window_minutes = max(0, window[1] - window[0])
@@ -408,6 +414,9 @@ def extract(
                 hitl_minutes=hitl_minutes,
                 afk_minutes=afk_minutes,
                 idle_minutes=idle_minutes,
+                hitl_tool_minutes=hitl_tool_minutes,
+                afk_tool_minutes=afk_tool_minutes,
+                afk_dispatch_minutes=afk_dispatch_minutes,
                 afk_parallel_minutes_foreground=afk_parallel_fg,
                 cron_parallel_minutes=cron_parallel,
                 afk_max_streak_minutes=afk_max_streak,

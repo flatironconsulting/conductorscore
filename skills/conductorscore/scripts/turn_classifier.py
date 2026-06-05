@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.agents.codex.taxonomy import multi_agent_action
 from scripts.events import Event, EventKind
 
 
@@ -48,7 +49,7 @@ class MinuteBucket(str, Enum):
 K_TURN_SECONDS = 300
 
 # Idle longer than this between same-label turns splits the streak.
-K_BRIDGE_IDLE_SECONDS = 1800  # 30 min
+K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AFK streak
 
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.
@@ -64,9 +65,9 @@ class Turn:
     """A turn between two human handoff points.
 
     ``duration_s`` is the wallclock span (start → end). ``active_seconds``
-    is the *engaged* time within the turn — gaps > K_BRIDGE_IDLE_SECONDS
-    between consecutive main-thread events count as Idle and are
-    excluded. The label (HITL vs AFK) and all leverage math use
+    is the *engaged* time within the turn — non-tool gaps > K_TURN_SECONDS
+    (5 min) between consecutive main-thread events are excluded entirely
+    (Idle), not clipped. The label (HITL vs AFK) and all leverage math use
     ``active_seconds``; ``duration_s`` is informational only.
 
     This is what stops "user opened Claude, walked away overnight, came
@@ -77,6 +78,8 @@ class Turn:
     end_ts_ms: int
     end_reason: str  # 'end_turn' | 'ask_user_question' | 'next_user' | 'session_end'
     active_seconds: float = 0.0  # engaged time within the turn
+    tool_seconds: float = 0.0  # active seconds attributable to tool runtime
+    dispatch_seconds: float = 0.0  # of tool_seconds, the Agent/Task dispatch portion
     label: str = ""  # 'HITL' | 'AFK', filled after classification
 
     @property
@@ -194,15 +197,13 @@ def segment_turns(events: list[Event]) -> list[Turn]:
 def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None:
     """Populate ``turn.active_seconds`` for each turn in place.
 
-    Within a turn ``[start, end]``, sum consecutive-event gaps. Each
-    gap longer than ``K_TURN_SECONDS`` (5 min) is treated as Idle and
-    excluded entirely — not clipped. Rationale: legitimate tool calls
-    (long bash, big file read) take seconds-to-minutes; > 5 min without
-    a single event in a session means nothing was happening, regardless
-    of how long the turn formally remained open. This is what stops a
-    session you left open overnight from counting an entire 18-hour
-    idle gap (or even the streak-bridge 30 min of it) as autonomous
-    work.
+    Within a turn ``[start, end]``, sum consecutive-event gaps.
+    A non-tool gap > ``K_TURN_SECONDS`` (5 min) is excluded entirely
+    (Idle), not clipped — a hung/walk-away gap contributes NOTHING, not
+    "5 min of work". A gap fully contained in a paired tool-call interval
+    (``_tool_runtime_intervals``) is credited in full (real tool runtime).
+    This is what stops a session you left open overnight from counting an
+    entire 18-hour idle gap as autonomous work.
     """
     if not turns or not main_events:
         return
@@ -214,7 +215,7 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
         while i < n and main_events[i].timestamp_ms < t.start_ts_ms:
             i += 1
         # Collect event timestamps inside [start, end], plus implicit
-        # boundaries at start and end so we can sum gap-by-gap.
+        # boundary_ts at start and end so we can sum gap-by-gap.
         boundary_ts: list[int] = [t.start_ts_ms]
         j = i
         while j < n and main_events[j].timestamp_ms <= t.end_ts_ms:
@@ -224,18 +225,99 @@ def _compute_active_seconds(turns: list[Turn], main_events: list[Event]) -> None
             j += 1
         if boundary_ts[-1] != t.end_ts_ms:
             boundary_ts.append(t.end_ts_ms)
-        # Sum gaps; each gap is clipped at K_TURN_SECONDS (5 min). A
-        # legitimate long-running tool call (a Bash that takes 8 min)
-        # contributes its first 5 min as active; the rest is treated as
-        # Idle. Overnight gaps of any length cap at 5 min — so a session
-        # left open for 18 hours contributes at most 5 min per gap, not
-        # 18 hours.
+
+        # A gap fully CONTAINED in a tool-call interval (call_ts→result_ts,
+        # paired by tool_use_id) is real tool runtime and is credited in
+        # full — even when reasoning / assistant rows interleave between the
+        # call and its result. Every other (non-tool) gap > K_TURN_SECONDS
+        # (5 min) is EXCLUDED entirely as Idle: a long non-tool gap is a
+        # hung/walk-away gap, not work, so a session left open for 18 hours
+        # contributes nothing for that gap.
+        intervals = _tool_runtime_intervals(main_events, t.start_ts_ms, t.end_ts_ms)
+        dispatch_intervals = _dispatch_intervals(main_events, t.start_ts_ms, t.end_ts_ms)
         active = 0.0
+        tool_active = 0.0
+        dispatch_active = 0.0
         for k in range(len(boundary_ts) - 1):
-            gap_s = (boundary_ts[k + 1] - boundary_ts[k]) / 1000.0
-            if gap_s > 0:
-                active += min(gap_s, K_TURN_SECONDS)
+            lo, hi = boundary_ts[k], boundary_ts[k + 1]
+            gap_s = (hi - lo) / 1000.0
+            if gap_s <= 0:
+                continue
+            if _within_any_interval(lo, hi, intervals):
+                active += gap_s
+                tool_active += gap_s
+                if _within_any_interval(lo, hi, dispatch_intervals):
+                    dispatch_active += gap_s
+            else:
+                # A non-tool gap ≤ 5 min is engaged work; a longer gap is Idle
+                # and contributes NOTHING (a hung/walk-away gap is not "5 min of
+                # work"). Tool runtime is credited in full above. Matches the
+                # session-viewer MECE model.
+                active += gap_s if gap_s <= K_TURN_SECONDS else 0.0
         t.active_seconds = active
+        t.tool_seconds = tool_active
+        t.dispatch_seconds = dispatch_active
+
+
+def _tool_runtime_intervals(
+    main_events: list[Event], start_ms: int, end_ms: int
+) -> list[tuple[int, int]]:
+    """``[(call_ts, result_ts)]`` for tool calls bracketed within the turn.
+
+    Pairs ASSISTANT_TOOL with its matching TOOL_RESULT by ``tool_use_id``.
+    A gap inside any returned interval is real tool runtime and is credited
+    in full — even when reasoning / token-count rows interleave (Codex) — so
+    long ``exec_command``/MCP-wait calls are not capped at K_TURN_SECONDS.
+    Aborted/interrupted calls are excluded (``TOOL_RESULT.is_aborted`` for Codex
+    "aborted by user", ``is_denied`` for a Claude user-interrupt mid-tool): a
+    hung command the user killed is not runtime, so its gap stays capped as idle.
+    """
+    calls: dict[str, int] = {}
+    intervals: list[tuple[int, int]] = []
+    for ev in main_events:
+        if ev.timestamp_ms < start_ms or ev.timestamp_ms > end_ms:
+            continue
+        if ev.kind == EventKind.ASSISTANT_TOOL and ev.tool_use_id:
+            calls[ev.tool_use_id] = ev.timestamp_ms
+        elif ev.kind == EventKind.TOOL_RESULT and ev.tool_use_id in calls:
+            c = calls.pop(ev.tool_use_id)
+            # A call the user aborted/interrupted mid-run is NOT real runtime —
+            # drop its interval so the gap reverts to the K_TURN_SECONDS idle
+            # cap instead of crediting the full hang. ``is_aborted`` is the
+            # Codex signal ("aborted by user after Ns"); ``is_denied`` is the
+            # Claude signal (user interrupt mid-tool). Either excludes it.
+            aborted = getattr(ev, "is_aborted", False) or getattr(ev, "is_denied", False)
+            if ev.timestamp_ms > c and not aborted:
+                intervals.append((c, ev.timestamp_ms))
+    return intervals
+
+
+def _dispatch_intervals(
+    main_events: list[Event], start_ms: int, end_ms: int
+) -> list[tuple[int, int]]:
+    """``(call_ts, result_ts)`` for Agent/Task SUBAGENT-DISPATCH calls in the turn.
+
+    A subset of ``_tool_runtime_intervals``: only DISPATCH_TOOLS, used to split
+    the dispatch portion out of AFK active for the leverage metric (the subagent
+    work is already counted via the parallel-subagent term).
+    """
+    calls: dict[str, int] = {}
+    intervals: list[tuple[int, int]] = []
+    for ev in main_events:
+        if ev.timestamp_ms < start_ms or ev.timestamp_ms > end_ms:
+            continue
+        if ev.kind == EventKind.ASSISTANT_TOOL and ev.tool_use_id and ev.tool_name in DISPATCH_TOOLS:
+            calls[ev.tool_use_id] = ev.timestamp_ms
+        elif ev.kind == EventKind.TOOL_RESULT and ev.tool_use_id in calls:
+            c = calls.pop(ev.tool_use_id)
+            aborted = getattr(ev, "is_aborted", False) or getattr(ev, "is_denied", False)
+            if ev.timestamp_ms > c and not aborted:
+                intervals.append((c, ev.timestamp_ms))
+    return intervals
+
+
+def _within_any_interval(lo: int, hi: int, intervals: list[tuple[int, int]]) -> bool:
+    return any(s <= lo and hi <= e for (s, e) in intervals)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +345,48 @@ def subagent_intervals(events: list[Event]) -> dict[str, tuple[int, int]]:
                 min(prev[0], ev.timestamp_ms),
                 max(prev[1], ev.timestamp_ms),
             )
+    return spans
+
+
+def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
+    """Infer Codex multi-agent spans from spawn/wait/close tool metadata.
+
+    The Codex multi-agent MCP connector does not create Claude-style sidechain
+    JSONL files. The adapter surfaces only opaque agent IDs and routing target
+    IDs in ``raw_input``; this function converts those local-only IDs into
+    timestamp spans. IDs never serialize into the wire payload.
+    """
+    starts: dict[str, int] = {}
+    last_seen: dict[str, int] = {}
+    ordered = sorted(events, key=lambda e: e.timestamp_ms)
+    for ev in ordered:
+        raw = getattr(ev, "raw_input", None) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        if ev.kind == EventKind.ASSISTANT_TOOL and multi_agent_action(ev.tool_name) == "spawn_agent":
+            sid = ev.subagent_id
+            if isinstance(sid, str) and sid:
+                starts.setdefault(sid, ev.timestamp_ms)
+                last_seen[sid] = max(last_seen.get(sid, ev.timestamp_ms), ev.timestamp_ms)
+            continue
+
+        action = raw.get("multi_agent_action") or raw.get("multi_agent_result")
+        if action not in {"wait_agent", "close_agent", "send_input"}:
+            continue
+        targets = raw.get("targets")
+        if not isinstance(targets, list):
+            continue
+        target_ids = [t for t in targets if isinstance(t, str) and t]
+        for sid in target_ids:
+            if sid in starts:
+                last_seen[sid] = max(last_seen.get(sid, starts[sid]), ev.timestamp_ms)
+
+    session_end = max((e.timestamp_ms for e in ordered), default=0)
+    spans: dict[str, tuple[int, int]] = {}
+    for sid, start in starts.items():
+        end = last_seen.get(sid, session_end)
+        if end > start:
+            spans[sid] = (start, end)
     return spans
 
 
@@ -347,6 +471,12 @@ def afk_parallel_subagent_seconds(
     if not afk_turns:
         return 0.0
     spans = dict(subagent_intervals(events))
+    for sid, (start, end) in multi_agent_spans(events).items():
+        prev = spans.get(sid)
+        if prev is None:
+            spans[sid] = (start, end)
+        else:
+            spans[sid] = (min(prev[0], start), max(prev[1], end))
     if extra_spans:
         for sid, (start, end) in extra_spans.items():
             prev = spans.get(sid)
@@ -371,7 +501,7 @@ def afk_parallel_subagent_seconds(
 
 @dataclass(frozen=True)
 class AfkStreak:
-    """A contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS idle.
+    """A contiguous run of AFK turns, bridged by ≤ K_BRIDGE_IDLE_SECONDS (5 min) idle.
 
     ``active_seconds`` is the sum of ``turn.active_seconds`` across the
     streak — what the dashboard's "Longest agent run" L4 surfaces.
@@ -386,7 +516,7 @@ class AfkStreak:
 
 
 def afk_streaks(turns: list[Turn]) -> list[AfkStreak]:
-    """Group consecutive AFK turns into streaks (bridged by ≤ 30 min idle).
+    """Group consecutive AFK turns into streaks (bridged by ≤ 5 min idle).
 
     Sums ``turn.active_seconds`` across each streak — idle stretches
     inside an open turn are already excluded by ``segment_turns``.
@@ -461,6 +591,9 @@ class TurnAggregates:
 
     hitl_minutes: int
     afk_minutes: int
+    hitl_tool_minutes: int  # of hitl/afk active minutes, the portion inside tool-call runtime
+    afk_tool_minutes: int  # of hitl/afk active minutes, the portion inside tool-call runtime
+    afk_dispatch_minutes: int  # of afk active minutes, the Agent/Task dispatch portion
     afk_parallel_minutes_foreground: int
     afk_max_streak_minutes: int
     turns: tuple[Turn, ...]
@@ -474,8 +607,8 @@ def compute_turn_aggregates(
     """Compute the live card's leverage inputs.
 
     HITL/AFK minute counts and the longest-streak number are derived
-    from per-turn ``active_seconds`` (intra-turn idle > 30 min is
-    excluded), so a session left open overnight doesn't inflate the
+    from per-turn ``active_seconds`` (intra-turn non-tool idle > 5 min is
+    excluded entirely), so a session left open overnight doesn't inflate the
     "longest agent run". ``top_afk_streaks`` carries the L4 top-N
     table's per-streak rows.
 
@@ -486,6 +619,9 @@ def compute_turn_aggregates(
     turns = segment_turns(events)
     hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
     afk_s = sum(t.active_seconds for t in turns if t.label == "AFK")
+    hitl_tool_s = sum(t.tool_seconds for t in turns if t.label == "HITL")
+    afk_tool_s = sum(t.tool_seconds for t in turns if t.label == "AFK")
+    afk_dispatch_s = sum(t.dispatch_seconds for t in turns if t.label == "AFK")
     extra_spans = subagent_spans_from_disk(jsonl_path) if jsonl_path else None
     parallel_s = afk_parallel_subagent_seconds(turns, events, extra_spans)
     streaks = top_afk_streaks(turns, n=5)
@@ -493,6 +629,9 @@ def compute_turn_aggregates(
     return TurnAggregates(
         hitl_minutes=round(hitl_s / 60),
         afk_minutes=round(afk_s / 60),
+        hitl_tool_minutes=round(hitl_tool_s / 60),
+        afk_tool_minutes=round(afk_tool_s / 60),
+        afk_dispatch_minutes=round(afk_dispatch_s / 60),
         afk_parallel_minutes_foreground=round(parallel_s / 60),
         afk_max_streak_minutes=round(streak_s / 60),
         turns=tuple(turns),
@@ -575,6 +714,7 @@ __all__ = [
     "compute_turn_aggregates",
     "hitl_minute_set",
     "longest_afk_streak_seconds",
+    "multi_agent_spans",
     "segment_turns",
     "subagent_intervals",
     "top_afk_streaks",
