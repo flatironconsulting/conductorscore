@@ -10,8 +10,8 @@ owns the *rendering* pipeline only.
 By default the rendered bubbles are redacted to the wire-equivalent view: raw
 text is replaced with the exact ``sha16`` hash + token-count the uploader
 emits, so the page contains nothing the upload wouldn't and is safe to share.
-Pass ``redact=False`` to reveal the real transcript text instead — safe locally
-(the viewer uploads nothing) and most useful for hands-on debugging.
+Pass ``redact=False`` (CLI: ``--no-redact``) to reveal the real transcript
+text — safe locally and most useful for hands-on debugging.
 
 Outputs an HTML page that exposes:
 - per-turn ``turn-banner hitl|afk`` divs
@@ -181,6 +181,13 @@ def _inject_continuation_turns(events: list, turns: list[Turn]) -> list[Turn]:
 
 TRUNCATE_CHARS = 100
 
+# Subagent-dispatch tools — their ``call → result`` span is the main thread
+# waiting while a subagent works. It IS credited as Tool/active (so it counts
+# toward the longest run), but it is split out as ``Tool:dispatch`` so the
+# leverage numerator can subtract it (the subagent work is already counted via
+# the parallel-subagent term — see TIME_CLASSIFICATION.md §7).
+DISPATCH_TOOLS = frozenset({"Agent", "Task"})
+
 _AUTO_COMPACT_BANNER = (
     "This session is being continued from a previous conversation that "
     "ran out of context"
@@ -218,8 +225,6 @@ def _redact_messages(messages: list[TimelineMessage]) -> list[TimelineMessage]:
     out: list[TimelineMessage] = []
     for m in messages:
         if m.role == "assistant_tool":
-            # Tool name is retained by the renderer; the input summary is not
-            # on the wire, so drop it.
             out.append(replace(m, text=""))
         elif m.text:
             marker = f"[{_approx_token_count(m.text)} tok · {_sha16(m.text)}]"
@@ -809,16 +814,47 @@ def _aborted_call_ids(jsonl_path: Path) -> set[str]:
     return ids
 
 
+def _dispatch_intervals(
+    seg: list, aborted_ids: set[str] | None = None
+) -> list[tuple[int, int]]:
+    """``[(call_ts, result_ts)]`` for Agent/Task SUBAGENT-DISPATCH calls.
+
+    Identical to the tool-interval pairing but restricted to
+    ``tool_name in DISPATCH_TOOLS`` (and not aborted/``is_denied``). Mirrors the
+    client's ``_dispatch_intervals`` (``scripts/turn_classifier.py``); used to
+    carve the dispatch portion out of Tool active. See TIME_CLASSIFICATION.md §7.
+    """
+    aborted_ids = aborted_ids or set()
+    calls: dict[str, int] = {}
+    intervals: list[tuple[int, int]] = []
+    for e in seg:
+        if (
+            e.kind == EventKind.ASSISTANT_TOOL
+            and e.tool_use_id
+            and getattr(e, "tool_name", None) in DISPATCH_TOOLS
+        ):
+            calls[e.tool_use_id] = e.timestamp_ms
+        elif e.kind == EventKind.TOOL_RESULT and e.tool_use_id in calls:
+            c = calls.pop(e.tool_use_id)
+            aborted = e.tool_use_id in aborted_ids or getattr(e, "is_denied", False)
+            if e.timestamp_ms > c and not aborted:
+                intervals.append((c, e.timestamp_ms))
+    return intervals
+
+
 def _active_tool_per_turn(
     events: list, turns: list, aborted_ids: set[str] | None = None
-) -> tuple[list[float], list[float]]:
-    """Per-turn ``(active_seconds, tool_seconds)``, matching the live card.
+) -> tuple[list[float], list[float], list[float]]:
+    """Per-turn ``(active_seconds, tool_seconds, dispatch_seconds)``.
 
-    Within each turn, gaps between consecutive main-thread events are summed;
-    a gap is credited in FULL only when it lies inside a non-aborted tool
-    interval (id-paired by ``tool_use_id``), otherwise it caps at
-    ``K_TURN_SECONDS``. The remainder (wallclock − active) is Idle. This is
-    what stops a hung/aborted command from masquerading as engaged AFK time.
+    Matches the live card. Within each turn, gaps between consecutive
+    main-thread events are summed; a gap is credited in FULL only when it lies
+    inside a non-aborted tool interval (id-paired by ``tool_use_id``), otherwise
+    it caps at ``K_TURN_SECONDS``. The remainder (wallclock − active) is Idle.
+    This is what stops a hung/aborted command from masquerading as engaged AFK
+    time. A gap that is also inside a DISPATCH_TOOLS (Agent/Task) interval is
+    additionally credited to ``dispatch`` — dispatch ⊆ tool ⊆ active — so the
+    leverage numerator can subtract the dispatch-wait (TIME_CLASSIFICATION.md §7).
     """
     aborted_ids = aborted_ids or set()
     main = sorted(
@@ -827,6 +863,7 @@ def _active_tool_per_turn(
     )
     actives: list[float] = []
     tools: list[float] = []
+    dispatches: list[float] = []
     for t in turns:
         seg = [e for e in main if t.start_ts_ms <= e.timestamp_ms <= t.end_ts_ms]
         calls: dict[str, int] = {}
@@ -839,6 +876,7 @@ def _active_tool_per_turn(
                 aborted = e.tool_use_id in aborted_ids or getattr(e, "is_denied", False)
                 if e.timestamp_ms > c and not aborted:
                     intervals.append((c, e.timestamp_ms))
+        dispatch_iv = _dispatch_intervals(seg, aborted_ids)
         bts: list[int] = [t.start_ts_ms]
         for e in seg:
             if e.timestamp_ms != bts[-1]:
@@ -847,6 +885,7 @@ def _active_tool_per_turn(
             bts.append(t.end_ts_ms)
         active = 0.0
         tool = 0.0
+        dispatch = 0.0
         for a, b in zip(bts, bts[1:]):
             gap = (b - a) / 1000.0
             if gap <= 0:
@@ -854,11 +893,14 @@ def _active_tool_per_turn(
             if any(s <= a and b <= e for (s, e) in intervals):
                 active += gap
                 tool += gap
+                if any(s <= a and b <= e for (s, e) in dispatch_iv):
+                    dispatch += gap
             else:
                 active += min(gap, K_TURN_SECONDS)
         actives.append(active)
         tools.append(tool)
-    return actives, tools
+        dispatches.append(dispatch)
+    return actives, tools, dispatches
 
 
 def _split_turns_at_idle(
@@ -964,13 +1006,22 @@ _CSS = """
   --afk:  var(--agent);
   --tool: #eab308;
   --idle: #4b5563;
+  --green: #00ff87;
   --rule: #232735;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 html, body { background: var(--bg); color: var(--text); font-family: var(--sans); margin: 0; }
 .wrap { max-width: 880px; margin: 32px auto; padding: 0 24px; }
+.brand { font-weight: 700; color: #e6e8ee; letter-spacing: -0.01em; font-size: 14px; display: inline-flex; align-items: center; gap: 4px; margin-bottom: 10px; }
+.brand .note { color: var(--green); font-size: 18px; line-height: 1; margin-right: 4px; text-shadow: 0 0 8px rgba(0,255,135,0.4); transform: translateY(-1px); }
+.brand .blink { animation: blink 1.2s steps(1) infinite; color: var(--green); margin-left: 2px; }
+.brand .subtitle { color: var(--muted); font-weight: 400; margin-left: 10px; }
+@keyframes blink { 50% { opacity: 0; } }
 header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+.help { margin: 4px 0 10px 0; font-size: 12px; color: var(--muted); line-height: 1.55; max-width: 760px; }
+.help b { color: var(--text); font-weight: 600; }
+.help .k-real { color: var(--tool); } .help .k-disp { color: var(--tool); } .help .k-idle { color: var(--idle); }
 .summary-table {
   border-collapse: collapse; margin: 12px 0; font-family: var(--mono);
   font-size: 13px; background: rgba(255,255,255,0.02);
@@ -985,7 +1036,13 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .summary-table thead th.tool { color: var(--tool); }
 .summary-table thead th.idle { color: var(--muted); }
 .summary-table td.tool { color: var(--tool); }
+.summary-table td.longest-check { color: var(--green); text-align: center; font-weight: 700; }
+.summary-table thead th.tool.dispatch, .summary-table td.tool.dispatch { color: var(--tool); opacity: 0.8; }
+.summary-table th, .summary-table td { font-weight: 400; }
 .summary-table tbody th { text-align: left; }
+.summary-table thead th:first-child { text-align: left; font-weight: 700; }
+.streak-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+.streak-link:hover { color: var(--green); border-bottom-color: var(--green); }
 .streak-group {
   border-left: 4px solid transparent; padding-left: 10px; margin: 10px 0;
 }
@@ -1013,6 +1070,7 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .msg.assistant .bubble { background: var(--agent-text-bg); border-color: var(--agent-text-border); }
 .msg.tool { align-items: flex-start; }
 .msg.tool .bubble { background: var(--agent-tool-bg); border-color: var(--agent-tool-border); border-left: 3px solid var(--tool); }
+.msg.tool.tool-dispatch .bubble { border-left-style: dashed; }
 .msg.tool.long-tool .bubble { border-left-width: 7px; box-shadow: -2px 0 0 0 rgba(234,179,8,0.25); }
 .msg.tool .bubble .ts { color: var(--tool); }
 .msg.tool.tool-aborted .bubble { border-left-color: var(--idle); opacity: 0.65; }
@@ -1022,6 +1080,9 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .subagent-banner { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; }
 .dispatch-row { display: flex; gap: 14px; align-items: flex-start; margin: 4px 0; }
 .dispatch-row .dispatch-bubble { flex: 0 0 40%; }
+.wire-trace { margin-top: 28px; padding: 12px 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--rule); border-radius: 8px; }
+.wire-trace h2 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.wire-trace pre { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 footer { margin-top: 32px; color: var(--muted); font-size: 12px; font-family: var(--mono); border-top: 1px solid var(--rule); padding-top: 12px; }
 """
 
@@ -1073,6 +1134,10 @@ def _bubble_html(
     }[msg.role]
     ts_str = _fmt_clock(msg.ts_ms)
     msg_cls = role_cls
+    # Subagent dispatch (Agent/Task) → dashed yellow bar (Tool:dispatch); a real
+    # tool keeps the solid yellow bar (Tool:real). Aborted overrides to grey below.
+    if msg.role == "assistant_tool" and msg.tool_name in DISPATCH_TOOLS:
+        msg_cls = f"{role_cls} tool-dispatch"
     aborted_ids = aborted_ids or set()
     if msg.role == "assistant_tool" and msg.end_ts_ms and msg.end_ts_ms > msg.ts_ms:
         duration_s = (msg.end_ts_ms - msg.ts_ms) // 1000
@@ -1081,7 +1146,7 @@ def _bubble_html(
             ts_str = f"{ts_str} · aborted (excluded from Tool)"
             msg_cls = f"{role_cls} tool-aborted"
         elif duration_s >= 300:  # ≥5 min held tool call → emphasize the yellow bar
-            msg_cls = f"{role_cls} long-tool"
+            msg_cls = f"{msg_cls} long-tool"
     end_turn_html = (
         f'<div class="end-turn">⏹ End turn: {_fmt_clock(msg.ts_ms)}</div>'
         if msg.is_end_turn
@@ -1139,10 +1204,9 @@ def render_session(
 
     With ``redact=True`` (default) the bubbles show only the wire-equivalent
     markers (``[<n> tok · <sha16>]`` + tool names) — matching exactly what the
-    uploader would send — so the page is safe to share and contains no raw
-    transcript text. Pass ``redact=False`` to reveal the real transcript text
-    (safe locally, since the viewer uploads nothing, and most useful for
-    hands-on debugging).
+    uploader would send — so the page is safe to share. Pass ``redact=False``
+    to reveal the real transcript text (safe locally, since the viewer uploads
+    nothing, and most useful for hands-on debugging).
     """
     jsonl_path = Path(jsonl_path)
     output_path = Path(output_path)
@@ -1201,21 +1265,42 @@ def render_session(
     # K_TURN_SECONDS unless inside a non-aborted tool interval — so a
     # hung/aborted command is NOT counted as engaged AFK time; the uncredited
     # remainder falls into Idle (wallclock − active). This matches the live card.
-    per_turn_active, per_turn_tool = _active_tool_per_turn(events, turns, aborted_ids)
-    # MECE 4-way split of the session: HITL + AFK + Tool + Idle = wallclock.
-    # Tool (non-aborted tool runtime) is carved OUT of HITL/AFK so the four
-    # columns sum to the session span — i.e. the bars build up to the table.
+    per_turn_active, per_turn_tool, per_turn_dispatch = _active_tool_per_turn(
+        events, turns, aborted_ids
+    )
+    # MECE 5-way split of the session: HITL + AFK + Tool:real + Tool:dispatch +
+    # Idle = wallclock. Tool (non-aborted tool runtime) is carved OUT of HITL/AFK,
+    # then Tool is split into Tool:real (model tools) and Tool:dispatch (Agent/Task
+    # subagent dispatch, dispatch ⊆ tool) — so the five columns sum to the session
+    # span — i.e. the bars build up to the table.
     hitl_active = sum(a for a, t in zip(per_turn_active, turns) if t.label == "HITL")
     afk_active = sum(a for a, t in zip(per_turn_active, turns) if t.label == "AFK")
     hitl_tool = sum(tl for tl, t in zip(per_turn_tool, turns) if t.label == "HITL")
     afk_tool = sum(tl for tl, t in zip(per_turn_tool, turns) if t.label == "AFK")
+    hitl_dispatch = sum(d for d, t in zip(per_turn_dispatch, turns) if t.label == "HITL")
+    afk_dispatch = sum(d for d, t in zip(per_turn_dispatch, turns) if t.label == "AFK")
+    total_dispatch = hitl_dispatch + afk_dispatch
     session_start = min((e.timestamp_ms for e in events), default=0)
     session_end = max((e.timestamp_ms for e in events), default=0)
     session_s = max(0.0, (session_end - session_start) / 1000.0)
     total_tool_s = hitl_tool + afk_tool
     total_hitl_s = max(0.0, hitl_active - hitl_tool)  # human model-time (excl tool)
     total_afk_s = max(0.0, afk_active - afk_tool)      # agent model-time (excl tool)
+    # Tool split: dispatch (Agent/Task) vs real (everything else). dispatch ⊆ tool.
+    total_tool_dispatch_s = total_dispatch
+    total_tool_real_s = max(0.0, total_tool_s - total_dispatch)
     total_idle_s = max(0.0, session_s - hitl_active - afk_active)
+    # MECE invariant (Table A): HITL + AFK + Tool:real + Tool:dispatch + Idle ==
+    # wallclock. (total_hitl_s + total_afk_s) = (hitl+afk active) − total_tool_s;
+    # adding back Tool:real + Tool:dispatch = total_tool_s; plus Idle = wallclock −
+    # (hitl+afk active). Verified at render time below.
+    mece_sum_s = (
+        total_hitl_s + total_afk_s + total_tool_real_s + total_tool_dispatch_s
+        + total_idle_s
+    )
+    assert abs(mece_sum_s - session_s) < 1.0, (
+        f"Table-A MECE sum {mece_sum_s:.1f}s != wallclock {session_s:.1f}s"
+    )
     # Leverage uses ENGAGED time (model + tool), so it matches the live card.
     wallclock_leverage = (
         afk_active / hitl_active if hitl_active > 0 else float("inf")
@@ -1248,29 +1333,135 @@ def render_session(
     for idx, sid in enumerate(streak_id_for_turn):
         streak_members.setdefault(sid, []).append(idx)
 
+    # -----------------------------------------------------------------------
+    # Table B — streak-level metrics (longest run vs leverage).
+    # For each AFK streak (same grouping as the bars: consecutive AFK turns
+    # bridged ≤ K_BRIDGE_IDLE_SECONDS), over its member turns:
+    #   engaged   = Σ per_turn_active  (model + tool, INCL dispatch) = the run
+    #   dispatch  = Σ per_turn_dispatch
+    #   leverage_afk = engaged − dispatch
+    # ``afk_max_streak_minutes`` (longest run) = the max engaged across streaks.
+    # -----------------------------------------------------------------------
+    afk_streak_rows: list[tuple[int, float, float, float, float, list[int]]] = []
+    for sid, members in streak_members.items():
+        if not members or turns[members[0]].label != "AFK":
+            continue
+        engaged = sum(per_turn_active[i] for i in members)       # Agent Run
+        dispatch = sum(per_turn_dispatch[i] for i in members)    # Tool:dispatch
+        tool = sum(per_turn_tool[i] for i in members)            # all tool (real+dispatch)
+        # Concurrent subagent work during this streak (separate threads) — the
+        # wire's afk_parallel_subagent_seconds restricted to the streak's turns.
+        parallel = afk_parallel_subagent_seconds(
+            [turns[i] for i in members], events, extra_spans=subagent_spans
+        )
+        afk_streak_rows.append((sid, engaged, dispatch, tool, parallel, members))
+    afk_streak_rows.sort(key=lambda r: r[1], reverse=True)
+    max_engaged = afk_streak_rows[0][1] if afk_streak_rows else 0.0
+    max_engaged_sid = afk_streak_rows[0][0] if afk_streak_rows else None
+
+    streak_body_rows: list[str] = []
+    for sid, engaged, dispatch, tool, parallel, members in afk_streak_rows[:5]:
+        first = turns[members[0]]
+        last = turns[members[-1]]
+        agent_work = max(0.0, engaged - tool)     # model thinking (main thread)
+        tool_real = max(0.0, tool - dispatch)     # real tool/command calls
+        is_longest = "✓" if sid == max_engaged_sid else ""
+        streak_body_rows.append(
+            f"<tr>"
+            f'<th><a href="#streak-{sid}" class="streak-link">'
+            f"{_fmt_clock(first.start_ts_ms)} → {_fmt_clock(last.end_ts_ms)}</a></th>"
+            f'<td class="afk">{_fmt_dur(engaged)}</td>'
+            f"<td>{_fmt_dur(agent_work)}</td>"
+            f'<td class="tool">{_fmt_dur(tool_real)}</td>'
+            f'<td class="tool dispatch">{_fmt_dur(dispatch)}</td>'
+            f"<td>{_fmt_dur(parallel) if parallel > 0 else '—'}</td>"
+            f'<td class="longest-check">{is_longest}</td>'
+            f"</tr>"
+        )
+    if not streak_body_rows:
+        streak_body_rows.append(
+            '<tr><th>— none —</th><td>—</td><td>—</td><td class="tool">—</td>'
+            '<td class="tool dispatch">—</td><td>—</td><td>—</td></tr>'
+        )
+    streak_table_html = (
+        '<table class="summary-table">'
+        "<thead><tr><th>Agent Runs</th>"
+        '<th class="afk">Agent Run</th>'
+        "<th>Agent work</th>"
+        '<th class="tool">Tool:real</th>'
+        '<th class="tool dispatch">Tool:dispatch</th>'
+        "<th>Subagents (parallel)</th>"
+        "<th>Longest</th></tr></thead>"
+        '<tbody>' + "".join(streak_body_rows) + "</tbody>"
+        '<caption style="caption-side:bottom;text-align:left;color:var(--muted);'
+        'font-size:11px;padding-top:6px">Agent Run = Agent work + Tool:real + '
+        "Tool:dispatch (all main-thread). Subagents (parallel) = concurrent "
+        "subagent work on separate threads. Leverage counts Agent work + "
+        "Tool:real + Subagents — not the dispatch wait.</caption>"
+        "</table>"
+    )
+
+    # -----------------------------------------------------------------------
+    # Wire→card trace (the debugger): this session's wire fields exactly as the
+    # business logic computes them, then the two derived card numbers.
+    # -----------------------------------------------------------------------
+    hitl_minutes = round(hitl_active / 60)
+    afk_minutes = round(afk_active / 60)          # includes tool + dispatch
+    afk_dispatch_minutes = round(total_dispatch / 60)
+    afk_tool_minutes = round(afk_tool / 60)
+    afk_max_streak_min = round(max_engaged / 60)  # longest streak engaged (incl dispatch)
+    # The wire field is afk_parallel_minutes_foreground = afk_parallel_subagent_seconds
+    # (sum of subagent active ∩ AFK), i.e. main_plus_sub_seconds here — NOT the
+    # ≥2-concurrent `parallel_seconds` shown in the summary table's Parallel row.
+    parallel_min = round(main_plus_sub_seconds / 60)
+    if hitl_minutes > 0:
+        lev_num = afk_minutes - afk_dispatch_minutes + parallel_min
+        leverage_card = lev_num / hitl_minutes
+    else:
+        leverage_card = float("inf")
+    wire_trace_html = (
+        '<section class="wire-trace"><h2>Wire → card trace (the debugger)</h2><pre>'
+        + html.escape(
+            f"WIRE:  hitl={hitl_minutes} afk={afk_minutes} "
+            f"afk_dispatch={afk_dispatch_minutes} afk_tool={afk_tool_minutes} "
+            f"afk_max_streak={afk_max_streak_min} parallel={parallel_min}\n"
+            f"CARD:  Longest run = {afk_max_streak_min} min   "
+            f"(streak engaged, INCLUDES dispatch)\n"
+            f"CARD:  Leverage = (afk − afk_dispatch + parallel)/hitl = "
+            f"(({afk_minutes}−{afk_dispatch_minutes}+{parallel_min})/{hitl_minutes}) = "
+            f"{_fmt_leverage(leverage_card)}   (dispatch NOT double-counted)\n"
+            f"NOTE:  Table-A 'AFK' is model-only (tool carved out); wire "
+            f"'afk_minutes' folds tool back in: afk = AFK + Tool:real + "
+            f"Tool:dispatch (afk portion)."
+        )
+        + "</pre></section>"
+    )
+
     parts: list[str] = []
     parts.append(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
-<title>Session viewer — timeline classifier</title>
+<title>ConductorScore session viewer</title>
 <style>{_CSS}</style></head>
 <body><div class="wrap">
 <header>
-  <h1>Session viewer — timeline classifier</h1>
+  <div class="brand"><span class="note">♬</span>ConductorScore<span class="blink">_</span><span class="subtitle">session viewer</span></div>
+  <p class="help">This shows exactly how ConductorScore measured your coding session — minute by minute. Every minute is sorted into one of four buckets: <b>HITL</b> (you and the agent working together), <b>AFK</b> (the agent working on its own), <b>Tool</b> (a command or tool running), or <b>Idle</b> (nothing happening). Those are the coloured bars on the left, and they add up to the <b>Turns</b> table — which adds up to the whole session. The <b>Agent&nbsp;Runs</b> table lists every stretch the agent ran on its own; the longest one is your <b>"longest run"</b> score, and the trace under it shows how your longest-run and leverage numbers are calculated. Tool bars: <span class="k-real">solid yellow</span> = a real tool/command, <span class="k-disp">dashed yellow</span> = the agent handing work to a sub-agent, <span class="k-idle">grey</span> = aborted or idle.<br><br><b>Think your ConductorScore is wrong?</b> Use this to find the minutes that look mis-classified — for example idle or waiting time counted as work, or a hung command that should be idle — then <b>save this page and attach it to a bug report</b> and we'll take a look.</p>
   <div class="meta">
-    <span><b>jsonl</b> {html.escape(jsonl_path.name)}</span>
-    <span><b>duration</b> {_fmt_dur(session_s)}</span>
-    <span><b>turns</b> {len(turns)}</span>
+    <div>File: {html.escape(jsonl_path.name)}</div>
+    <div>Duration: {_fmt_dur(session_s)}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Turns: {len(turns)}</div>
   </div>
+  <div style="height:14px"></div>
   <table class="summary-table">
     <thead>
-      <tr><th></th><th class="hitl">HITL</th><th class="afk">AFK</th><th class="tool">Tool</th><th class="idle">Idle</th><th>Leverage (AFK / HITL)</th></tr>
+      <tr><th>Turns</th><th class="hitl">HITL</th><th class="afk">AFK</th><th class="tool">Tool:real</th><th class="tool dispatch">Tool:dispatch</th><th class="idle">Idle</th><th>Leverage (AFK / HITL)</th></tr>
     </thead>
     <tbody>
       <tr>
         <th>Wallclock</th>
         <td>{_fmt_dur(total_hitl_s)}</td>
         <td>{_fmt_dur(total_afk_s)}</td>
-        <td class="tool">{_fmt_dur(total_tool_s)}</td>
+        <td class="tool">{_fmt_dur(total_tool_real_s)}</td>
+        <td class="tool dispatch">{_fmt_dur(total_tool_dispatch_s)}</td>
         <td>{_fmt_dur(total_idle_s)}</td>
         <td class="wallclock_leverage">{_fmt_leverage(wallclock_leverage)}</td>
       </tr>
@@ -1278,6 +1469,7 @@ def render_session(
         <th>Parallel (subagents only)</th>
         <td class="muted">—</td>
         <td>{_fmt_dur(parallel_seconds)}</td>
+        <td class="muted">—</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
         <td class="parallel_leverage">{_fmt_leverage(parallel_leverage)}</td>
@@ -1288,10 +1480,13 @@ def render_session(
         <td>{_fmt_dur(total_track_seconds)}</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
+        <td class="muted">—</td>
         <td>{_fmt_leverage(total_leverage)}</td>
       </tr>
     </tbody>
   </table>
+  {streak_table_html}
+  {wire_trace_html}
 </header>
 <div class="timeline">
 """)
@@ -1415,8 +1610,8 @@ def render_session(
 <footer>
   Generated from <code>{html.escape(str(jsonl_path))}</code>.
   Turn rule: ≤ 5 min → HITL, &gt; 5 min → AFK.
-  MECE partition — every second is HITL, AFK, Tool, or Idle, and the four columns SUM to wallclock (the bars build up to the table). HITL/AFK are model time (gaps capped at 5 min); Tool is non-aborted tool-call runtime (carved out); Idle is the uncredited remainder (incl. hung/aborted calls). Turns split at idle &gt; 5 min, which also ends the AFK streak.
-  Tool bubbles get a yellow bar (thicker when ≥ 5 min); aborted/interrupted calls are excluded and shown grey.
+  MECE partition — every second is HITL, AFK, Tool:real, Tool:dispatch, or Idle, and the five columns SUM to wallclock (the bars build up to the table). HITL/AFK are model time (gaps capped at 5 min); Tool is non-aborted tool-call runtime (carved out), split into Tool:real (model tools) and Tool:dispatch (Agent/Task subagent dispatch); Idle is the uncredited remainder (incl. hung/aborted calls). Turns split at idle &gt; 5 min, which also ends the AFK streak.
+  Tool bars: solid yellow = real tool, dashed yellow = subagent dispatch (Agent/Task), grey = aborted. Tool bubbles get a thicker yellow bar when ≥ 5 min.
   wallclock_leverage = engaged AFK / engaged HITL (model + tool); parallel_leverage counts seconds with ≥ 2 concurrent subagent threads.
 </footer>
 </div></body></html>
@@ -1468,8 +1663,7 @@ def _all_sessions_sorted() -> list:
     """All discoverable local sessions (Claude + Codex), newest activity first.
 
     Reuses the production discovery (``find_sessions`` / ``find_codex_sessions``)
-    — the same code that finds sessions for the scan — so nothing here is a
-    parallel reimplementation.
+    — the same code that finds sessions for the scan.
     """
     from scripts.events import find_codex_sessions, find_sessions
 
@@ -1493,9 +1687,7 @@ def _resolve_session(jsonl_arg: str | None, env: dict | None = None) -> Path:
     """Resolve which transcript to render.
 
     Priority: explicit path → captured current-session path (set by the
-    SessionStart hook) → most-recent local session. The captured path is the
-    current session while the user is actively in it (resume appends to the
-    same file), so this is what "visualize this session" lands on.
+    SessionStart hook) → most-recent local session.
     """
     env = os.environ if env is None else env
     if jsonl_arg:
@@ -1531,7 +1723,6 @@ def _open_in_browser(path: Path) -> None:
         else:
             subprocess.run(["xdg-open", str(path)], check=False)
     except Exception:
-        # Opening is best-effort; the path is always printed for the user.
         pass
 
 
