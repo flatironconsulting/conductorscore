@@ -26,10 +26,10 @@ from scripts.agents.codex.discovery import (
     codex_home,
     find_sessions as find_codex_sessions,
 )
-# Private helper consumed cross-repo by the server-side session viewer
-# (server/scripts/client/session_viewer.py imports
-# ``_strip_synthetic_content`` from here). Re-export it so that consumer
-# keeps working unchanged after the move to the Claude adapter edge.
+# Private helper consumed by the local session viewer
+# (``scripts.session_viewer`` imports ``_strip_synthetic_content`` from here).
+# Re-export it so that consumer keeps working after the move to the Claude
+# adapter edge.
 from scripts.agents.claude.events import (  # noqa: F401
     _is_excluded_edit_path,
     _strip_synthetic_content,

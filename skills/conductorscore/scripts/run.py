@@ -134,6 +134,51 @@ def _writable_cache_dir() -> Path:
         return Path(tempfile.mkdtemp(prefix="conductorscore-"))
 
 
+def _persist_transcript_path(raw_stdin: str) -> Path | None:
+    """Persist the current session's ``transcript_path`` from SessionStart hook
+    JSON so the session viewer can resolve "the session I'm in" exactly (even
+    under parallel sessions / worktrees). Best-effort; returns the file written
+    or ``None``. Pure w.r.t. stdin — the caller supplies the text.
+    """
+    try:
+        data = json.loads(raw_stdin)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    tp = data.get("transcript_path") if isinstance(data, dict) else None
+    if not isinstance(tp, str) or not tp:
+        return None
+    out = _cache_dir() / "current_transcript"
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(tp)
+    except OSError:
+        return None
+    return out
+
+
+def _capture_transcript_from_stdin() -> None:
+    """When invoked as a SessionStart hook, Claude Code pipes hook JSON on
+    stdin. Read it non-blockingly and persist ``transcript_path``. Never reads
+    a TTY (interactive run) and never blocks the scan — every later stdin read
+    in this module is already TTY-gated, so consuming a piped stdin here is safe.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return
+        try:
+            import select
+
+            if not select.select([sys.stdin], [], [], 0)[0]:
+                return
+        except Exception:
+            pass  # select unsupported (e.g. Windows pipe) — fall through to read
+        raw = sys.stdin.read()
+        if raw:
+            _persist_transcript_path(raw)
+    except Exception:
+        return
+
+
 def _scan_cmd() -> list[str]:
     override = os.environ.get("CONDUCTORSCORE_SCAN_CMD")
     if override:
@@ -493,6 +538,9 @@ def main() -> int:
         # error so no Python traceback ever reaches the host session.
         raise RuntimeError("forced backstop")
     _make_output_live()
+    # If invoked as a SessionStart hook, capture this session's transcript path
+    # for the session viewer ("visualize this session"). No-op otherwise.
+    _capture_transcript_from_stdin()
     auth_store.ensure_migrated()
     argv = sys.argv[1:]
     if argv and argv[0] == "login":

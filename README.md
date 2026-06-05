@@ -56,6 +56,31 @@ The privacy test ([`tests/integration/test_extractor_integration.py`](tests/inte
 
 This is the same `pytest` invocation our CI runs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), so a green badge means the invariant held on the exact code you're reading.
 
+## Visualize your sessions locally
+
+The same on-device data the scanner reads can be rendered as a timeline you can
+inspect yourself — no server round-trip, nothing uploaded. Ask the skill to
+**"visualize this session"**, or run the viewer directly:
+
+```bash
+# the session you're in (after a `claude --resume` / `/resume`, or `codex resume`)
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py
+
+# list your local sessions, then render one
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --list
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --pick 0
+```
+
+It writes a self-contained HTML page — the HITL / AFK / Tool / Idle timeline,
+leverage table, AFK streaks, and subagent panels — and opens it in your browser.
+
+**Redacted by default:** bubbles show only the wire-equivalent view (hashes +
+token counts + tool names, exactly what an upload would contain), so a rendered
+page is safe to share. Add `--no-redact` to reveal the real transcript text —
+safe locally, since the viewer uploads nothing, and most useful for hands-on
+debugging. The viewer reuses the same classifier ([`scripts/turn_classifier.py`](scripts/turn_classifier.py))
+that produces your score, so the bars it draws match the numbers you're scored on.
+
 ## Auditing this repo
 
 If you're here to verify the data path before installing, these are the files that matter:
