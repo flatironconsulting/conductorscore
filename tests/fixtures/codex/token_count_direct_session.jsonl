@@ -1,0 +1,6 @@
+{"timestamp":"2026-01-02T00:00:00.000Z","type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000002","cwd":"/home/synthetic/project-beta","originator":"codex_cli","cli_version":"0.0.0-test","model_provider":"openai"}}
+{"timestamp":"2026-01-02T00:00:01.000Z","type":"turn_context","payload":{"cwd":"/home/synthetic/project-beta","model":"gpt-5-codex"}}
+{"timestamp":"2026-01-02T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"please refactor the synthetic beta module"}]}}
+{"timestamp":"2026-01-02T00:00:08.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done — refactored the synthetic beta module."}]}}
+{"timestamp":"2026-01-02T00:00:09.000Z","type":"event_msg","payload":{"type":"token_count","last_token_usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":400,"reasoning_output_tokens":150,"total_tokens":2400},"total_token_usage":{"input_tokens":999999,"cached_input_tokens":999999,"output_tokens":999999,"total_tokens":999999}}}
+{"timestamp":"2026-01-02T00:00:09.500Z","type":"event_msg","payload":{"type":"task_complete"}}

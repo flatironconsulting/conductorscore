@@ -61,6 +61,36 @@ user a final report in exactly this shape (keep the ✓ and 📊 and the bullets
 - Only your score (the numbers) was uploaded — never any transcript text
 ```
 
+## Visualize a session (local debugging)
+
+When the user asks to **visualize / view / debug a session**, show its
+**timeline**, or see the **HITL/AFK/Tool/Idle breakdown** of a session, run the
+local session viewer — it renders a self-contained HTML page from a transcript
+on the user's own machine and **uploads nothing**:
+
+```
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py
+```
+
+(Codex: `~/.codex/skills/conductorscore/scripts/session_viewer.py`. On Windows
+use `python` or `py -3` if `python3` isn't found.)
+
+- **No argument → the session they're in.** The SessionStart hook records the
+  current transcript, so a bare run visualizes the active session. To inspect an
+  earlier one, the user navigates to it with the built-in picker first
+  (`claude --resume` / `/resume`, or `codex resume`) and then asks to visualize
+  "this session" — don't reinvent that navigation.
+- **A specific session:** pass a transcript path, or run with `--list` to print
+  the available sessions and `--pick N` to render one.
+- **Redaction is on by default:** bubbles show the wire-equivalent view (hashes +
+  token counts, tool names only — no raw text), matching exactly what an upload
+  would contain, so the page is safe to share. Add **`--no-redact`** to reveal
+  the real transcript text (safe locally — nothing leaves the machine — and most
+  useful for hands-on debugging).
+
+The script prints `Rendered … → <path>` and opens the HTML. Relay that path to
+the user. Don't narrate the internals.
+
 ## Device-flow login
 
 First run prints a `https://github.com/login/device` URL and a code, then STOPS

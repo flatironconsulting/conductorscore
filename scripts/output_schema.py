@@ -10,7 +10,7 @@ SCHEMA_VERSION = "0.11"
 # wire shape changes. Lives here (a shipped module) so scan.py can stamp the
 # upload without reading pyproject.toml, which is not installed alongside the
 # skill and would need tomllib (>=3.11, above our 3.10 floor).
-CLIENT_VERSION = "0.5.0"
+CLIENT_VERSION = "0.6.0"
 
 # The agent that produced a session / the device's observed providers. Codex
 # support (Slice 2) is additive on top of v0.11: ``provider`` defaults to
