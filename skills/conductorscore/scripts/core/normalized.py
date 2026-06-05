@@ -127,6 +127,13 @@ class Event:
     # discarded there (the privacy-invariant test pins that no raw text
     # lives on the Event).
     is_denied: bool = False
+    # TOOL_RESULT: True iff the result indicates the tool call was ABORTED /
+    # interrupted by the user mid-run (e.g. a hung Codex ``exec_command`` the
+    # user killed — the output reads "aborted by user after Ns"). Used to
+    # EXCLUDE the call→result interval from tool-runtime crediting, so a
+    # hung-then-killed command does not inflate active/AFK time. Privacy: only
+    # the boolean is stored; the output text is consumed in the reader.
+    is_aborted: bool = False
 
 
 __all__ = ["Event", "EventKind", "SessionMeta"]
