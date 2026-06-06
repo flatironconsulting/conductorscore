@@ -67,3 +67,28 @@ def test_main_no_redact_renders_real_text(tmp_path):
     rc = main([str(jsonl), "--out", str(out), "--no-open", "--no-redact"])
     assert rc == 0
     assert SECRET in out.read_text()
+
+
+def test_console_summary_states_nothing_uploaded(tmp_path, capsys):
+    # `/conductorscore debug` must reassure, every time, that this view uploads
+    # nothing — and never leak the raw prompt into the console under the default.
+    jsonl = _build(tmp_path)
+    out = tmp_path / "out.html"
+    main([str(jsonl), "--out", str(out), "--no-open"])
+    printed = capsys.readouterr().out
+    assert "nothing is uploaded" in printed
+    assert "nothing at all" in printed
+    assert "No network calls, no upload" in printed
+    assert "redacted" in printed
+    assert str(out) in printed
+    assert SECRET not in printed
+
+
+def test_console_summary_flags_full_text_when_no_redact(tmp_path, capsys):
+    # --no-redact renders real text, so the summary warns to keep it local.
+    jsonl = _build(tmp_path)
+    out = tmp_path / "out.html"
+    main([str(jsonl), "--out", str(out), "--no-open", "--no-redact"])
+    printed = capsys.readouterr().out
+    assert "FULL TEXT" in printed
+    assert "do not share" in printed
