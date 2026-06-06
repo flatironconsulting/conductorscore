@@ -79,11 +79,12 @@ flag below maps 1:1, so `/conductorscore debug <ARGS>` runs
 `session_viewer.py <ARGS>`.
 
 ```
-python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py [ARGS]
+python3 <this-skill-dir>/scripts/session_viewer.py [ARGS]
 ```
 
-(Codex: `~/.codex/skills/conductorscore/scripts/session_viewer.py`. On Windows
-use `python` or `py -3` if `python3` isn't found.)
+(`session_viewer.py` sits next to `run.py` in this skill's `scripts/`, wherever
+the skill is installed. On Windows use `python` or `py -3` if `python3` isn't
+found.)
 
 Supported arguments (the full Python CLI surface):
 
