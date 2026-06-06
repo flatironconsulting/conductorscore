@@ -19,3 +19,7 @@ exclude = ["tests*"]  # tests are not shipped in the installed skill
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "e2e: end-to-end test that shells out to a real coding agent (slow; may need network/auth; auto-skips when prerequisites are absent)",
+    "codex: requires a runnable codex CLI plus ~/.codex auth to seed; auto-skips otherwise",
+]

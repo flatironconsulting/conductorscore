@@ -99,15 +99,21 @@ Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.t
 
 ## Install
 
-Install the skill with either the GitHub CLI or skills.sh:
+Install the skill with the GitHub CLI or skills.sh:
 
 ```
-# GitHub CLI (gh)
+# GitHub CLI (gh) — works for every agent, including Codex
 gh skill install flatironconsulting/conductorscore conductorscore
 
-# or skills.sh
+# skills.sh — Claude Code and other agents that read ~/.agents/skills/
 npx skills add flatironconsulting/conductorscore
 ```
+
+Both installers work for Codex: the skill resolves its scripts relative to
+wherever it lands (skills.sh installs Codex skills under `~/.agents/skills/`, the
+GitHub CLI under `~/.codex/skills/`). An end-to-end test
+(`tests/e2e/test_skills_sh_codex_install.py`) pins this — it installs via
+`npx skills add` and confirms Codex can actually run the result.
 
 Then run the skill: `/conductorscore` in a Claude Code session, or
 `$conductorscore` in Codex. On the first run the skill signs you in with GitHub,

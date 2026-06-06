@@ -11,13 +11,16 @@ resulting numbers (your score) — never transcript text.
 When the user invokes this skill, say **"Calculating your ConductorScore"** and,
 on the next line, the skill version the script reports (its first output line is
 `Version X.Y.Z`) — e.g. show `Version 0.5.0` beneath the heading. Run the
-orchestrator from the skill directory:
+orchestrator from **this skill's own directory** — the folder that contains this
+SKILL.md, with `run.py` in its `scripts/` subdirectory. Don't assume a fixed
+location: depending on the agent and installer the skill may live under
+`~/.claude/skills/conductorscore/`, `~/.codex/skills/conductorscore/`, or
+`~/.agents/skills/conductorscore/`. Use the `scripts/run.py` next to this file:
 
 ```
-python3 ~/.claude/skills/conductorscore/scripts/run.py
+python3 <this-skill-dir>/scripts/run.py
 ```
 
-(If you launched from Codex, use `~/.codex/skills/conductorscore/scripts/run.py`.)
 On Windows, if `python3` isn't found, use `python` or `py -3` instead.
 
 If the script prints `↑ vX.Y.Z available — run: gh skill update …`, relay that
