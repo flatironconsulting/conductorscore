@@ -4,8 +4,8 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       - run: pip install -e ".[dev]"
       - run: pytest -v --cov=scripts
@@ -13,8 +13,8 @@ jobs:
   skill-package-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       # The committed mirror skills/conductorscore/ is what `gh skill install` and
       # `npx skills add` consume. Its SKILL.md is the canonical hand-authored skill
@@ -32,8 +32,8 @@ jobs:
   version-single-source:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       # The repo-root VERSION file is the ONE place the release version is
       # written. pyproject derives it via [tool.setuptools.dynamic]; the runtime
@@ -63,7 +63,7 @@ jobs:
   supply-chain-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Lock the clean-room properties that keep supply-chain scanners (Socket /
       # Snyk) and behavioral reviewers green: zero third-party dependencies and no
       # dynamic-code / obfuscation primitives in the scanner. If a future change
