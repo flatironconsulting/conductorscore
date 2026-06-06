@@ -61,35 +61,52 @@ user a final report in exactly this shape (keep the ✓ and 📊 and the bullets
 - Only your score (the numbers) was uploaded — never any transcript text
 ```
 
-## Visualize a session (local debugging)
+## Debug / visualize a session — `/conductorscore debug`
 
-When the user asks to **visualize / view / debug a session**, show its
-**timeline**, or see the **HITL/AFK/Tool/Idle breakdown** of a session, run the
-local session viewer — it renders a self-contained HTML page from a transcript
-on the user's own machine and **uploads nothing**:
+`/conductorscore debug` renders a session locally as a self-contained HTML
+timeline (HITL/AFK/Tool/Idle) and opens it in the browser. It runs entirely on
+the user's machine and **uploads nothing — not even the numbers a scan sends.**
+Use this path when the user types `/conductorscore debug …`, or asks to
+**visualize / view / debug a session**, show its **timeline**, or see the
+**HITL/AFK/Tool/Idle breakdown**.
+
+The slash interface IS the `session_viewer.py` interface: take whatever the user
+put after `debug` and pass it **straight through** to the Python CLI — every
+flag below maps 1:1, so `/conductorscore debug <ARGS>` runs
+`session_viewer.py <ARGS>`.
 
 ```
-python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py [ARGS]
 ```
 
 (Codex: `~/.codex/skills/conductorscore/scripts/session_viewer.py`. On Windows
 use `python` or `py -3` if `python3` isn't found.)
 
-- **No argument → the session they're in.** The SessionStart hook records the
-  current transcript, so a bare run visualizes the active session. To inspect an
-  earlier one, the user navigates to it with the built-in picker first
-  (`claude --resume` / `/resume`, or `codex resume`) and then asks to visualize
-  "this session" — don't reinvent that navigation.
-- **A specific session:** pass a transcript path, or run with `--list` to print
-  the available sessions and `--pick N` to render one.
-- **Redaction is on by default:** bubbles show the wire-equivalent view (hashes +
-  token counts, tool names only — no raw text), matching exactly what an upload
-  would contain, so the page is safe to share. Add **`--no-redact`** to reveal
-  the real transcript text (safe locally — nothing leaves the machine — and most
-  useful for hands-on debugging).
+Supported arguments (the full Python CLI surface):
 
-The script prints `Rendered … → <path>` and opens the HTML. Relay that path to
-the user. Don't narrate the internals.
+- **(no args)** → the session the user is in. The SessionStart hook records the
+  current transcript, so a bare run visualizes the active session. To inspect an
+  earlier one, the user navigates to it first with the built-in picker
+  (`claude --resume` / `/resume`, or `codex resume`), then runs
+  `/conductorscore debug` — don't reinvent that navigation.
+- **`<path.jsonl>`** → render that explicit transcript.
+- **`--list`** → print discoverable local sessions (index, date, id, project) and
+  exit.
+- **`--pick N`** → render the Nth session from `--list` (newest first).
+- **`--no-redact`** → show the real transcript text. Default is **redacted**:
+  bubbles show the wire-equivalent view (hashes + token counts, tool names only —
+  no raw text), matching exactly what a scan would upload, so the page is safe to
+  share. `--no-redact` is safe locally (nothing leaves the machine) and best for
+  hands-on debugging.
+- **`--out <path>`** → write the HTML somewhere other than
+  `~/.cache/conductorscore/`.
+- **`--no-open`** → render without launching the browser.
+
+The script prints a **local-only debug summary** — the source transcript, the
+redaction mode, message/turn/streak/leverage counts, and an explicit
+"nothing is uploaded" assurance — then writes the HTML and opens it. **Relay the
+script's console summary and its `Rendered … → <path>` line as-is; don't
+re-narrate or restate the numbers.**
 
 ## Device-flow login
 

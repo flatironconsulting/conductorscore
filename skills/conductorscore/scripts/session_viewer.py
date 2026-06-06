@@ -1738,6 +1738,46 @@ def _print_session_list() -> None:
         print(f"{i:>3}  {started:16}  {sid:14}  {s.project_root}")
 
 
+def _print_console_summary(
+    jsonl: Path, out: Path, *, redact: bool, result: dict
+) -> None:
+    """Print a local-only debug summary for a rendered session.
+
+    States plainly — every time — that this debug view uploads nothing, and
+    surfaces the headline timeline numbers so the CLI is useful on its own even
+    before the HTML opens. The agent relays this verbatim, so the assurance and
+    the stats live here in the script rather than depending on narration.
+    """
+    messages = int(result.get("messages", 0) or 0)
+    print()
+    print("ConductorScore · session debug — local only, nothing is uploaded")
+    print()
+    print(f"  Source     {jsonl}")
+    if redact:
+        print("  View       redacted — wire-equivalent (hashes + token counts, no")
+        print("             raw text); identical to what a scan would send, safe to share")
+    else:
+        print("  View       FULL TEXT — real transcript shown; keep local, do not share")
+    if messages:
+        turns = int(result.get("turns", 0) or 0)
+        hitl = int(result.get("hitl_streaks", 0) or 0)
+        afk = int(result.get("afk_streaks", 0) or 0)
+        wl = float(result.get("wallclock_leverage", 0.0) or 0.0)
+        pl = float(result.get("parallel_leverage", 0.0) or 0.0)
+        print(f"  Messages   {messages}")
+        print(f"  Turns      {turns}  ({hitl} HITL streak(s), {afk} AFK streak(s))")
+        print(f"  Leverage   wallclock {wl:.2f}× · parallel {pl:.2f}×")
+    else:
+        print("  Messages   0  (no main-agent messages found in this session)")
+    print()
+    print("  Ran entirely on your machine: one local transcript in, a self-contained")
+    print("  HTML page out. No network calls, no upload — not even the numbers. (The")
+    print("  /conductorscore scan uploads only your score; this debug view uploads")
+    print("  nothing at all.)")
+    print()
+    print(f"Rendered {messages} message(s) → {out}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="session_viewer",
@@ -1795,7 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(args.out) if args.out else _default_out(jsonl)
     result = render_session(jsonl, out, redact=args.redact)
-    print(f"Rendered {result.get('messages', 0)} messages → {out}")
+    _print_console_summary(jsonl, out, redact=args.redact, result=result)
     if args.open:
         _open_in_browser(out)
     return 0
