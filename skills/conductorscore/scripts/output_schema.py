@@ -2,15 +2,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal
 
 SCHEMA_VERSION = "0.12"
-# Client build version — kept in sync with ``version`` in pyproject.toml (see
-# RELEASING.md step 1). Distinct from SCHEMA_VERSION, which only moves when the
-# wire shape changes. Lives here (a shipped module) so scan.py can stamp the
-# upload without reading pyproject.toml, which is not installed alongside the
-# skill and would need tomllib (>=3.11, above our 3.10 floor).
-CLIENT_VERSION = "0.6.0"
+
+
+def _read_client_version() -> str:
+    """Release version, read from the single-source-of-truth ``VERSION`` file at
+    the package root (beside ``scripts/``). The file ships in the skill mirror and
+    is read the same way by ``run.py`` and by ``pyproject.toml`` via
+    ``[tool.setuptools.dynamic]`` — so the number lives in exactly one place.
+    Distinct from SCHEMA_VERSION, which only moves when the wire shape changes.
+    We read this plain text file (not pyproject.toml) because pyproject is not
+    shipped alongside the skill and parsing it would need tomllib (>=3.11)."""
+    try:
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+    except OSError:
+        return "0.0.0+unknown"
+
+
+CLIENT_VERSION = _read_client_version()
 
 # The agent that produced a session / the device's observed providers. Codex
 # support (Slice 2) is additive on top of v0.11: ``provider`` defaults to
