@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conductorscore"
-version = "0.6.0"
+dynamic = ["version"]  # single source of truth: the repo-root VERSION file (see below)
 description = "ConductorScore Client"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -12,6 +12,9 @@ dependencies = []  # stdlib only — privacy + portability
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "pytest-httpserver>=1.0"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }  # the one place the release version is written
 
 [tool.setuptools.packages.find]
 exclude = ["tests*"]  # tests are not shipped in the installed skill
