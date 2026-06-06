@@ -12,13 +12,17 @@ If step 4 fails, skills.sh installs the skill somewhere Codex can find it
 SKILL.md hardcodes an install path (``~/.codex/skills/...``) that the skills.sh
 layout doesn't match. The fix lives in the skill, not here.
 
-The test installs from the local checkout (not the published GitHub slug) so it
-validates the SKILL.md in *this* tree. It auto-skips when there's no usable
-codex binary, no Codex auth to seed, or no npx — so the default offline ``pytest``
-run stays green. It makes ~2 real ``codex exec`` model calls when it does run.
+By default it installs from the local checkout, so it validates the SKILL.md in
+*this* tree (CI/PR). Set ``CONDUCTORSCORE_TEST_SKILL_SOURCE`` to any source
+``npx skills add`` accepts — e.g. ``flatironconsulting/conductorscore`` — to run
+the same flow against the PUBLISHED artifact as a post-release prod smoke test.
+It auto-skips when there's no usable codex binary, no Codex auth to seed, or no
+npx — so the default offline ``pytest`` run stays green. It makes ~2 real
+``codex exec`` model calls when it does run.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,8 +40,15 @@ from tests.e2e.codex_runner import (
 
 pytestmark = [pytest.mark.e2e, pytest.mark.codex]
 
+# What `npx skills add` installs from. Default: this checkout (CI/PR validates
+# the branch's own code). Override to test the PUBLISHED artifact as a prod smoke
+# test, e.g. CONDUCTORSCORE_TEST_SKILL_SOURCE=flatironconsulting/conductorscore —
+# any value `npx skills add` accepts (a local path or a GitHub owner/repo slug).
 # repo root: <root>/tests/e2e/this_file.py → parents[2] holds skills/conductorscore
-SKILL_SOURCE = Path(__file__).resolve().parents[2]
+SKILL_SOURCE = os.environ.get(
+    "CONDUCTORSCORE_TEST_SKILL_SOURCE",
+    str(Path(__file__).resolve().parents[2]),
+)
 
 RUN_PROMPT = (
     "You may have a skill named 'conductorscore'. If it is available to you, run "
