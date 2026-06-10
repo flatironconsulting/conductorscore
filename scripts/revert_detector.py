@@ -22,13 +22,13 @@ from __future__ import annotations
 import re
 
 # Shell-family tool names whose ``raw_input["command"]`` is checked for
-# reverts. ``Bash`` is Claude; ``shell`` (old ``{"command":[...]}`` arg shape)
-# and ``exec_command`` (new ``{"cmd":...}`` shape) are Codex — the reader has
-# already normalized BOTH Codex shapes to a single command string on
+# reverts. ``Bash`` is Claude; ``shell`` (old ``{"command":[...]}`` arg shape),
+# ``exec_command`` (new ``{"cmd":...}`` shape), and ``shell_command`` are
+# Codex. The reader has already normalized Codex shell shapes to one command on
 # ``raw_input["command"]``, so this detector reuses the SAME regexes with no
 # per-provider branching.
 SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command"}
+    {"Bash", "shell", "exec_command", "shell_command"}
 )
 
 # Patterns that flag a Bash segment as a destructive revert. Each is
@@ -73,11 +73,11 @@ def count_reverts(events) -> int:
     git revert HEAD && ls`` counts as 1.
 
     Only ``ASSISTANT_TOOL`` events whose ``tool_name`` is a shell-family tool
-    (``Bash`` for Claude; ``shell`` / ``exec_command`` for Codex) and whose
-    in-memory ``raw_input`` dict carries a ``command`` string are considered.
-    Both Codex arg shapes were normalized to one command string by the reader,
-    so this counter is arg-shape-agnostic. Missing or malformed ``raw_input``
-    contributes 0.
+    (``Bash`` for Claude; ``shell`` / ``exec_command`` / ``shell_command`` for
+    Codex) and whose in-memory ``raw_input`` dict carries a ``command`` string
+    are considered. Codex shell shapes were normalized to one command string by
+    the reader, so this counter is arg-shape-agnostic. Missing or malformed
+    ``raw_input`` contributes 0.
     """
     count = 0
     for e in events:

@@ -678,6 +678,60 @@ def test_codex_planted_secrets_never_reach_wire_payload(
     assert expected in out.to_json()
 
 
+def test_codex_shell_command_git_commits_are_counted(codex_home):
+    """Codex Desktop shell_command calls must feed commit_count like shell."""
+    secret_commit_msg = "CXSECRET_COMMIT_MESSAGE_ZZZ"
+    rows = [
+        {"timestamp": _ts(0), "type": "session_meta",
+         "payload": {"id": "cx-shell-command-commits",
+                     "cwd": "/p", "model_provider": "openai"}},
+        {"timestamp": _ts(1), "type": "turn_context",
+         "payload": {"cwd": "/p", "model": "gpt-5-codex"}},
+        {"timestamp": _ts(2), "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "commit it"}]}},
+        {"timestamp": _ts(5), "type": "response_item",
+         "payload": {"type": "function_call", "name": "shell_command",
+                     "call_id": "commit-1",
+                     "arguments": json.dumps({
+                         "command": f"git commit -m {secret_commit_msg}"
+                     })}},
+        {"timestamp": _ts(6), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "commit-1",
+                     "output": "[main abc1234] commit"}},
+        {"timestamp": _ts(10), "type": "response_item",
+         "payload": {"type": "function_call", "name": "shell_command",
+                     "call_id": "dry-run",
+                     "arguments": json.dumps({
+                         "command": "git commit --dry-run"
+                     })}},
+        {"timestamp": _ts(11), "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "dry-run",
+                     "output": "nothing to commit"}},
+        {"timestamp": _ts(15), "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+        {"timestamp": _ts(16), "type": "event_msg",
+         "payload": {"type": "task_complete"}},
+    ]
+    _write_codex_rollout(codex_home, "rollout-codex-shell-command.jsonl", rows)
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=_now_ms(),
+        consent_decision=_codex_consent(),
+    )
+    payload = json.loads(out.to_json())
+
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.provider == "codex"
+    assert s.commit_count == 1
+    assert "shell_command" in s.distinct_builtin_tools
+    _assert_secret_absent(payload, secret_commit_msg, where="shell command text")
+
+
 def test_codex_skill_multi_agent_and_runtime_gap_metrics(codex_home):
     """Codex emits skills and multi-agent work through transcript shapes that
     differ from Claude Code. Count those surfaces without leaking arguments or
