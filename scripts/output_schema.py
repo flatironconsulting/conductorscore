@@ -1,11 +1,40 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-SCHEMA_VERSION = "0.12"
+SCHEMA_VERSION = "0.13"
+
+
+def _sha16(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def compute_session_chain(sessions: list[dict]) -> str:
+    """Fold a deterministic per-session digest (over the numeric fields the
+    server integrity-checks) into a single chain, in submission order. A Tier-1
+    text-editor who edits a count but not this chain produces a mismatch the
+    server detects (plan 030, S4). Reproducible from this source — a deterrent,
+    not a security boundary. MUST match web/lib/scorer/integrity.ts:
+    computeSessionChain (pipe-joined integers, no JSON ambiguity)."""
+    def digest(s: dict) -> str:
+        parts = [
+            str(s.get("session_hash", "")),
+            str(int(s.get("started_at_ms", 0))), str(int(s.get("ended_at_ms", 0))),
+            str(int(s.get("total_lines_edited", 0))), str(int(s.get("commit_count", 0))),
+            str(int(s.get("total_input_tokens", 0))), str(int(s.get("total_output_tokens", 0))),
+            str(int(s.get("hitl_minutes", 0))), str(int(s.get("afk_minutes", 0))),
+            str(int(s.get("idle_minutes", 0))),
+        ]
+        return _sha16("|".join(parts))
+
+    acc = ""
+    for s in sessions:
+        acc = _sha16(acc + "|" + digest(s))
+    return acc
 
 
 def _read_client_version() -> str:
@@ -292,6 +321,10 @@ class ExtractorOutput:
             "config": config_d,
             "sessions": [_session_dict(s) for s in self.sessions],
         }
+        # Tamper-evidence hash-chain over the sessions in submission order
+        # (plan 030, S4). Computed from the just-built session dicts so it always
+        # matches what is serialized.
+        out["session_chain"] = compute_session_chain(out["sessions"])
         # Emit ``providers_seen`` only when it isn't exactly ("claude",); a
         # Claude-only run stays byte-equivalent to v0.11.
         if tuple(self.providers_seen) != (_DEFAULT_PROVIDER,):

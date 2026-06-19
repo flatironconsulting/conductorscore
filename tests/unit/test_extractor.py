@@ -30,7 +30,7 @@ def test_extract_empty_when_no_sessions(isolated_claude_home):
     assert out.device.client_version == "0.1.0"
     assert out.device.extracted_at_ms == 1_000_000_000_000
     assert out.device.window_days == 30
-    assert out.device.schema_version == "0.12"
+    assert out.device.schema_version == "0.13"
 
 
 def test_extract_30_day_filter_trims_old_sessions(isolated_claude_home):
@@ -249,7 +249,7 @@ def test_extract_populates_v0_11_per_name_maps(isolated_claude_home):
 def test_extract_to_json_has_v0_2_top_level_keys(isolated_claude_home):
     out = extract(device_id="dev-1", client_version="0.1.0", now_ms=1_000_000_000_000)
     parsed = json.loads(out.to_json())
-    assert set(parsed.keys()) == {"device", "config", "sessions"}
+    assert set(parsed.keys()) == {"device", "config", "sessions", "session_chain"}
     assert set(parsed["config"].keys()) == {
         "mcp_servers",
         "hooks",

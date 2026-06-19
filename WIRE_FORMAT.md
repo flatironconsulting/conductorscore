@@ -24,6 +24,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.10 | "Longest agent run" L4 table | `sessions[].top_afk_streaks` (top-5 AFK streaks per session, descending by `active_minutes`) |
 | 0.11 | Customization "Top by invocations" table | `sessions[].{skill_invocations_by_name, mcp_invocations_by_name, plugin_invocations_by_name}` — per-name invocation maps. MCP and plugin keys are **raw names in plaintext**. |
 | 0.12 | Codex AGENTS.md line-count split | `config.global_agents_md_lines` — AGENTS.md lines tracked separately; `global_claude_md_lines` is now CLAUDE.md-only. |
+| 0.13 | Tamper-evidence hash-chain | top-level `session_chain` — a hash-chain over the sessions in submission order. Optional; the server verifies it (a mismatch ⇒ telemetry edited after scan). See [§ Schema v0.13](#schema-v013--session_chain-tamper-evidence). |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
@@ -938,3 +939,56 @@ shape is unchanged.
   `global_claude_md_lines` value may include AGENTS.md lines (pre-split
   behaviour). The server SHOULD NOT attempt to retroactively split those
   counts; they are used as-is for instruction-bloat scoring.
+
+## Schema v0.13 — `session_chain` tamper-evidence
+
+v0.13 adds one **optional top-level field**, `session_chain`, and bumps
+`device.schema_version` to `"0.13"`. The per-session shape is unchanged from
+v0.12. It is additive: a server on the deprecation window accepts `"0.11"`,
+`"0.12"`, and `"0.13"`; a missing `session_chain` (older client) is simply not
+verified.
+
+### Top-level `session_chain`
+
+| Field           | Type   | Required | Notes |
+|-----------------|--------|----------|-------|
+| `session_chain` | string | no       | 16 lowercase-hex chars (`^[a-f0-9]{16}$`). A hash-chain folded over the sessions **in submission order**. Lets the server detect telemetry that was hand-edited *after* the scan (a Tier-1 deterrent; reproducible from this public source, so it is **not** a security boundary). |
+
+### Construction (client and server compute it identically)
+
+For each session, a per-session digest is the first 16 hex chars of the
+SHA-256 of these fields **pipe-joined as integers** (no JSON, so there is no
+cross-language ambiguity), in this exact order:
+
+```
+digest(session) = sha16(
+  session_hash | started_at_ms | ended_at_ms |
+  total_lines_edited | commit_count | total_input_tokens |
+  total_output_tokens | hitl_minutes | afk_minutes | idle_minutes
+)
+```
+
+Missing numeric fields are treated as `0`. The chain folds the digests in
+submission order, seeded with the empty string:
+
+```
+acc = ""
+for s in sessions:        # submission order
+    acc = sha16(acc + "|" + digest(s))
+session_chain = acc       # 16 lowercase hex; "" for an empty corpus
+```
+
+where `sha16(x) = sha256(x).hexdigest()[:16]`. The reference implementations
+are `skills/conductorscore/scripts/output_schema.py:compute_session_chain`
+(client) and `web/lib/scorer/integrity.ts:computeSessionChain` (server); they
+MUST stay byte-identical.
+
+### Verification & privacy
+
+The server recomputes the chain from the received sessions; a mismatch raises
+the **soft** `S4_broken_hash_chain` integrity signal (a legit client bug must
+not hard-fail a user). Editing the raw transcript and re-scanning does **not**
+break the chain (the scanner recomputes it over the edited counts) — that case
+is caught by the content invariants instead; `session_chain` specifically
+catches *post-scan* telemetry edits. The field is an ordering hash over data
+already transmitted; it carries no new content.
