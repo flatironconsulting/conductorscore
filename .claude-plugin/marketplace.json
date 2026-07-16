@@ -1,0 +1,7 @@
+{
+  "name": "conductorscore",
+  "owner": { "name": "Flatiron Consulting" },
+  "plugins": [
+    { "name": "conductorscore", "source": "./", "description": "Score your Claude Code skill.", "autoUpdate": true }
+  ]
+}

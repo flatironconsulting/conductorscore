@@ -1,0 +1,88 @@
+name: ci
+on: { push: { branches: [main] }, pull_request: {} }
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[dev]"
+      - run: pytest -v --cov=scripts
+
+  skill-package-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.11" }
+      # The committed mirror skills/conductorscore/ is what `gh skill install` and
+      # `npx skills add` consume. Its SKILL.md is the canonical hand-authored skill
+      # body; scripts/ + VERSION are rebuilt from the repo-root sources. There must
+      # be NO root-level SKILL.md — one would make `npx skills add` treat the whole
+      # repository as the skill instead of this clean package. These gates fail CI
+      # if a root SKILL.md is reintroduced or if the mirror ever drifts.
+      - name: No root-level SKILL.md (would break `npx skills add` discovery)
+        run: test ! -f SKILL.md
+      - name: Rebuild skill package
+        run: python3 scripts/build_skill_package.py
+      - name: Assert committed mirror matches a fresh build
+        run: git diff --exit-code -- skills/conductorscore
+
+  version-single-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.11" }
+      # The repo-root VERSION file is the ONE place the release version is
+      # written. pyproject derives it via [tool.setuptools.dynamic]; the runtime
+      # stamp output_schema.CLIENT_VERSION reads it at import. This asserts both
+      # derivations actually resolve to the file's value — catching a broken read
+      # path or a misconfigured dynamic-version setup. (SCHEMA_VERSION is NOT here;
+      # the wire format versions independently of the release.)
+      - run: pip install -e ".[dev]"
+      - name: Derived versions resolve to the VERSION file
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          from importlib.metadata import version as dist_version
+          from scripts.output_schema import CLIENT_VERSION
+          want = pathlib.Path("VERSION").read_text().strip()
+          pkg = dist_version("conductorscore")
+          errs = []
+          if CLIENT_VERSION != want:
+              errs.append(f"output_schema.CLIENT_VERSION={CLIENT_VERSION!r} != VERSION={want!r}")
+          if pkg != want:
+              errs.append(f"installed package version={pkg!r} != VERSION={want!r}")
+          if errs:
+              sys.exit("FAIL: " + "; ".join(errs))
+          print(f"OK: release version {want} resolves from the single VERSION source")
+          PY
+
+  supply-chain-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Lock the clean-room properties that keep supply-chain scanners (Socket /
+      # Snyk) and behavioral reviewers green: zero third-party dependencies and no
+      # dynamic-code / obfuscation primitives in the scanner. If a future change
+      # genuinely needs one of these, relax this guard deliberately in the same PR.
+      - name: Zero third-party dependencies (stdlib only)
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+          t = pathlib.Path("pyproject.toml").read_text()
+          m = re.search(r'(?ms)^\s*dependencies\s*=\s*\[(.*?)\]', t)
+          inner = (m.group(1) if m else "").strip()
+          if inner:
+              sys.exit(f"FAIL: dependencies must be empty (stdlib only); found: {inner}")
+          print("OK: zero runtime dependencies")
+          PY
+      - name: No dynamic-code / obfuscation primitives in scripts/
+        run: |
+          if grep -rnE '\b(eval|exec|__import__)[[:space:]]*\(|\b(os\.system|base64|pickle|marshal)\b' scripts/; then
+            echo "FAIL: dynamic-code/obfuscation primitive found in scripts/ (see above)"
+            exit 1
+          fi
+          echo "OK: no dynamic-code/obfuscation primitives"
