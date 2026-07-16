@@ -57,8 +57,7 @@ def test_claude_home_env_var_override(isolated_claude_home):
 
 def test_claude_home_default_uses_dot_claude(monkeypatch, tmp_path):
     monkeypatch.delenv("CONDUCTORSCORE_CLAUDE_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # Path.home() reads $HOME on POSIX
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     assert claude_home() == tmp_path / ".claude"
 
 
