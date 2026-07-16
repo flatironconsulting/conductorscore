@@ -49,17 +49,30 @@ RESUME_POLL_SECONDS = 8
 
 
 def _make_output_live() -> None:
-    """Line-buffer stdout/stderr so every printed line flushes immediately.
+    """Line-buffer stdout/stderr AND force UTF-8 so every printed line flushes
+    immediately and non-ASCII output never crashes the run.
 
     The skill is launched by the agent via Bash with stdout piped (not a TTY),
     where Python block-buffers by default — so progress lines, and crucially the
     GitHub device-flow URL+code, would sit unflushed until the process exits and
     look like a hang. Reconfiguring to line-buffered makes each newline flush.
+
+    Encoding matters just as much. Our output contains non-ASCII glyphs — the
+    ``✓`` summary check (U+2713), the ``…`` progress ellipsis, ``—`` em dashes —
+    but on Windows the default stdout codec is cp1252, which can't encode
+    ``✓``. A single unrepresentable glyph raised ``UnicodeEncodeError`` and
+    killed the run *after* the scan and upload had already succeeded: the score
+    was computed but the user only saw a crash. Forcing UTF-8 with
+    ``errors="replace"`` makes output robust on every platform (the mirror of
+    the read-side ``encoding="utf-8"`` fix for transcripts).
+
     Guarded: under pytest's capture the stream may lack ``reconfigure``.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+            stream.reconfigure(  # type: ignore[union-attr]
+                encoding="utf-8", errors="replace", line_buffering=True
+            )
         except (AttributeError, ValueError, OSError):
             pass
 
@@ -127,7 +140,7 @@ def _writable_cache_dir() -> Path:
     try:
         preferred.mkdir(parents=True, exist_ok=True)
         probe = preferred / ".probe"
-        probe.write_text("")
+        probe.write_text("", encoding="utf-8")
         probe.unlink()
         return preferred
     except OSError:
@@ -150,7 +163,7 @@ def _persist_transcript_path(raw_stdin: str) -> Path | None:
     out = _cache_dir() / "current_transcript"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(tp)
+        out.write_text(tp, encoding="utf-8")
     except OSError:
         return None
     return out
@@ -202,7 +215,7 @@ def _load_pending() -> dict | None:
 def _save_pending(state: dict) -> None:
     p = _pending_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w") as f:
+    with open(p, "w", encoding="utf-8") as f:
         json.dump(state, f)
 
 
@@ -617,7 +630,7 @@ def main() -> int:
         status_path = cache / "status.json"
         log_path = cache / "last-run.log"
         status_path.unlink(missing_ok=True)
-        log = open(log_path, "w")
+        log = open(log_path, "w", encoding="utf-8")
     except OSError:
         print(
             "ConductorScore needs write access to its cache (read-only "

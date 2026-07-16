@@ -54,7 +54,9 @@ def build(root: Path) -> int:
     shutil.copytree(src_scripts, target_scripts, ignore=IGNORE)
 
     # Version stamp (SKILL.md is authored in place, not generated).
-    (target / "VERSION").write_text(src_version.read_text())
+    (target / "VERSION").write_text(
+        src_version.read_text(encoding="utf-8"), encoding="utf-8"
+    )
 
     copied = sum(1 for p in target.rglob("*") if p.is_file())
     return copied

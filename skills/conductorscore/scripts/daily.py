@@ -77,7 +77,7 @@ def enable_daily(provider: str) -> DailyResult:
             session_start.append({"matcher": "startup", "hooks": [hook]})
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except OSError:
         pass
     return DailyResult(
@@ -118,7 +118,9 @@ def main() -> int:
         # in-package path, never from an env var — so the spawned command line can't
         # be influenced by the environment.
         scan_py = Path(__file__).resolve().parent / "scan.py"
-        stamp.write_text(str(int(time.time())))  # stamp BEFORE spawn so a crash can't busy-loop.
+        stamp.write_text(
+            str(int(time.time())), encoding="utf-8"
+        )  # stamp BEFORE spawn so a crash can't busy-loop.
         # No lock: two simultaneous SessionStarts may both fire once — acceptable for a score refresh.
         # This spawns OUR OWN local scanner (scripts/scan.py) detached so the daily
         # refresh doesn't block the session. It is not hidden beaconing: scan.py reads
