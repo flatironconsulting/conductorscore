@@ -165,7 +165,7 @@ def read_cached_consent(env: Mapping[str, str] = os.environ) -> list[AgentId] | 
         return None
     path = consent_file(env)
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     if not isinstance(data, dict):
@@ -196,7 +196,7 @@ def write_cached_consent(
     path = consent_file(env)
     api_base, ident = _cache_key(env)
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or data.get("schema_version") != CONSENT_SCHEMA_VERSION:
             data = {"schema_version": CONSENT_SCHEMA_VERSION, "entries": {}}
     except (FileNotFoundError, json.JSONDecodeError, OSError):

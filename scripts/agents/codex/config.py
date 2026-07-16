@@ -97,7 +97,7 @@ def _count_agents_md_lines(base: Path) -> int:
     if not path.is_file():
         return 0
     try:
-        return len(path.read_text().splitlines())
+        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
     except OSError:
         return 0
 

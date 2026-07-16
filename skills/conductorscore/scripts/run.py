@@ -67,7 +67,7 @@ def _make_output_live() -> None:
 def _skill_version() -> str | None:
     """The installed skill's version, from the VERSION file beside scripts/."""
     try:
-        return (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return None
 
@@ -193,7 +193,7 @@ def _pending_path() -> Path:
 
 def _load_pending() -> dict | None:
     try:
-        with open(_pending_path()) as f:
+        with open(_pending_path(), encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
@@ -697,7 +697,7 @@ def main() -> int:
 
 def _read_status(path: Path) -> dict | None:
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
