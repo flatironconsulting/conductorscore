@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup", "hooks": [
+        { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/daily.py"] }
+      ] }
+    ]
+  }
+}

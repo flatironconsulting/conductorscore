@@ -1,0 +1,132 @@
+# <img src="assets/note.svg" alt="♬" height="22" align="bottom"> ConductorScore Scanner
+
+The open-source scanner behind [conductorscore.com](https://conductorscore.com).
+
+This is the code that runs on your machine, reads your local Claude Code transcripts, and uploads a **numbers-only** payload to the server for scoring. It's public, auditable, and dependency-free on purpose — the whole point of ConductorScore is that you can verify what crosses the wire before you trust the score.
+
+```
+~/.claude/projects/**/*.jsonl   (your transcripts)
+            ↓
+scanner (this repo)             (pure function)
+            ↓
+numeric payload                 (≈38 fields/session)
+            ↓
+conductorscore.com              (scoring)
+```
+
+## What gets uploaded
+
+Per Claude Code session in the last 30 days, the client emits ~38 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
+
+- a **number** (counts, minute durations, token totals, line counts),
+- a **16-char SHA-256 prefix** (session id, project root — not reversible),
+- a **boolean**, or
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
+
+## What is never uploaded
+
+- **No transcript content** — not your messages, not Claude's responses.
+- **No code** — not file contents, not diffs.
+- **No file paths** — only a hash of the project root.
+- **No tool arguments or outputs** — only tool names and counts. For the redundant-approvals signature, repeated `Bash` commands contribute their first command token (any leading `NAME=value` env assignment is stripped first, so a secret value can't ride along; and if the command is invoked *by path* — e.g. `./deploy.sh`, `/Users/you/clients/acme/run.sh` — the token collapses to the literal `path`, so the path never crosses) and `Edit`/`Write` approvals contribute a one-way hash of the top-level directory — never the path itself.
+- **No `CLAUDE.md` content** — only the line count.
+- **No prompts or planning text** — only which structural signals fired.
+
+This invariant is enforced in CI on every push and pull request. An integration test feeds synthetic transcripts — seeded with planted secret markers in every place content could leak (user prompts, file paths, tool inputs, slash-command arguments, assistant text, inline `Bash` environment variables, and `Bash` commands invoked by path) — through the real scanner, then asserts that none of those planted secrets appears anywhere in the upload payload. A companion sweep re-runs the check for every anti-pattern detector. (Like any sentinel test, it proves the absence of the secrets it plants rather than a mathematical impossibility — but the planting covers every field that crosses the wire, and the client is open source so you can audit the rest.)
+
+For the field-by-field schema, see [`WIRE_FORMAT.md`](WIRE_FORMAT.md). A sample payload lives at [`wire_format_sample.json`](wire_format_sample.json).
+
+## Verify the privacy invariant yourself
+
+Don't take our word for it — the test that enforces the no-leak guarantee ships in this repo and runs in under a second:
+
+```bash
+git clone https://github.com/flatironconsulting/conductorscore
+cd conductorscore
+pip install -e ".[dev]"        # the only dev dependency is pytest; the client itself has zero runtime deps
+
+# Run just the privacy-invariant test:
+pytest tests/integration/test_extractor_integration.py -v
+
+# Or run the whole suite (unit + integration):
+pytest
+```
+
+The privacy test ([`tests/integration/test_extractor_integration.py`](tests/integration/test_extractor_integration.py)) plants unique secret strings into a synthetic `~/.claude` transcript tree, runs the actual `extract()` path the installed skill uses, and fails if any planted secret — or any raw prompt, path, or tool argument — survives into the serialized payload. To convince yourself it's real, edit the scanner to leak something on purpose and watch the test go red.
+
+This is the same `pytest` invocation our CI runs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), so a green badge means the invariant held on the exact code you're reading.
+
+## Visualize your sessions locally
+
+The same on-device data the scanner reads can be rendered as a timeline you can
+inspect yourself — no server round-trip, nothing uploaded. Ask the skill to
+**"visualize this session"**, or run the viewer directly:
+
+```bash
+# the session you're in (after a `claude --resume` / `/resume`, or `codex resume`)
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py
+
+# list your local sessions, then render one
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --list
+python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --pick 0
+```
+
+It writes a self-contained HTML page — the HITL / AFK / Tool / Idle timeline,
+leverage table, AFK streaks, and subagent panels — and opens it in your browser.
+
+**Redacted by default:** bubbles show only the wire-equivalent view (hashes +
+token counts + tool names, exactly what an upload would contain), so a rendered
+page is safe to share. Add `--no-redact` to reveal the real transcript text —
+safe locally, since the viewer uploads nothing, and most useful for hands-on
+debugging. The viewer reuses the same classifier ([`scripts/turn_classifier.py`](scripts/turn_classifier.py))
+that produces your score, so the bars it draws match the numbers you're scored on.
+
+## Auditing this repo
+
+If you're here to verify the data path before installing, these are the files that matter:
+
+| File                                                   | What to check                                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| [`scripts/scanner.py`](scripts/scanner.py)             | Top-level extractor. Reads JSONL, builds the payload, and hashes the session id + project root (`sha256[:16]`, no salts, not reversible). |
+| [`scripts/output_schema.py`](scripts/output_schema.py) | The exact shape of the upload payload. Every field is named here.                    |
+| [`scripts/events.py`](scripts/events.py)               | JSONL event parsing — what the client reads off disk.                                |
+| [`scripts/scan.py`](scripts/scan.py)                   | Runs the scan and uploads the payload — the score upload (`POST /api/ingest`) is here. |
+| [`scripts/run.py`](scripts/run.py)                     | CLI orchestrator: spawns `scan.py`, polls a local status file, prints the summary.   |
+| [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py) | GitHub OAuth device-flow login — identity only, separate from the score upload. |
+| [`WIRE_FORMAT.md`](WIRE_FORMAT.md)                     | Versioned schema, including a per-version changelog.                                 |
+
+Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is under 4k lines of Python.
+
+## Install
+
+Install the skill with the GitHub CLI or skills.sh:
+
+```
+# GitHub CLI (gh) — works for every agent, including Codex
+gh skill install flatironconsulting/conductorscore conductorscore
+
+# skills.sh — Claude Code and other agents that read ~/.agents/skills/
+npx skills add flatironconsulting/conductorscore
+```
+
+Both installers work for Codex: the skill resolves its scripts relative to
+wherever it lands (skills.sh installs Codex skills under `~/.agents/skills/`, the
+GitHub CLI under `~/.codex/skills/`). An end-to-end test
+(`tests/e2e/test_skills_sh_codex_install.py`) pins this — it installs via
+`npx skills add` and confirms Codex can actually run the result.
+
+Then run the skill: `/conductorscore` in a Claude Code session, or
+`$conductorscore` in Codex. On the first run the skill signs you in with GitHub,
+scans your transcripts on-device, and uploads only the numbers. First score in
+under 60 seconds.
+
+Login uses GitHub's OAuth device flow (it prints a URL and a code to authorize in
+your browser), requesting the `read:user` and `user:email` scopes only. The
+installed client never requests `repo` scope and never transmits any other GitHub
+credential (such as a local `gh` CLI token). Separately, web sign-in may request
+broader GitHub access so the server can count commits across repositories you can
+read. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).

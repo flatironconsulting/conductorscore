@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conductorscore"
+dynamic = ["version"]  # single source of truth: the repo-root VERSION file (see below)
+description = "ConductorScore Client"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = []  # stdlib only — privacy + portability
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5", "pytest-httpserver>=1.0"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }  # the one place the release version is written
+
+[tool.setuptools.packages.find]
+exclude = ["tests*"]  # tests are not shipped in the installed skill
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "e2e: end-to-end test that shells out to a real coding agent (slow; may need network/auth; auto-skips when prerequisites are absent)",
+    "codex: requires a runnable codex CLI plus ~/.codex auth to seed; auto-skips otherwise",
+]

@@ -1,0 +1,278 @@
+{
+  "_comment": "Sample wire-format payload (v0.11). The complete schema lives in WIRE_FORMAT.md alongside this file. Privacy invariant: every value below is either a number, a SHA-256 hash, or a categorical label (model id, built-in tool name, signal enum, or a user-configured identifier — slash-command, MCP server/tool, and plugin command names, which are emitted in plaintext). We emit names only, never their arguments, inputs, or outputs. No raw prompts, code, file paths, or transcript content are emitted. This sample is illustrative — the real payload from a 30-day window typically contains 100-200 session objects.",
+
+  "device": {
+    "client_version": "0.11.0",
+    "device_id": "11111111-2222-4333-8444-555555555555",
+    "extracted_at_ms": 1748102400000,
+    "schema_version": "0.11",
+    "window_days": 30
+  },
+
+  "config": {
+    "custom_commands": 1,
+    "global_claude_md_lines": 142,
+    "hooks": 2,
+    "mcp_servers": 9,
+    "project_claude_md_lines_avg": 270,
+    "plugin_count": 5
+  },
+
+  "sessions": [
+    {
+      "_comment": "Session A: productive AFK session — 4 subagents in parallel, planned, no friction. Worked example #2 from the design doc: HITL=4, AFK=38, Idle=88, parallelism = 123 / 38 = 3.24x.",
+      "session_hash": "a2f0e91c4b8d3c1f",
+      "project_hash": "fedcba9876543210",
+      "started_at_ms": 1747955100000,
+      "ended_at_ms": 1747963200000,
+
+      "hitl_minutes": 4,
+      "afk_minutes": 38,
+      "idle_minutes": 88,
+      "afk_intervals": [
+        {"start_minute": 29132585, "end_minute_exclusive": 29132610, "is_cron": false},
+        {"start_minute": 29132634, "end_minute_exclusive": 29132647, "is_cron": false}
+      ],
+      "afk_max_streak_minutes": 25,
+      "afk_parallel_minutes_foreground": 113,
+      "cron_parallel_minutes": 10,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1747955100000, "end_ts_ms": 1747956600000, "active_minutes": 25, "turn_count": 3},
+        {"start_ts_ms": 1747958040000, "end_ts_ms": 1747958820000, "active_minutes": 13, "turn_count": 2}
+      ],
+
+      "distinct_skills": ["brainstorming", "plan", "writing-plans"],
+      "distinct_mcp_tools": ["mcp__github__add_comment", "mcp__supabase__execute_sql"],
+      "distinct_builtin_tools": ["Bash", "Edit", "Read", "Task", "TodoWrite", "Write"],
+
+      "strong_plan_signals": ["EnterPlanMode", "writing-plans"],
+      "weak_plan_signals": [],
+      "is_planned": true,
+      "is_significant_edit_session": true,
+      "files_modified": 7,
+      "total_lines_edited": 284,
+
+      "revert_count": 0,
+      "qualifying_pairs": 4,
+      "repetitive_pairs": 0,
+      "rage_quit_event": false,
+      "tool_error_count": 2,
+      "auto_compaction_events": 0,
+      "total_input_tokens": 187420,
+      "total_output_tokens": 41280,
+      "redundant_approvals_per_signature": {
+        "Bash::git": 2,
+        "Edit::src": 5
+      },
+
+      "assistant_msgs_by_model": {
+        "claude-opus-4-7": 18,
+        "claude-sonnet-4-6": 142
+      },
+      "user_skill_invocations": 3,
+      "hitl_mcp_invocations": 1,
+
+      "cache_input_tokens": 145200,
+      "cache_creation_input_tokens": 42220,
+      "builtin_tool_invocations": 218,
+      "plugin_invocations": 2,
+      "agent_dispatches": 12,
+
+      "tokens_by_model": {
+        "claude-opus-4-7": {"input_miss": 12220, "input_hit": 45200, "output": 11280},
+        "claude-sonnet-4-6": {"input_miss": 30000, "input_hit": 100000, "output": 30000}
+      },
+
+      "skill_invocations_by_name": {"plan": 1, "brainstorming": 1, "writing-plans": 1},
+      "mcp_invocations_by_name": {"mcp__github__add_comment": 1},
+      "plugin_invocations_by_name": {"deploy-kit:release": 1, "test-runner:all": 1}
+    },
+
+    {
+      "_comment": "Session B: a short HITL-only session — quick docs fix, no AFK leverage, no plan needed (under significant-edit threshold).",
+      "session_hash": "b91d44f0aa12cc83",
+      "project_hash": "1a2b3c4d5e6f7081",
+      "started_at_ms": 1748019600000,
+      "ended_at_ms": 1748020800000,
+
+      "hitl_minutes": 14,
+      "afk_minutes": 4,
+      "idle_minutes": 2,
+      "afk_intervals": [],
+      "afk_max_streak_minutes": 4,
+      "afk_parallel_minutes_foreground": 4,
+      "cron_parallel_minutes": 0,
+      "top_afk_streaks": [],
+
+      "distinct_skills": [],
+      "distinct_mcp_tools": [],
+      "distinct_builtin_tools": ["Edit", "Read"],
+
+      "strong_plan_signals": [],
+      "weak_plan_signals": [],
+      "is_planned": false,
+      "is_significant_edit_session": false,
+      "files_modified": 1,
+      "total_lines_edited": 8,
+
+      "revert_count": 0,
+      "qualifying_pairs": 0,
+      "repetitive_pairs": 0,
+      "rage_quit_event": false,
+      "tool_error_count": 0,
+      "auto_compaction_events": 0,
+      "total_input_tokens": 12840,
+      "total_output_tokens": 2110,
+      "redundant_approvals_per_signature": {},
+
+      "assistant_msgs_by_model": {
+        "claude-sonnet-4-6": 9
+      },
+      "user_skill_invocations": 0,
+      "hitl_mcp_invocations": 0,
+
+      "cache_input_tokens": 8420,
+      "cache_creation_input_tokens": 4420,
+      "builtin_tool_invocations": 18,
+      "plugin_invocations": 0,
+      "agent_dispatches": 0,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 4420, "input_hit": 8420, "output": 2110}
+      },
+
+      "skill_invocations_by_name": {},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {}
+    },
+
+    {
+      "_comment": "Session C: long AFK-heavy session — 47-minute autonomous streak, the dashboard's afk_max_streak headline. Single subagent doing sustained work.",
+      "session_hash": "c70be33f99204711",
+      "project_hash": "9876fedcba543210",
+      "started_at_ms": 1748056800000,
+      "ended_at_ms": 1748062200000,
+
+      "hitl_minutes": 6,
+      "afk_minutes": 78,
+      "idle_minutes": 6,
+      "afk_intervals": [
+        {"start_minute": 29134285, "end_minute_exclusive": 29134332, "is_cron": false}
+      ],
+      "afk_max_streak_minutes": 47,
+      "afk_parallel_minutes_foreground": 78,
+      "cron_parallel_minutes": 0,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1748057100000, "end_ts_ms": 1748059920000, "active_minutes": 47, "turn_count": 5}
+      ],
+
+      "distinct_skills": ["plan"],
+      "distinct_mcp_tools": ["mcp__github__get_file_contents"],
+      "distinct_builtin_tools": ["Bash", "Edit", "Grep", "Read", "Task", "Write"],
+
+      "strong_plan_signals": ["TodoWrite"],
+      "weak_plan_signals": ["structured_first_prompt"],
+      "is_planned": true,
+      "is_significant_edit_session": true,
+      "files_modified": 12,
+      "total_lines_edited": 446,
+
+      "revert_count": 1,
+      "qualifying_pairs": 6,
+      "repetitive_pairs": 1,
+      "rage_quit_event": false,
+      "tool_error_count": 3,
+      "auto_compaction_events": 1,
+      "total_input_tokens": 412800,
+      "total_output_tokens": 64500,
+      "redundant_approvals_per_signature": {
+        "Bash::npm": 7,
+        "Edit::tests": 3
+      },
+
+      "assistant_msgs_by_model": {
+        "claude-sonnet-4-6": 234
+      },
+      "user_skill_invocations": 1,
+      "hitl_mcp_invocations": 0,
+
+      "cache_input_tokens": 326700,
+      "cache_creation_input_tokens": 86100,
+      "builtin_tool_invocations": 612,
+      "plugin_invocations": 1,
+      "agent_dispatches": 8,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 86100, "input_hit": 326700, "output": 64500}
+      },
+
+      "skill_invocations_by_name": {"plan": 1},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {"deploy-kit:release": 1}
+    },
+
+    {
+      "_comment": "Session D: a friction session — no plan signal on a big edit set, several reverts, repetitive prompts. Shows what the anti-pattern detectors look like in raw form.",
+      "session_hash": "d4ce82a17f9b00ee",
+      "project_hash": "fedcba9876543210",
+      "started_at_ms": 1748098200000,
+      "ended_at_ms": 1748101800000,
+
+      "hitl_minutes": 36,
+      "afk_minutes": 18,
+      "idle_minutes": 6,
+      "afk_intervals": [
+        {"start_minute": 29134990, "end_minute_exclusive": 29134995, "is_cron": false}
+      ],
+      "afk_max_streak_minutes": 5,
+      "afk_parallel_minutes_foreground": 18,
+      "cron_parallel_minutes": 0,
+      "top_afk_streaks": [
+        {"start_ts_ms": 1748099400000, "end_ts_ms": 1748099700000, "active_minutes": 5, "turn_count": 1}
+      ],
+
+      "distinct_skills": [],
+      "distinct_mcp_tools": [],
+      "distinct_builtin_tools": ["Bash", "Edit", "Read", "Task", "Write"],
+
+      "strong_plan_signals": [],
+      "weak_plan_signals": [],
+      "is_planned": false,
+      "is_significant_edit_session": true,
+      "files_modified": 8,
+      "total_lines_edited": 233,
+
+      "revert_count": 4,
+      "qualifying_pairs": 8,
+      "repetitive_pairs": 3,
+      "rage_quit_event": false,
+      "tool_error_count": 11,
+      "auto_compaction_events": 2,
+      "total_input_tokens": 298400,
+      "total_output_tokens": 38120,
+      "redundant_approvals_per_signature": {
+        "Bash::git": 9
+      },
+
+      "assistant_msgs_by_model": {
+        "claude-sonnet-4-6": 56
+      },
+      "user_skill_invocations": 0,
+      "hitl_mcp_invocations": 0,
+
+      "cache_input_tokens": 219000,
+      "cache_creation_input_tokens": 79400,
+      "builtin_tool_invocations": 144,
+      "plugin_invocations": 0,
+      "agent_dispatches": 9,
+
+      "tokens_by_model": {
+        "claude-sonnet-4-6": {"input_miss": 79400, "input_hit": 219000, "output": 38120}
+      },
+
+      "skill_invocations_by_name": {},
+      "mcp_invocations_by_name": {},
+      "plugin_invocations_by_name": {}
+    }
+  ]
+}
