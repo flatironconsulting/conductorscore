@@ -358,7 +358,7 @@ def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
 
     rows: list[tuple[dict, int]] = []
     has_response_messages = False
-    with jsonl_path.open() as f:
+    with jsonl_path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -491,7 +491,7 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
     # tool_use_id -> (msg_index, tool_name)
     pending_tools: dict[str, tuple[int, str]] = {}
 
-    with jsonl_path.open() as f:
+    with jsonl_path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -592,7 +592,7 @@ def _parse_subagent_messages(sub_jsonl_path: Path) -> list[TimelineMessage]:
     """Parse a subagent JSONL into a flat list of bubbles."""
     messages: list[TimelineMessage] = []
     pending_tools: dict[str, tuple[int, str]] = {}
-    with sub_jsonl_path.open() as f:
+    with sub_jsonl_path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -676,7 +676,7 @@ def _load_subagent_panels(
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
     for meta_path in subagents_dir.glob("agent-*.meta.json"):
         try:
-            meta = json.loads(meta_path.read_text())
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         tool_use_id = meta.get("toolUseId")
@@ -790,7 +790,7 @@ def _aborted_call_ids(jsonl_path: Path) -> set[str]:
     """
     ids: set[str] = set()
     try:
-        lines = jsonl_path.read_text().splitlines()
+        lines = jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ids
     for line in lines:
@@ -1653,7 +1653,7 @@ def _captured_transcript() -> Path | None:
     """The current session's transcript, as persisted by the SessionStart hook."""
     f = _cache_dir() / "current_transcript"
     try:
-        tp = Path(f.read_text().strip())
+        tp = Path(f.read_text(encoding="utf-8").strip())
     except OSError:
         return None
     return tp if tp.exists() else None

@@ -65,7 +65,7 @@ def _approx_token_count(text: str) -> int:
 
 def _read_lines(jsonl_path: Path) -> list[str]:
     try:
-        return jsonl_path.read_text().splitlines()
+        return jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
 

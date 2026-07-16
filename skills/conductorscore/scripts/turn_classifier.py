@@ -425,7 +425,7 @@ def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:
         first: int | None = None
         last: int | None = None
         try:
-            with sub_jsonl.open() as f:
+            with sub_jsonl.open(encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
