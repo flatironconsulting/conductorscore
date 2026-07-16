@@ -1778,7 +1778,25 @@ def _print_console_summary(
     print(f"Rendered {messages} message(s) → {out}")
 
 
+def _force_utf8_stdio() -> None:
+    """Force stdout/stderr to UTF-8 so the console summary never crashes.
+
+    The summary prints non-ASCII glyphs — the ``→`` arrow (U+2192) in
+    ``Rendered N message(s) → <path>``, ``·`` separators, ``×`` leverage marks.
+    On Windows the default stdout codec is cp1252, which can't encode ``→``, so
+    an unguarded ``print`` raised ``UnicodeEncodeError`` and aborted the debug
+    render. ``errors="replace"`` degrades any exotic glyph to ``?`` instead of
+    crashing. Guarded: under pytest's capture the stream may lack ``reconfigure``.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="session_viewer",
         description=(
