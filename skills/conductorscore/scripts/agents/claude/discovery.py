@@ -95,7 +95,7 @@ def preflight(now_ms: int, window_ms: int) -> dict:
             continue
         for jsonl in proj_dir.glob("*.jsonl"):
             try:
-                lines = jsonl.read_text().splitlines()
+                lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
             if not lines:
@@ -127,7 +127,7 @@ def find_sessions() -> list[SessionMeta]:
         for jsonl in proj_dir.glob("*.jsonl"):
             session_id = jsonl.stem
             try:
-                lines = jsonl.read_text().splitlines()
+                lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
             if not lines:

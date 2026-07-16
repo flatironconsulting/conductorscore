@@ -46,7 +46,7 @@ def _read_client_version() -> str:
     We read this plain text file (not pyproject.toml) because pyproject is not
     shipped alongside the skill and parsing it would need tomllib (>=3.11)."""
     try:
-        return (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return "0.0.0+unknown"
 

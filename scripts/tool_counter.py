@@ -222,7 +222,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     skill_invocations = 0
     skills_by_name: dict[str, int] = {}
     try:
-        raw = jsonl_path.read_text()
+        raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ToolCounts([], [], [])
 

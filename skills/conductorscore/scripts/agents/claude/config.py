@@ -38,7 +38,7 @@ def read_installed_plugins(home: Path) -> list[str]:
     manifest = plugins_dir / "config.json"
     if manifest.is_file():
         try:
-            d = json.loads(manifest.read_text())
+            d = json.loads(manifest.read_text(encoding="utf-8"))
             if isinstance(d, dict):
                 # Tolerate a few common shapes: {"plugins": [...]},
                 # {"installed": {"name": {...}}}, or a flat dict keyed
@@ -83,7 +83,7 @@ def count_claude_md_lines(path: Path) -> int:
     if not path.is_file():
         return 0
     try:
-        return len(path.read_text().splitlines())
+        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
     except OSError:
         return 0
 
@@ -95,7 +95,7 @@ def _count_mcp_servers(home: Path) -> int:
         if not path.is_file():
             continue
         try:
-            d = json.loads(path.read_text())
+            d = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         mcp = d.get("mcpServers", {}) if isinstance(d, dict) else {}
@@ -115,7 +115,7 @@ def _count_hooks(home: Path) -> int:
     if not settings_path.is_file():
         return 0
     try:
-        d = json.loads(settings_path.read_text())
+        d = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
     if not isinstance(d, dict):

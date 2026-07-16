@@ -43,7 +43,7 @@ def _device_id_path() -> Path:
 def load_or_create_device_id() -> str:
     p = _device_id_path()
     if p.exists():
-        return p.read_text().strip()
+        return p.read_text(encoding="utf-8").strip()
     p.parent.mkdir(parents=True, exist_ok=True)
     new_id = str(uuid.uuid4())
     p.write_text(new_id)
@@ -64,7 +64,7 @@ def _read_store() -> dict:
     if not p.exists():
         return _empty_store()
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return _empty_store()
     return _migrate(data)
@@ -123,7 +123,7 @@ def ensure_migrated() -> None:
     if not p.exists():
         return
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return
     is_v1 = isinstance(data, dict) and "device_token" in data and "by_base" not in data

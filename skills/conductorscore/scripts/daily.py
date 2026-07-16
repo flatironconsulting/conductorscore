@@ -55,7 +55,7 @@ def enable_daily(provider: str) -> DailyResult:
     try:
         path = _settings_path("claude")
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 data = {}
         except (FileNotFoundError, json.JSONDecodeError, OSError):

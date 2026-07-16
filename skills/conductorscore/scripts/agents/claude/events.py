@@ -106,7 +106,7 @@ def _thinking_token_estimate(block: dict) -> int:
 
 def _read_lines(jsonl_path: Path) -> list[str]:
     try:
-        return jsonl_path.read_text().splitlines()
+        return jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
 
@@ -682,7 +682,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
     panels: dict[str, tuple[str, Path]] = {}
     for meta_path in sub_dir.glob("agent-*.meta.json"):
         try:
-            meta = json.loads(meta_path.read_text())
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         tool_use_id = meta.get("toolUseId")
