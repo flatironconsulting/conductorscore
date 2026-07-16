@@ -26,7 +26,9 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 
 
-def _run_cp1252_child(body: str) -> subprocess.CompletedProcess:
+def _run_cp1252_child(
+    body: str, *, warn_default_encoding: bool = False
+) -> subprocess.CompletedProcess[str]:
     """Run ``body`` in a child whose stdout is forced to strict cp1252."""
     driver = textwrap.dedent(
         f"""
@@ -35,8 +37,14 @@ def _run_cp1252_child(body: str) -> subprocess.CompletedProcess:
         {body}
         """
     )
+    command = [sys.executable]
+    if warn_default_encoding:
+        command.extend(
+            ["-X", "warn_default_encoding", "-W", "error::EncodingWarning"]
+        )
+    command.extend(["-c", driver])
     return subprocess.run(
-        [sys.executable, "-c", driver],
+        command,
         capture_output=True,
         # Decode the child's output as UTF-8 (what the fixed code writes), so a
         # cp1252-locale host parent doesn't mojibake the ✓/→ we assert on.
@@ -101,3 +109,28 @@ def test_session_viewer_forces_utf8():
         "forced to UTF-8:\n" + proc.stderr
     )
     assert "→" in proc.stdout
+
+
+def test_session_viewer_main_renders_with_explicit_utf8(tmp_path: Path):
+    """The real renderer must neither use locale-default file I/O nor crash
+    when its console is cp1252."""
+    fixture = _ROOT / "tests/fixtures/codex/minimal_session.jsonl"
+    output = tmp_path / "session.html"
+    proc = _run_cp1252_child(
+        f"""
+        from scripts import session_viewer
+        rc = session_viewer.main([
+            {str(fixture)!r},
+            "--out", {str(output)!r},
+            "--no-open",
+        ])
+        assert rc == 0
+        """,
+        warn_default_encoding=True,
+    )
+    assert proc.returncode == 0, (
+        "the real session renderer used locale-default file I/O or emitted "
+        "cp1252-incompatible output:\n" + proc.stderr
+    )
+    assert "Rendered 2 message(s) →" in proc.stdout
+    assert "<!doctype html>" in output.read_text(encoding="utf-8").lower()

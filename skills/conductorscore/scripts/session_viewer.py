@@ -1216,7 +1216,8 @@ def render_session(
         messages = _redact_messages(messages)
     if not messages:
         output_path.write_text(
-            "<html><body>No main-agent messages in this session.</body></html>"
+            "<html><body>No main-agent messages in this session.</body></html>",
+            encoding="utf-8",
         )
         return {"messages": 0}
 
@@ -1618,7 +1619,7 @@ def render_session(
 """
     )
 
-    output_path.write_text("".join(parts))
+    output_path.write_text("".join(parts), encoding="utf-8")
     return {
         "messages": len(messages),
         "turns": len(turns),

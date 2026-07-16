@@ -140,7 +140,7 @@ def _writable_cache_dir() -> Path:
     try:
         preferred.mkdir(parents=True, exist_ok=True)
         probe = preferred / ".probe"
-        probe.write_text("")
+        probe.write_text("", encoding="utf-8")
         probe.unlink()
         return preferred
     except OSError:
@@ -163,7 +163,7 @@ def _persist_transcript_path(raw_stdin: str) -> Path | None:
     out = _cache_dir() / "current_transcript"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(tp)
+        out.write_text(tp, encoding="utf-8")
     except OSError:
         return None
     return out
@@ -215,7 +215,7 @@ def _load_pending() -> dict | None:
 def _save_pending(state: dict) -> None:
     p = _pending_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w") as f:
+    with open(p, "w", encoding="utf-8") as f:
         json.dump(state, f)
 
 
@@ -630,7 +630,7 @@ def main() -> int:
         status_path = cache / "status.json"
         log_path = cache / "last-run.log"
         status_path.unlink(missing_ok=True)
-        log = open(log_path, "w")
+        log = open(log_path, "w", encoding="utf-8")
     except OSError:
         print(
             "ConductorScore needs write access to its cache (read-only "
