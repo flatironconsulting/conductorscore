@@ -19,7 +19,7 @@ def _render(name: str, tmp_path: Path) -> str:
     # the privacy-first default redaction.
     out = tmp_path / "out.html"
     render_session(FIXTURES / name, out, redact=False)
-    return out.read_text()
+    return out.read_text(encoding="utf-8")
 
 
 def test_minimal_session_single_user_bubble(tmp_path):

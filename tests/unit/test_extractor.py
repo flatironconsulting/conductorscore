@@ -1110,8 +1110,8 @@ def test_extract_v0_5_project_claude_md_lines_avg_populated(
     # round-trips cleanly.
     proj_a_path = Path("/tmp/csprojalpha")
     proj_b_path = Path("/tmp/csprojbeta")
-    proj_a_path.mkdir(exist_ok=True)
-    proj_b_path.mkdir(exist_ok=True)
+    proj_a_path.mkdir(parents=True, exist_ok=True)
+    proj_b_path.mkdir(parents=True, exist_ok=True)
     (proj_a_path / "CLAUDE.md").write_text("a1\na2\na3\na4\n")  # 4 lines
     (proj_b_path / "CLAUDE.md").write_text("b1\nb2\n")  # 2 lines
 

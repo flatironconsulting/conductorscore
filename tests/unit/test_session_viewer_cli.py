@@ -58,7 +58,7 @@ def test_main_default_redacts(tmp_path):
     rc = main([str(jsonl), "--out", str(out), "--no-open"])
     assert rc == 0
     assert out.exists()
-    assert SECRET not in out.read_text()
+    assert SECRET not in out.read_text(encoding="utf-8")
 
 
 def test_main_no_redact_renders_real_text(tmp_path):
@@ -66,7 +66,7 @@ def test_main_no_redact_renders_real_text(tmp_path):
     out = tmp_path / "out.html"
     rc = main([str(jsonl), "--out", str(out), "--no-open", "--no-redact"])
     assert rc == 0
-    assert SECRET in out.read_text()
+    assert SECRET in out.read_text(encoding="utf-8")
 
 
 def test_console_summary_states_nothing_uploaded(tmp_path, capsys):

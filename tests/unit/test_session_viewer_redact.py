@@ -46,7 +46,7 @@ def test_default_is_redacted(tmp_path):
     jsonl = _build(tmp_path)
     out = tmp_path / "out.html"
     render_session(jsonl, out)
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     assert "SECRET_PROMPT_TOKEN" not in html
     assert "SECRET_TOOL_ARG_path" not in html
     assert _sha16(PROMPT) in html
@@ -56,7 +56,7 @@ def test_no_redact_renders_real_text(tmp_path):
     jsonl = _build(tmp_path)
     out = tmp_path / "out.html"
     render_session(jsonl, out, redact=False)
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     assert "SECRET_PROMPT_TOKEN_alpha" in html  # real prompt is shown
     assert "SECRET_TOOL_ARG_path" in html       # real tool input is shown
 
@@ -65,7 +65,7 @@ def test_redact_hides_real_text_and_shows_wire_equivalent(tmp_path):
     jsonl = _build(tmp_path)
     out = tmp_path / "out.html"
     render_session(jsonl, out, redact=True)
-    html = out.read_text()
+    html = out.read_text(encoding="utf-8")
     # No raw text — neither the prompt nor the tool argument leaks.
     assert "SECRET_PROMPT_TOKEN" not in html
     assert "SECRET_TOOL_ARG_path" not in html
@@ -83,9 +83,9 @@ def test_redact_also_covers_subagent_panels(tmp_path):
     out = tmp_path / "out.html"
 
     render_session(jsonl, out, redact=False)  # real text: subagent content shown
-    assert "find files in /tmp" in out.read_text()
+    assert "find files in /tmp" in out.read_text(encoding="utf-8")
 
     render_session(jsonl, out)  # default redaction reaches into panels
-    redacted = out.read_text()
+    redacted = out.read_text(encoding="utf-8")
     assert "find files in /tmp" not in redacted  # subagent message redacted
     assert 'class="subagent-panel"' in redacted   # panel still rendered
