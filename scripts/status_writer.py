@@ -24,6 +24,7 @@ class StatusWriter:
     def write(self, **fields) -> None:
         tmp = tempfile.NamedTemporaryFile(
             mode="w",
+            encoding="utf-8",
             delete=False,
             dir=str(self.path.parent),
             prefix=".status.",
