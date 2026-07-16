@@ -10,6 +10,15 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -v --cov=scripts
 
+  pytest-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.11" }
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -v --cov=scripts
+
   skill-package-sync:
     runs-on: ubuntu-latest
     steps:
