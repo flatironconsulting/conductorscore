@@ -111,6 +111,11 @@ class ToolCounts:
     # ``ExtractorOutput`` builder never reads this field. Lets the scanner
     # surface "we saw a Codex tool we don't model yet" without leaking it.
     codex_unknown_tool_diagnostics: dict[str, int] = field(default_factory=dict)
+    # LOCAL diagnostics only — unrecognized Cursor tool names seen while
+    # counting (``{name: count}``). Never serialized to the wire; the
+    # ``ExtractorOutput`` builder never reads this field. Mirrors
+    # ``codex_unknown_tool_diagnostics`` above.
+    cursor_unknown_tool_diagnostics: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -391,6 +396,83 @@ def count_codex_tools(events) -> ToolCounts:
         skill_invocations=skill_invocations,
         skill_invocations_by_name=skills_by_name,
         codex_unknown_tool_diagnostics=diagnostics,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cursor built-in tool counting (from NORMALIZED events).
+# ---------------------------------------------------------------------------
+
+
+def count_cursor_tools(events) -> ToolCounts:
+    """Count Cursor tool usage from a session's normalized ``Event`` stream.
+
+    Cloned from ``count_codex_tools`` above — same shape, Cursor-specific
+    routing. Cursor transcripts are parsed (``scripts.agents.cursor.events``)
+    into the same normalized ``Event`` model the Claude/Codex readers
+    produce, and ``tool_name`` is ALREADY canonicalized to the PascalCase
+    vocabulary (``scripts.agents.cursor.taxonomy.canonical_tool_name``) by
+    the reader, so this counter only has to route already-canonical names —
+    it never has to fold aliases itself.
+
+    Routing (checked in order):
+      * ``__`` in the name        → ``distinct_mcp_tools`` (MCP session
+        invocation — same structural signal Codex uses: a bare, non-builtin
+        name is never guessed as MCP).
+      * name in
+        ``scripts.agents.cursor.taxonomy.KNOWN_TOOL_NAMES``
+                                   → ``distinct_builtin_tools`` +
+        ``builtin_tool_invocations``. ``Task`` is itself a member of this
+        set (Cursor's own subagent-dispatch tool), so it is ALSO counted as
+        a builtin AND increments ``agent_dispatches`` — mirroring how
+        Claude's ``count_tools`` treats ``Task``/``Agent`` (both a builtin
+        invocation and a dispatch, not a mutually-exclusive bucket).
+      * anything else             → recorded in the returned
+        ``cursor_unknown_tool_diagnostics`` side-channel ONLY (local
+        diagnostics; the caller logs/ignores it — it never serializes to
+        the wire).
+
+    Privacy: only categorical tool NAMES are read. Shell command strings,
+    edit paths, and tool outputs were already reduced/discarded by the
+    Cursor reader before the Event was built, so no raw command/path/output
+    is reachable here.
+    """
+    from scripts.agents.cursor.taxonomy import KNOWN_TOOL_NAMES, TASK_TOOL_NAMES
+    from scripts.core.normalized import EventKind
+
+    mcp: set[str] = set()
+    builtin: set[str] = set()
+    builtin_invocations = 0
+    agent_dispatches = 0
+    diagnostics: dict[str, int] = {}
+
+    for e in events:
+        if e.kind != EventKind.ASSISTANT_TOOL:
+            continue
+        name = e.tool_name
+        if not isinstance(name, str) or not name:
+            continue
+        if "__" in name:
+            # MCP session invocation — same structural ``__`` signal Codex
+            # uses; a bare single-word tool is never guessed as MCP.
+            mcp.add(name)
+        elif name in KNOWN_TOOL_NAMES:
+            builtin.add(name)
+            builtin_invocations += 1
+            if name in TASK_TOOL_NAMES:
+                agent_dispatches += 1
+        else:
+            # Unknown Cursor tool kind — local diagnostics only, never
+            # uploaded.
+            diagnostics[name] = diagnostics.get(name, 0) + 1
+
+    return ToolCounts(
+        distinct_skills=[],
+        distinct_mcp_tools=sorted(mcp),
+        distinct_builtin_tools=sorted(builtin),
+        builtin_tool_invocations=builtin_invocations,
+        agent_dispatches=agent_dispatches,
+        cursor_unknown_tool_diagnostics=diagnostics,
     )
 
 

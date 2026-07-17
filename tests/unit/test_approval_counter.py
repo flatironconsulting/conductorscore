@@ -213,6 +213,50 @@ def test_signature_for_event_destructive_bash_now_returns_signature():
 
 
 # ---------------------------------------------------------------------------
+# Cursor tool names (Task 1.6) — Cursor's canonical Shell/edit tool names
+# must recognize like their Claude/Codex counterparts so cursor approvals
+# get a signature (see the Task 1.3 review note this task addresses).
+# ---------------------------------------------------------------------------
+
+
+def test_signature_for_event_cursor_shell_env_strip_returns_bash_family():
+    """A Cursor ``Shell`` dispatch is recognized by ``_SHELL_TOOL_NAMES`` and
+    reduced by the SAME ``signature_for_bash`` env-strip logic as Claude's
+    ``Bash`` — the label is still ``"Bash"`` (the shared family label), even
+    though the tool name is Cursor's ``Shell``."""
+    e = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="s",
+        timestamp_ms=0,
+        tool_name="Shell",
+    )
+    object.__setattr__(e, "raw_input", {"command": "FOO=x git push"})
+    assert signature_for_event(e) == ("Bash", "git")
+
+
+def test_signature_for_event_cursor_str_replace_returns_edit_signature():
+    e = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="s",
+        timestamp_ms=0,
+        tool_name="StrReplace",
+    )
+    object.__setattr__(e, "raw_input", {"file_path": "/repo/main.py"})
+    assert signature_for_event(e) == ("Edit", _sha8("repo"))
+
+
+def test_signature_for_event_cursor_delete_returns_edit_signature():
+    e = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="s",
+        timestamp_ms=0,
+        tool_name="Delete",
+    )
+    object.__setattr__(e, "raw_input", {"file_path": "/repo/old.py"})
+    assert signature_for_event(e) == ("Edit", _sha8("repo"))
+
+
+# ---------------------------------------------------------------------------
 # Event.is_denied is set by each denial marker (parser-level, via reader)
 # and NOT set for a non-denial error.
 # ---------------------------------------------------------------------------

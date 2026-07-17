@@ -7,8 +7,9 @@ Selection grammar:
   * unset / empty / ``"claude"`` → ``[ClaudeAdapter()]`` (default stays
     Claude-only — cross-provider scanning is opt-in until consent lands)
   * ``"codex"``                  → ``[CodexAdapter()]``
+  * ``"cursor"``                 → ``[CursorAdapter()]``
   * ``"all"``                    → every implemented adapter, canonical order
-                                   (``[ClaudeAdapter(), CodexAdapter()]``)
+                                   (``[ClaudeAdapter(), CodexAdapter(), CursorAdapter()]``)
   * comma list (``"claude,codex"``) → those adapters, in the requested order,
                                    de-duplicated
   * anything else                → ``ValueError("unsupported_provider:<requested>")``
@@ -24,6 +25,7 @@ from collections.abc import Mapping
 from scripts.agents.base import AgentAdapter, AgentId
 from scripts.agents.claude import ClaudeAdapter
 from scripts.agents.codex import CodexAdapter
+from scripts.agents.cursor import CursorAdapter
 
 # Implemented adapters, in canonical order. To add an agent: implement its
 # adapter package and add one entry here. The registry — and only the
@@ -31,6 +33,7 @@ from scripts.agents.codex import CodexAdapter
 _KNOWN_ADAPTERS: dict[AgentId, type] = {
     "claude": ClaudeAdapter,
     "codex": CodexAdapter,
+    "cursor": CursorAdapter,
 }
 
 _DEFAULT_SELECTION: list[AgentId] = ["claude"]

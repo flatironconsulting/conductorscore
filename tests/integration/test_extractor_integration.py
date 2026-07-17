@@ -1102,3 +1102,69 @@ def test_tool_minutes_present_in_wire(codex_home):
     if payload["sessions"]:
         assert "afk_tool_minutes" in payload["sessions"][0]
         assert "hitl_tool_minutes" in payload["sessions"][0]
+
+
+def _cursor_consent() -> ConsentDecision:
+    return ConsentDecision(
+        launch_provider="cursor", providers=["cursor"], source="override"
+    )
+
+
+def test_cursor_session_hash_is_provider_namespaced(
+    tmp_path, monkeypatch, isolated_claude_home
+):
+    """Task 1.6 — the generic ``f"{provider}:{session_id}"`` hash namespacing
+    in ``scanner.py`` (already covers every non-claude provider) must cover
+    Cursor too: ``session_hash == sha256("cursor:<composer_id>")[:16]``, NOT
+    the unprefixed Claude-style hash of the bare id."""
+    from tests.fixtures.cursor.builder import (
+        MS,
+        assistant_bubble,
+        user_bubble,
+        write_ide_store,
+    )
+
+    # The extractor only scans sessions inside its 30-day lookback window, so
+    # (unlike the discovery-level tests) this fixture must use RECENT
+    # timestamps, not the builder's fixed historical ``T0``.
+    now = _now_ms()
+    start = now - 10 * MS
+    end = now - 5 * MS
+
+    composer_id = "cur-hash-session"
+    db = write_ide_store(
+        tmp_path / "state.vscdb",
+        [
+            {
+                "composerId": composer_id,
+                "createdAt": start,
+                "lastUpdatedAt": end,
+                "workspacePath": "/home/u/proj",
+                "bubbles": [
+                    user_bubble("b1", "hi", start),
+                    assistant_bubble("b2", "yo", end),
+                ],
+            }
+        ],
+    )
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(db))
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(tmp_path / ".cursor"))
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=now,
+        consent_decision=_cursor_consent(),
+    )
+    payload = json.loads(out.to_json())
+
+    # Sanity: the Cursor session was actually scanned.
+    assert any(s.provider == "cursor" for s in out.sessions)
+
+    expected = hashlib.sha256(f"cursor:{composer_id}".encode()).hexdigest()[:16]
+    assert expected in out.to_json()
+    # And the UNPREFIXED (Claude-style) hash must NOT appear — proves the
+    # provider prefix is actually applied, not incidentally matching.
+    unprefixed = hashlib.sha256(composer_id.encode()).hexdigest()[:16]
+    if unprefixed != expected:
+        assert unprefixed not in out.to_json()

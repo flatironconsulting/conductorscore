@@ -41,6 +41,7 @@ from scripts.session_window import compute_window
 from scripts.tool_counter import (
     count_codex_tools,
     count_compaction_and_tokens,
+    count_cursor_tools,
     count_hitl_mcp_invocations,
     count_hitl_mcp_invocations_by_name,
     count_tools,
@@ -175,13 +176,16 @@ def extract(
             # Each adapter parses its own transcript format into the shared
             # normalized Event model. ``count_tools`` is Claude-JSONL-specific
             # (it reads Claude ``tool_use`` blocks + ``<command-name>``
-            # markers). Codex tool usage is counted from the NORMALIZED events
-            # instead (``count_codex_tools``): the same wire fields
+            # markers). Codex/Cursor tool usage is counted from the
+            # NORMALIZED events instead (``count_codex_tools`` /
+            # ``count_cursor_tools``): the same wire fields
             # (distinct_builtin_tools / builtin_tool_invocations /
             # distinct_mcp_tools) drive the Customization + Tools surfaces.
             events, text_map = agent.read_events_and_text(s.jsonl_path)
             if provider == "claude":
                 tc = count_tools(s.jsonl_path)
+            elif provider == "cursor":
+                tc = count_cursor_tools(events)
             else:
                 tc = count_codex_tools(events)
         else:

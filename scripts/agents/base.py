@@ -17,7 +17,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 from scripts.core.normalized import Event, SessionMeta
 
-AgentId = Literal["claude", "codex"]
+AgentId = Literal["claude", "codex", "cursor"]
 
 
 @runtime_checkable

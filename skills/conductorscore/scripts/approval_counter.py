@@ -53,13 +53,17 @@ from __future__ import annotations
 import hashlib
 import re
 
-_EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+_EDIT_TOOL_NAMES: frozenset[str] = frozenset(
+    {"Edit", "Write", "MultiEdit", "StrReplace", "Delete"}
+)
 
 # Shell-family tool names whose ``raw_input["command"]`` yields a Bash-style
-# signature: ``Bash`` (Claude) + Codex shell tools. The reader normalized all
-# Codex shell arg shapes to one command string.
+# signature: ``Bash`` (Claude) + Codex shell tools + ``Shell`` (Cursor's
+# canonical shell-tool name — see ``scripts.agents.cursor.taxonomy``). The
+# reader normalized all Codex shell arg shapes to one command string; Cursor's
+# reader does the same for its ``Shell`` tool.
 _SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command"}
+    {"Bash", "shell", "exec_command", "shell_command", "Shell"}
 )
 
 # Codex applies edits through ``apply_patch``. It carries no single

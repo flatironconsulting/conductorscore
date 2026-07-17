@@ -60,7 +60,7 @@ CLIENT_VERSION = _read_client_version()
 # isn't exactly ``["claude"]``. That keeps a Claude-only payload byte-for-byte
 # identical to the pre-Slice-2 v0.11 shape (CI parity + the server validator
 # are unaffected); the server simply treats absence as "claude".
-Provider = Literal["claude", "codex"]
+Provider = Literal["claude", "codex", "cursor"]
 _DEFAULT_PROVIDER: Provider = "claude"
 
 
