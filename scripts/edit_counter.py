@@ -24,12 +24,18 @@ from dataclasses import dataclass
 
 from scripts.events import Event, EventKind
 
-# Claude edit tools + the Codex ``apply_patch`` custom tool. Codex applies
-# all structured edits through ``apply_patch``; the reader has already parsed
-# its V4A headers into the per-file ``edit_files`` footprint (hashed paths +
-# line estimates), so this aggregator stays a pure, provider-neutral counter.
+# Claude edit tools (Edit/Write/MultiEdit) + the Codex ``apply_patch``
+# custom tool + Cursor's edit-family tools (StrReplace/Write/Delete, per
+# ``scripts.agents.cursor.taxonomy.EDIT_TOOL_NAMES`` — Cursor's reader
+# already canonicalizes its edit tool-call name to this vocabulary, so
+# ``StrReplace``/``Delete`` must be recognized here too or Cursor edit
+# sessions silently undercount files_modified/total_lines_edited). Codex
+# applies all structured edits through ``apply_patch``; the reader has
+# already parsed its V4A headers into the per-file ``edit_files`` footprint
+# (hashed paths + line estimates), so this aggregator stays a pure,
+# provider-neutral counter.
 EDIT_TOOLS: frozenset[str] = frozenset(
-    {"Edit", "Write", "MultiEdit", "apply_patch"}
+    {"Edit", "Write", "MultiEdit", "apply_patch", "StrReplace", "Delete"}
 )
 SIGNIFICANT_FILES_FLOOR = 5  # files_modified > 5
 SIGNIFICANT_LINES_FLOOR = 200  # total_lines_edited > 200

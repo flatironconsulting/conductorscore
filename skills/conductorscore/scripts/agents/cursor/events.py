@@ -304,6 +304,18 @@ def _read_ide(
                             stop_reason="end_turn",
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
+                            # Cursor's bubble-level tokenCount carries no
+                            # cache hit/miss split (unlike Claude's usage
+                            # block or Codex's cached_input_tokens) -- treat
+                            # all real input as a cache MISS (full price) so
+                            # the shared tokens_by_model aggregator in
+                            # scanner.py (which sums cache_creation_input_
+                            # tokens/cache_input_tokens/output_tokens, NOT
+                            # input_tokens directly) actually reflects
+                            # Cursor's input usage instead of silently
+                            # dropping it. cache_input_tokens (hit) stays 0
+                            # since Cursor never reports a cache hit.
+                            cache_creation_input_tokens=input_tokens,
                         )
                     )
             except Exception:
