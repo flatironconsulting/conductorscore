@@ -1,9 +1,27 @@
-"""Cursor IDE session discovery (global store; CLI store added in Phase 2).
+"""Cursor IDE + CLI session discovery.
 
 Honors ``CONDUCTORSCORE_CURSOR_HOME`` (the ``.cursor`` directory) and
 ``CONDUCTORSCORE_CURSOR_IDE_STORE`` (an explicit ``state.vscdb`` path -- the
 test and E2E seam). Without the override, probes the platform locations
 including the WSL -> Windows case (``/mnt/c/Users/*/AppData/Roaming/Cursor``).
+
+CLI session discovery (``client/CURSOR_FORMAT.md`` §4): each CLI chat
+session is its own ``store.db`` file under
+``<chats-dir>/<agentId-hash-dir>/<chatId>/store.db``. ``cli_store_paths()``
+honors ``CONDUCTORSCORE_CURSOR_CLI_DIR`` (an explicit chats-style directory
+to glob two levels deep -- the test/E2E seam, same override style as
+``CONDUCTORSCORE_CURSOR_IDE_STORE``); without it, probes
+``cursor_home()/"chats"`` and, per recon's path-drift note (§8), also
+``~/.config/cursor/chats``. Unlike the IDE store (one composer index per
+DB), a CLI session's ``session_id`` is that session's OWN ``store.db``
+``meta.agentId`` (falling back to the ``<chatId>`` directory-name uuid if
+``meta`` is unreadable) -- there is no shared index table to enumerate from,
+so discovery opens every discovered ``store.db`` and reads its one ``meta``
+row. ``project_root`` is always ``""`` for CLI sessions: CLI ``meta`` carries
+no cwd/workspace field (§4), and the on-disk ``<agentId-hash-dir>`` is an
+MD5 digest, not reversible to a path. ``find_sessions()`` returns IDE
+sessions followed by CLI sessions (both surfaces, one list); ``preflight``
+counts both.
 
 Enumeration source (binding, see CURSOR_FORMAT.md §1 "composerHeaders
 table"): Cursor migrated composer *headers* out of ``cursorDiskKV`` JSON
@@ -90,6 +108,98 @@ def ide_store_paths() -> list[Path]:
     return [p for p in candidates if p.is_file()]
 
 
+def cli_store_paths() -> list[Path]:
+    """Candidate CLI ``store.db`` paths that actually exist.
+
+    ``CONDUCTORSCORE_CURSOR_CLI_DIR`` (a single explicit chats-style
+    directory -- the test/E2E seam) takes priority: if set, globs exactly
+    ``<dir>/*/*/store.db`` and nothing else (never falls back to probing),
+    mirroring ``ide_store_paths``'s override semantics.
+
+    Without the override, probes ``cursor_home()/"chats"`` (the primary
+    location) and, per recon's path-drift note (CURSOR_FORMAT.md §8),
+    ``~/.config/cursor/chats`` as a secondary/alternate install location --
+    each globbed the same two levels deep.
+    """
+    override = os.environ.get("CONDUCTORSCORE_CURSOR_CLI_DIR")
+    if override:
+        base = Path(override)
+        return sorted(base.glob("*/*/store.db")) if base.is_dir() else []
+
+    dirs = [cursor_home() / "chats", Path.home() / ".config" / "cursor" / "chats"]
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("*/*/store.db")):
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+
+def _read_cli_meta(db_path: Path) -> dict | None:
+    """Read+decode a CLI ``store.db``'s single ``meta`` row (hex-encoded
+    UTF-8 JSON, see CURSOR_FORMAT.md §4). Returns ``None`` on any failure
+    -- never raises. Discovery only needs ``agentId``/``createdAt`` here;
+    the full session content is read later by ``cli_events`` on demand."""
+    con = open_ro(db_path)
+    if con is None:
+        return None
+    try:
+        row = con.execute("SELECT value FROM meta WHERE key = ?", ("0",)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if row is None or row[0] is None:
+        return None
+    value = row[0]
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(value, str):
+        return None
+    try:
+        doc = json.loads(bytes.fromhex(value).decode("utf-8"))
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _iter_cli_sessions():
+    """Yield ``(session_id, first_ts_ms, last_ts_ms, db_path)`` for every
+    discovered CLI ``store.db``. ``session_id`` is ``meta.agentId``,
+    falling back to the ``<chatId>`` directory-name uuid (``db_path``'s
+    parent directory) when ``meta`` is unreadable/corrupt -- a corrupt
+    session is still worth discovering (and letting ``cli_events`` soft-
+    fail on read) rather than silently dropped here. ``first_ts_ms`` is
+    ``meta.createdAt`` (``0`` if unreadable); ``last_ts_ms`` is the file's
+    mtime in epoch ms, falling back to ``first_ts_ms`` if ``stat()`` fails.
+    """
+    for db in cli_store_paths():
+        meta = _read_cli_meta(db)
+        agent_id = None
+        if meta:
+            aid = meta.get("agentId")
+            if isinstance(aid, str) and aid:
+                agent_id = aid
+        session_id = agent_id or db.parent.name
+
+        created_at = meta.get("createdAt") if meta else None
+        first_ts = created_at if isinstance(created_at, int) else 0
+
+        try:
+            last_ts = int(db.stat().st_mtime * 1000)
+        except OSError:
+            last_ts = first_ts
+
+        yield session_id, first_ts, last_ts, db
+
+
 def _project_root(workspace_identifier: object) -> str:
     """Resolve ``composerHeaders.value.workspaceIdentifier`` to a plain str.
 
@@ -172,6 +282,20 @@ def find_sessions() -> list[SessionMeta]:
                 )
         finally:
             con.close()
+
+    for session_id, first, last, db in _iter_cli_sessions():
+        # CLI meta carries no cwd/workspace field (§4) and the on-disk
+        # <agentId-hash-dir> is a one-way MD5 digest -- project_root is
+        # always "" for CLI sessions, unlike IDE composers.
+        out.append(
+            SessionMeta(
+                session_id=session_id,
+                project_root="",
+                first_ts_ms=first,
+                last_ts_ms=last,
+                jsonl_path=make_locator(db, "cli", session_id),
+            )
+        )
     return out
 
 
@@ -209,14 +333,24 @@ def preflight(now_ms: int, window_ms: int) -> dict:
         finally:
             con.close()
 
+    for _session_id, _first, last, _db in _iter_cli_sessions():
+        if last >= cutoff:
+            count += 1
+
     home = cursor_home()
     days = max(1.0, window_ms / _MS_PER_DAY)
     return {
-        "home_exists": home.is_dir() or bool(ide_store_paths()),
+        "home_exists": home.is_dir() or bool(ide_store_paths()) or bool(cli_store_paths()),
         "config_exists": (home / "mcp.json").is_file(),
         "sessions_in_window": count,
         "sessions_per_day": round(count / days, 3),
     }
 
 
-__all__ = ["cursor_home", "ide_store_paths", "find_sessions", "preflight"]
+__all__ = [
+    "cli_store_paths",
+    "cursor_home",
+    "find_sessions",
+    "ide_store_paths",
+    "preflight",
+]

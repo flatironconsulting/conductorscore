@@ -1,0 +1,370 @@
+"""Unit tests for scripts.agents.cursor.cli_events -- Cursor CLI store.db
+reader -> normalized Event stream.
+
+Privacy invariant under test throughout: raw user text, raw shell commands,
+and raw file paths must never land on a value that could be logged/repr'd or
+serialized -- only sha256[:16] hashes, booleans, and counts do. Raw text
+survives ONLY in the in-memory ``{id(user_event): text}`` side map returned
+by ``read_cli_events_and_text``.
+"""
+from __future__ import annotations
+
+import hashlib
+
+from scripts.agents.cursor import cli_events
+from scripts.core.normalized import EventKind
+from tests.fixtures.cursor.cli_builder import (
+    MS,
+    T0,
+    assistant_message,
+    linkage_record,
+    system_message,
+    tool_result_message,
+    user_message,
+    write_cli_store,
+)
+
+SECRET_TEXT = "sekrit-cli-user-text-a1b2"
+SECRET_CMD = "rm -rf /home/u/SECRET_PROJECT_DIR"
+SECRET_PATH = "/home/u/proj/SECRET_FILE_NAME.py"
+
+
+def _db(tmp_path, session):
+    return write_cli_store(tmp_path / "chats", session)
+
+
+# ---------------------------------------------------------------------------
+# meta parsing: hex-decode, session id / model / createdAt.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_hex_decoded_createdat_used_as_base_timestamp(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-1", "createdAt": T0,
+        "messages": [user_message("hi")],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-1", want_text=False)[0]
+    [u] = evs
+    assert u.timestamp_ms == T0
+    assert u.session_id == "agent-1"
+
+
+def test_last_used_model_applied_to_assistant_events(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-2", "createdAt": T0, "lastUsedModel": "claude-4.5-sonnet",
+        "messages": [
+            user_message("hi"),
+            assistant_message(text="hello there"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-2", want_text=False)[0]
+    [a] = [e for e in evs if e.kind is EventKind.ASSISTANT_TEXT]
+    assert a.model == "claude-4.5-sonnet"
+
+
+def test_last_used_model_default_sentinel_maps_to_none(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-3", "createdAt": T0, "lastUsedModel": "default",
+        "messages": [assistant_message(text="hello")],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-3", want_text=False)[0]
+    [a] = evs
+    assert a.model is None
+
+
+def test_last_used_model_absent_key_maps_to_none(tmp_path):
+    # lastUsedModel key omitted entirely -- must not crash, model is None.
+    db = _db(tmp_path, {
+        "agentId": "agent-4", "createdAt": T0,
+        "messages": [assistant_message(text="hello")],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-4", want_text=False)[0]
+    [a] = evs
+    assert a.model is None
+
+
+# ---------------------------------------------------------------------------
+# Ordering: user -> assistant(reasoning+text+tool-call) -> tool(result),
+# walked from root (newest) and reversed to oldest -> newest.
+# ---------------------------------------------------------------------------
+
+
+def test_full_chain_walked_from_root_in_oldest_to_newest_order(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-5", "createdAt": T0,
+        "messages": [
+            system_message("base system prompt"),
+            user_message("please run ls"),
+            assistant_message(
+                reasoning="thinking about it",
+                text="I'll run ls",
+                tool_calls=[{"id": "tc1", "name": "Shell", "args": {"command": "ls -la"}}],
+            ),
+            tool_result_message("tc1", "Shell", "file1\nfile2"),
+        ],
+    })
+    evs, _ = cli_events.read_cli_events_and_text(db, "agent-5", want_text=False)
+    kinds = [e.kind for e in evs]
+    # system -> skipped; user; then thinking, text, tool-call (assistant
+    # message); then tool_result.
+    assert kinds == [
+        EventKind.USER,
+        EventKind.ASSISTANT_THINKING,
+        EventKind.ASSISTANT_TEXT,
+        EventKind.ASSISTANT_TOOL,
+        EventKind.TOOL_RESULT,
+    ]
+    # Timestamps must be non-decreasing (oldest -> newest).
+    assert [e.timestamp_ms for e in evs] == sorted(e.timestamp_ms for e in evs)
+    call = next(e for e in evs if e.kind is EventKind.ASSISTANT_TOOL)
+    result = next(e for e in evs if e.kind is EventKind.TOOL_RESULT)
+    assert call.tool_use_id == result.tool_use_id == "tc1"
+    assert call.tool_name == "Shell" and result.tool_name == "Shell"
+
+
+def test_single_message_flat_root_no_linkage_record(tmp_path):
+    # Decision 2 base case: root parses as JSON directly -- no linkage
+    # record needed at all.
+    db = _db(tmp_path, {
+        "agentId": "agent-6", "createdAt": T0,
+        "messages": [user_message("only message")],
+        "flat_root": True,
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-6", want_text=False)[0]
+    assert len(evs) == 1 and evs[0].kind is EventKind.USER
+
+
+# ---------------------------------------------------------------------------
+# Shell tool-call -> raw command in raw_input (unreduced).
+# ---------------------------------------------------------------------------
+
+
+def test_shell_tool_call_raw_command_in_raw_input(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-7", "createdAt": T0,
+        "messages": [
+            user_message("do the dangerous thing"),
+            assistant_message(tool_calls=[
+                {"id": "tc1", "name": "Shell", "args": {"command": SECRET_CMD}}
+            ]),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-7", want_text=False)[0]
+    call = next(e for e in evs if e.kind is EventKind.ASSISTANT_TOOL)
+    assert call.raw_input == {"command": SECRET_CMD}
+    assert call.stop_reason == "tool_use"
+    assert SECRET_CMD not in repr(call)
+
+
+def test_edit_tool_call_hashes_path_never_escapes(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-8", "createdAt": T0,
+        "messages": [
+            user_message("edit the file"),
+            assistant_message(tool_calls=[{
+                "id": "tc1", "name": "StrReplace",
+                "args": {"file_path": SECRET_PATH, "old_string": "x", "new_string": "x\ny\nz"},
+            }]),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-8", want_text=False)[0]
+    call = next(e for e in evs if e.kind is EventKind.ASSISTANT_TOOL)
+    assert call.edit_file_path_hash is not None and len(call.edit_file_path_hash) == 16
+    assert call.edit_line_count == 3
+    assert call.raw_input == {"file_path": SECRET_PATH}
+    assert SECRET_PATH not in repr(call)
+    assert "SECRET_FILE_NAME" not in repr(call)
+
+
+# ---------------------------------------------------------------------------
+# user_query wrapper stripped before hashing.
+# ---------------------------------------------------------------------------
+
+
+def test_user_query_wrapper_stripped_before_hashing(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-9", "createdAt": T0,
+        "messages": [user_message(SECRET_TEXT, wrap_user_query=True)],
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-9", want_text=True)
+    [u] = evs
+    assert u.user_text_hash == hashlib.sha256(SECRET_TEXT.encode()).hexdigest()[:16]
+    assert text_map[id(u)] == SECRET_TEXT
+    assert SECRET_TEXT not in repr(u)
+    assert "<user_query>" not in text_map[id(u)]
+
+
+def test_user_text_without_wrapper_hashed_as_is(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-10", "createdAt": T0,
+        "messages": [user_message(SECRET_TEXT)],
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-10", want_text=True)
+    [u] = evs
+    assert text_map[id(u)] == SECRET_TEXT
+
+
+def test_read_events_and_text_without_want_text_omits_map(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-10b", "createdAt": T0,
+        "messages": [user_message(SECRET_TEXT)],
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-10b", want_text=False)
+    assert len(evs) == 1
+    assert text_map == {}
+
+
+# ---------------------------------------------------------------------------
+# Soft-fail: corrupt db / bad hex / missing root / no meta -> ([], {}).
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_db_soft_fails(tmp_path):
+    bad = tmp_path / "store.db"
+    bad.write_bytes(b"not a sqlite file")
+    evs, text_map = cli_events.read_cli_events_and_text(bad, "whatever", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_bad_hex_meta_soft_fails(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-11", "createdAt": T0,
+        "messages": [user_message("hi")],
+        "bad_hex": True,
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-11", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_missing_root_soft_fails(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-12", "createdAt": T0,
+        "messages": [user_message("hi")],
+        "missing_root": True,
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-12", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_no_meta_row_soft_fails(tmp_path):
+    db = _db(tmp_path, {
+        "agentId": "agent-13", "createdAt": T0,
+        "messages": [user_message("hi")],
+        "no_meta_row": True,
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-13", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_zero_message_session_soft_fails(tmp_path):
+    db = _db(tmp_path, {"agentId": "agent-14", "createdAt": T0, "messages": []})
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-14", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_unwalkable_root_blob_soft_fails(tmp_path):
+    # Root points at a blob that is neither valid JSON nor a walkable
+    # linkage record (garbage bytes) -- must degrade to empty, not raise.
+    db = _db(tmp_path, {
+        "agentId": "agent-15", "createdAt": T0,
+        "messages": [],
+        "raw_blobs": {"f" * 64: b"\xff\xfe\x00garbage-not-protobuf-not-json"},
+        "root_id_override": "f" * 64,
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-15", want_text=True)
+    assert evs == [] and text_map == {}
+
+
+def test_one_malformed_message_shape_does_not_kill_session(tmp_path):
+    # A message with an unexpected/malformed `content` shape (an int,
+    # neither str nor list) sits between two good messages -- it must
+    # degrade to zero events for itself without killing the rest of the
+    # session's read.
+    good1 = user_message("hi")
+    malformed = {"role": "assistant", "content": 12345}
+    good2 = user_message("bye")
+    db = _db(tmp_path, {
+        "agentId": "agent-16", "createdAt": T0,
+        "messages": [good1, malformed, good2],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-16", want_text=False)[0]
+    assert len(evs) == 2
+    assert [e.kind for e in evs] == [EventKind.USER, EventKind.USER]
+
+
+# ---------------------------------------------------------------------------
+# Tree-walk cycle / dup guard.
+# ---------------------------------------------------------------------------
+
+
+def test_tree_walk_cycle_guard_terminates_and_soft_fails(tmp_path):
+    # Two synthetic linkage records that reference EACH OTHER -- a real
+    # content-addressed store cannot form this (the ids would have to
+    # depend on each other's hash), so this is deliberately adversarial:
+    # raw_blobs bypasses content-addressing to construct a genuine cycle
+    # and prove the walker's visited-set guard terminates instead of
+    # hanging/recursing forever.
+    a_id = "a" * 64
+    b_id = "b" * 64
+    a_data = linkage_record([b_id])
+    b_data = linkage_record([a_id])
+    db = _db(tmp_path, {
+        "agentId": "agent-cycle", "createdAt": T0,
+        "messages": [],
+        "raw_blobs": {a_id: a_data, b_id: b_data},
+        "root_id_override": a_id,
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(db, "agent-cycle", want_text=True)
+    # No JSON leaf is reachable from the cycle -- soft-fails to empty, and
+    # (more importantly) the call above must have returned at all.
+    assert evs == [] and text_map == {}
+
+
+def test_tree_walk_dedupes_repeated_ancestor_pointers(tmp_path):
+    # Mirrors the real growth pattern (§4): a later checkpoint's field-1
+    # list can repeat a pointer already reachable via another path. The
+    # walker must not double-collect the same message.
+    msg = user_message("hi")
+    msg_data = __import__("json").dumps(msg, sort_keys=True).encode("utf-8")
+    msg_id = hashlib.sha256(msg_data).hexdigest()
+    cp_data = linkage_record([msg_id, msg_id])  # repeated pointer to same leaf
+    cp_id = hashlib.sha256(cp_data).hexdigest()
+    db = _db(tmp_path, {
+        "agentId": "agent-dedupe", "createdAt": T0,
+        "messages": [],
+        "raw_blobs": {msg_id: msg_data, cp_id: cp_data},
+        "root_id_override": cp_id,
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-dedupe", want_text=False)[0]
+    assert len(evs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Single-open guarantee.
+# ---------------------------------------------------------------------------
+
+
+def test_reader_opens_db_exactly_once(tmp_path, monkeypatch):
+    db = _db(tmp_path, {
+        "agentId": "agent-17", "createdAt": T0,
+        "messages": [
+            user_message("hi"),
+            assistant_message(text="ok", tool_calls=[
+                {"id": "tc1", "name": "Shell", "args": {"command": "git status"}}
+            ]),
+            tool_result_message("tc1", "Shell", "clean"),
+        ],
+    })
+
+    calls = []
+    real_open_ro = cli_events.open_ro
+
+    def counting_open_ro(db_path):
+        calls.append(db_path)
+        return real_open_ro(db_path)
+
+    monkeypatch.setattr(cli_events, "open_ro", counting_open_ro)
+
+    evs, _ = cli_events.read_cli_events_and_text(db, "agent-17", want_text=True)
+    assert len(evs) >= 3
+    assert len(calls) == 1

@@ -243,7 +243,10 @@ def test_one_bad_bubble_does_not_kill_session(tmp_path):
 
 
 def test_cli_locator_returns_empty_without_crash(tmp_path):
-    # The CLI reader is a LATER task -- guarded by try/except ImportError.
+    # Real CLI reader (scripts.agents.cursor.cli_events) is wired in now --
+    # this exercises its own soft-fail path (unopenable db) via the events.py
+    # dispatch, not a stub. See tests/unit/agents/cursor/test_cli_events.py
+    # for the CLI reader's own dedicated coverage.
     db = tmp_path / "store.db"
     db.write_bytes(b"")
     evs, text_map = cursor_events.read_events_and_text(

@@ -332,16 +332,15 @@ def _read_ide(
 def _read(locator: Path, *, want_text: bool) -> tuple[list[Event], dict[int, str]]:
     db_path, kind, session_id = parse_locator(locator)
     if kind == "cli":
-        # The CLI reader is a LATER task (Phase 2) -- guard the import so a
-        # locator pointing at a CLI session soft-fails to empty instead of
-        # crashing the scanner before that module exists.
-        try:
-            from scripts.agents.cursor.cli_events import read_cli_events_and_text
-        except ImportError:
-            return [], {}
+        # Late import to avoid a needless import-time dependency for the
+        # (far more common) IDE-only read path.
+        from scripts.agents.cursor.cli_events import read_cli_events_and_text
+
         try:
             return read_cli_events_and_text(db_path, session_id, want_text=want_text)
         except Exception:
+            # cli_events soft-fails internally already; this is belt-and-
+            # suspenders against an unforeseen crash in that module.
             return [], {}
     return _read_ide(db_path, session_id, want_text=want_text)
 

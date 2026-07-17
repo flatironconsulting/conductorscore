@@ -20,6 +20,7 @@ from scripts.agents.cursor import discovery
 from tests.fixtures.cursor.builder import (
     MS, T0, assistant_bubble, user_bubble, write_ide_store,
 )
+from tests.fixtures.cursor.cli_builder import user_message, write_cli_store
 
 
 def _store(tmp_path, monkeypatch, composers):
@@ -243,8 +244,99 @@ def test_preflight_skips_nal_and_archived(tmp_path, monkeypatch):
 def test_no_store_returns_empty_sessions_and_home_not_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(tmp_path / "nope.vscdb"))
     monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(tmp_path / "no-such-dir"))
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(tmp_path / "no-such-chats-dir"))
     assert discovery.find_sessions() == []
     pf = discovery.preflight(now_ms=T0, window_ms=30 * 24 * 60 * MS)
     assert pf["home_exists"] is False
     assert pf["sessions_in_window"] == 0
     assert pf["sessions_per_day"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# CLI session discovery (client/CURSOR_FORMAT.md §4) -- store.db-per-session.
+# ---------------------------------------------------------------------------
+
+
+def _cli_store(tmp_path, monkeypatch, session):
+    chats_dir = tmp_path / "chats"
+    db = write_cli_store(chats_dir, session)
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(chats_dir))
+    return db
+
+
+def test_cli_store_paths_env_override_globs_two_levels(tmp_path, monkeypatch):
+    db = _cli_store(tmp_path, monkeypatch, {
+        "agentId": "cli-agent-1", "createdAt": T0, "messages": [user_message("hi")]})
+    assert discovery.cli_store_paths() == [db]
+
+
+def test_cli_store_paths_env_override_missing_dir_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(tmp_path / "nope"))
+    assert discovery.cli_store_paths() == []
+
+
+def test_find_sessions_discovers_cli_session_with_agent_id_and_timestamps(tmp_path, monkeypatch):
+    # No IDE store configured at all -- only a CLI session.
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(tmp_path / "nope.vscdb"))
+    db = _cli_store(tmp_path, monkeypatch, {
+        "agentId": "cli-agent-2", "createdAt": T0, "messages": [user_message("hi")]})
+    sessions = discovery.find_sessions()
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.session_id == "cli-agent-2"
+    assert s.project_root == ""
+    assert s.first_ts_ms == T0
+    # last_ts_ms comes from file mtime -- must be a real, recent-ish int.
+    assert isinstance(s.last_ts_ms, int) and s.last_ts_ms > 0
+    assert str(s.jsonl_path) == f"{db}#cli:cli-agent-2"
+
+
+def test_find_sessions_returns_both_ide_and_cli_sessions(tmp_path, monkeypatch):
+    ide_db = write_ide_store(tmp_path / "state.vscdb", [{
+        "composerId": "ide-c1", "createdAt": T0, "lastUpdatedAt": T0 + MS,
+        "workspacePath": "/home/u/proj",
+        "bubbles": [user_bubble("b1", "hi", T0)]}])
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(ide_db))
+    _cli_store(tmp_path, monkeypatch, {
+        "agentId": "cli-agent-3", "createdAt": T0, "messages": [user_message("hi")]})
+
+    sessions = discovery.find_sessions()
+    ids = {s.session_id for s in sessions}
+    assert ids == {"ide-c1", "cli-agent-3"}
+    by_id = {s.session_id: s for s in sessions}
+    assert str(by_id["ide-c1"].jsonl_path).endswith("state.vscdb#ide:ide-c1")
+    assert str(by_id["cli-agent-3"].jsonl_path).endswith("#cli:cli-agent-3")
+
+
+def test_find_sessions_cli_falls_back_to_dir_uuid_when_meta_unreadable(tmp_path, monkeypatch):
+    chats_dir = tmp_path / "chats"
+    db = write_cli_store(chats_dir, {
+        "agentId": "cli-agent-4", "chatId": "chat-uuid-4",
+        "createdAt": T0, "messages": [user_message("hi")], "bad_hex": True})
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(chats_dir))
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(tmp_path / "nope.vscdb"))
+    sessions = discovery.find_sessions()
+    assert len(sessions) == 1
+    # meta is unreadable (bad hex) -- falls back to the <chatId> dir name.
+    assert sessions[0].session_id == "chat-uuid-4"
+    assert sessions[0].session_id == db.parent.name
+
+
+def test_preflight_counts_cli_sessions_in_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(tmp_path / "nope.vscdb"))
+    _cli_store(tmp_path, monkeypatch, {
+        "agentId": "cli-agent-5", "createdAt": T0, "messages": [user_message("hi")]})
+    pf = discovery.preflight(now_ms=T0 + MS, window_ms=30 * 24 * 60 * MS)
+    assert pf["sessions_in_window"] == 1
+    assert pf["home_exists"] is True
+
+
+def test_preflight_counts_both_ide_and_cli_sessions(tmp_path, monkeypatch):
+    ide_db = write_ide_store(tmp_path / "state.vscdb", [{
+        "composerId": "ide-c2", "createdAt": T0, "lastUpdatedAt": T0 + MS,
+        "bubbles": [user_bubble("b1", "hi", T0)]}])
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(ide_db))
+    _cli_store(tmp_path, monkeypatch, {
+        "agentId": "cli-agent-6", "createdAt": T0, "messages": [user_message("hi")]})
+    pf = discovery.preflight(now_ms=T0 + MS, window_ms=30 * 24 * 60 * MS)
+    assert pf["sessions_in_window"] == 2
