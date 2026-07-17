@@ -38,7 +38,17 @@ CONSENT_SCHEMA_VERSION = 1
 
 # Canonical adapter order — the provider list is always emitted sorted/canonical
 # so the cache key and providers_seen are stable.
-_CANONICAL_ORDER: list[AgentId] = ["claude", "codex"]
+_CANONICAL_ORDER: list[AgentId] = ["claude", "codex", "cursor"]
+
+# Human-readable labels for provider ids, shared by run.py/scan.py so the
+# cross-provider prompts (TTY picker, ASK line, permission-needed wording)
+# never hardcode a provider list — they iterate _CANONICAL_ORDER /
+# detected/permission_needed and look the label up here.
+PROVIDER_LABELS: dict[AgentId, str] = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "cursor": "Cursor",
+}
 
 
 def _cache_dir(env: Mapping[str, str]) -> Path:
@@ -66,26 +76,31 @@ def detect_launch_provider(env: Mapping[str, str] = os.environ) -> AgentId:
     """Which provider this run was launched from.
 
     Precedence:
-      1. ``CONDUCTORSCORE_LAUNCH_PROVIDER`` (claude|codex) — set by the install
-         snippet for the surface the run launches from.
-      2. install-path / command context heuristic: a ``.codex`` segment in the
-         skill install path (``CONDUCTORSCORE_SKILL_DIR`` / argv[0]) implies a
-         Codex launch.
+      1. ``CONDUCTORSCORE_LAUNCH_PROVIDER`` (claude|codex|cursor) — set by the
+         install snippet for the surface the run launches from.
+      2. install-path / command context heuristic: a ``.codex`` (or
+         ``.cursor``) segment in the skill install path
+         (``CONDUCTORSCORE_SKILL_DIR`` / argv[0]) implies a Codex (or Cursor)
+         launch.
       3. default ``claude``.
     """
     explicit = (env.get("CONDUCTORSCORE_LAUNCH_PROVIDER") or "").strip().lower()
-    if explicit in ("claude", "codex"):
+    if explicit in _CANONICAL_ORDER:
         return explicit  # type: ignore[return-value]
     # Fall back to install path / command context only when the env var is
-    # absent. A skill installed under ~/.codex/... launches from Codex.
+    # absent. A skill installed under ~/.codex/... launches from Codex; under
+    # ~/.cursor/... launches from Cursor.
     skill_dir = (env.get("CONDUCTORSCORE_SKILL_DIR") or "").lower()
     if "/.codex/" in skill_dir or skill_dir.endswith("/.codex"):
         return "codex"
+    if "/.cursor/" in skill_dir or skill_dir.endswith("/.cursor"):
+        return "cursor"
     return "claude"
 
 
-def _other_provider(launch: AgentId) -> AgentId:
-    return "codex" if launch == "claude" else "claude"
+def _other_providers(launch: AgentId) -> list[AgentId]:
+    """Every canonical provider except ``launch``, in canonical order."""
+    return [p for p in _CANONICAL_ORDER if p != launch]
 
 
 def _canonical(providers: set[AgentId] | list[AgentId]) -> list[AgentId]:
@@ -98,22 +113,31 @@ class ConsentDecision:
     """Outcome of the cross-provider consent gate.
 
     ``providers`` is the canonical ordered list of providers the scanner should
-    actually scan. ``permission_needed`` is set (to the OTHER provider's id)
-    when activity was detected but the user has not consented and no override /
-    cache allows it — the scanner emits the permission-needed line and scans
-    only ``launch_provider``.
+    actually scan. ``permission_needed`` lists the OTHER providers' ids (a
+    tuple, canonical order, possibly more than one — e.g. launching from
+    Claude with both Codex AND Cursor active) that have recent activity but
+    the user has not consented and no override / cache allows scanning them —
+    the scanner emits the permission-needed line for each and scans only
+    ``providers`` (never a provider merely because it appears here).
+    ``permission_sessions_30d`` maps each such provider id to its 30-day
+    session count.
     """
 
     launch_provider: AgentId
     providers: list[AgentId]
-    permission_needed: AgentId | None = None
-    permission_sessions_30d: int = 0
+    permission_needed: tuple[AgentId, ...] = ()
+    permission_sessions_30d: dict[str, int] = field(default_factory=dict)
     source: str = "default"  # default|override|cache|consent-prompt
     preflight: dict = field(default_factory=dict)
 
     @property
     def both(self) -> bool:
         return len(self.providers) > 1
+
+    @property
+    def needs_permission(self) -> bool:
+        """True when at least one non-scanned provider is awaiting consent."""
+        return bool(self.permission_needed)
 
 
 def _account_identity(env: Mapping[str, str]) -> str:
@@ -227,15 +251,12 @@ def detect_agents(
     orchestrator can ask the user UP FRONT which agents to scan when more than
     one is present. Reads only file existence / timestamp metadata — never
     transcript text, tool IO, cwd, or instruction files. Returns the agents in
-    canonical order (claude, codex).
+    canonical order (claude, codex, cursor).
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
     if adapters is None:
-        from scripts.agents.claude import ClaudeAdapter
-        from scripts.agents.codex import CodexAdapter
-
-        adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
+        adapters = _default_adapters()
     found: list[AgentId] = []
     for aid in _CANONICAL_ORDER:
         ad = adapters.get(aid)
@@ -247,6 +268,14 @@ def detect_agents(
     return found
 
 
+def _default_adapters() -> dict[AgentId, AgentAdapter]:
+    from scripts.agents.claude import ClaudeAdapter
+    from scripts.agents.codex import CodexAdapter
+    from scripts.agents.cursor import CursorAdapter
+
+    return {"claude": ClaudeAdapter(), "codex": CodexAdapter(), "cursor": CursorAdapter()}
+
+
 def decide(
     env: Mapping[str, str] = os.environ,
     *,
@@ -255,14 +284,20 @@ def decide(
 ) -> ConsentDecision:
     """Resolve which providers to scan, honoring override → cache → preflight.
 
-    1. ``CONDUCTORSCORE_PROVIDERS`` set → explicit override, bypass prompting.
+    1. ``CONDUCTORSCORE_PROVIDERS`` set → explicit override, bypass prompting
+       (and preflighting) entirely.
     2. else launch provider from ``CONDUCTORSCORE_LAUNCH_PROVIDER`` (or path).
-    3. cached consent for this base+account allowing the other provider → both.
-    4. else preflight the OTHER provider (metadata only). If it has activity in
-       the 30-day window → ``permission_needed`` (scan launch provider only).
-    5. else scan the launch provider only.
+    3. cached consent for this base+account → every OTHER provider it names is
+       scanned straight through, no preflight, no prompt.
+    4. every remaining OTHER provider (not launch, not already cached) is
+       preflighted (metadata only). Any with activity in the 30-day window is
+       added to ``permission_needed`` — it is NOT added to ``providers``. A
+       provider is scanned (appears in ``providers``) ONLY because it is the
+       launch provider, was override-selected, or was already
+       cached/consented — NEVER merely because preflight found activity.
+    5. if nothing needs asking, scan the launch (+ any cached) providers only.
 
-    ``adapters`` lets tests inject fakes; defaults to live Claude/Codex.
+    ``adapters`` lets tests inject fakes; defaults to live Claude/Codex/Cursor.
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
@@ -280,47 +315,57 @@ def decide(
             source="override",
         )
 
-    other = _other_provider(launch)
+    others = _other_providers(launch)
 
-    # (3) Cached consent.
+    # (3) Cached consent — only the providers the cache actually names are
+    # scanned straight through; anything else still needs a fresh preflight.
     cached = read_cached_consent(env)
-    if cached is not None and other in cached:
-        return ConsentDecision(
-            launch_provider=launch,
-            providers=_canonical(set(cached) | {launch}),
-            source="cache",
-        )
+    cached_set = set(cached) if cached is not None else set()
+    consented_others = [p for p in others if p in cached_set]
+    to_preflight = [p for p in others if p not in cached_set]
 
-    # (4) Metadata-only preflight of the OTHER provider.
     if adapters is None:
-        from scripts.agents.claude import ClaudeAdapter
-        from scripts.agents.codex import CodexAdapter
+        adapters = _default_adapters()
 
-        adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
-    other_adapter = adapters[other]
-    pf = other_adapter.preflight(now_ms, WINDOW_MS)
-    sessions_30d = int(pf.get("sessions_in_window", 0) or 0)
-    if pf.get("home_exists") and sessions_30d > 0:
+    # (4) Metadata-only preflight of every remaining (non-cached) provider.
+    permission_needed: list[AgentId] = []
+    permission_sessions_30d: dict[str, int] = {}
+    last_preflight: dict = {}
+    for p in to_preflight:
+        adapter = adapters.get(p)
+        if adapter is None:
+            continue
+        pf = adapter.preflight(now_ms, WINDOW_MS)
+        last_preflight = pf
+        sessions_30d = int(pf.get("sessions_in_window", 0) or 0)
+        if pf.get("home_exists") and sessions_30d > 0:
+            permission_needed.append(p)
+            permission_sessions_30d[p] = sessions_30d
+
+    providers = _canonical(set(consented_others) | {launch})
+
+    if permission_needed:
         return ConsentDecision(
             launch_provider=launch,
-            providers=[launch],
-            permission_needed=other,
-            permission_sessions_30d=sessions_30d,
-            source="consent-prompt",
-            preflight=pf,
+            providers=providers,
+            permission_needed=tuple(_canonical(permission_needed)),
+            permission_sessions_30d=permission_sessions_30d,
+            source="cache" if consented_others else "consent-prompt",
+            preflight=last_preflight,
         )
 
-    # (5) Nothing to ask about — launch provider only.
+    # (5) Nothing (further) to ask about.
     return ConsentDecision(
         launch_provider=launch,
-        providers=[launch],
-        source="default",
-        preflight=pf,
+        providers=providers,
+        source="cache" if consented_others else "default",
+        preflight=last_preflight,
     )
 
 
 __all__ = [
     "CONSENT_SCHEMA_VERSION",
+    "PROVIDER_LABELS",
     "WINDOW_MS",
     "ConsentDecision",
     "consent_file",

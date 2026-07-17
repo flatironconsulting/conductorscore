@@ -472,29 +472,53 @@ def _finish_daily() -> None:
         _emit_daily_ask()
 
 
+def _provider_label(provider_id: str) -> str:
+    import scripts.agents.consent as consent_mod
+
+    return consent_mod.PROVIDER_LABELS.get(provider_id, provider_id.title())
+
+
 def _prompt_providers_tty(detected: list) -> str | None:
-    """Real-terminal provider picker. Returns 'all'|'claude'|'codex', or None to
-    cancel. The non-TTY (agent) path uses the CONDUCTORSCORE_ASK relay instead."""
+    """Real-terminal provider picker. Options are built DYNAMICALLY from the
+    providers actually ``detected`` (never a hardcoded 3-way list), so a
+    machine with e.g. only Claude + Cursor never offers a Codex option.
+    Returns 'all'|<provider id>, or None to cancel. The non-TTY (agent) path
+    uses the CONDUCTORSCORE_ASK relay instead."""
     print("We detected multiple coding agents. Which would you like to score?")
-    print("  [1] All  (recommended)")
-    print("  [2] Claude Code")
-    print("  [3] Codex")
-    print("  [4] Cancel")
+    options = [("all", "All  (recommended)")] + [
+        (pid, _provider_label(pid)) for pid in detected
+    ]
+    for i, (_pid, label) in enumerate(options, start=1):
+        print(f"  [{i}] {label}")
+    cancel_choice = len(options) + 1
+    print(f"  [{cancel_choice}] Cancel")
     try:
-        choice = input("Choose 1-4 [1]: ").strip()
+        raw = input(f"Choose 1-{cancel_choice} [1]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
-    return {"": "all", "1": "all", "2": "claude", "3": "codex", "4": None}.get(
-        choice, "all"
-    )
+    if raw == "":
+        return "all"
+    try:
+        idx = int(raw)
+    except ValueError:
+        return "all"
+    if idx == cancel_choice:
+        return None
+    if 1 <= idx <= len(options):
+        return options[idx - 1][0]
+    return "all"
 
 
-def _emit_providers_ask() -> None:
+def _emit_providers_ask(detected: list) -> None:
+    """Non-TTY (agent) path: the ``CONDUCTORSCORE_ASK providers`` relay, with
+    options built DYNAMICALLY from ``detected`` — mirrors ``_prompt_providers_tty``
+    so the agent never offers a provider that wasn't actually found."""
+    options = " ".join(f"[{_provider_label(pid)}]" for pid in detected)
     print(
         'CONDUCTORSCORE_ASK providers "We detected multiple coding agents on '
         "your system. Which would you like to scan for your ConductorScore?\" "
-        "[All (Recommended)] [Claude Code] [Codex] [Cancel]"
+        f"[All (Recommended)] {options} [Cancel]"
     )
 
 
@@ -540,7 +564,9 @@ def _emit_result(final: dict) -> None:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="conductorscore", add_help=False)
-    parser.add_argument("--providers", choices=["all", "claude", "codex"], default=None)
+    parser.add_argument(
+        "--providers", choices=["all", "claude", "codex", "cursor"], default=None
+    )
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
     ns, _unknown = parser.parse_known_args(argv)
     return ns
@@ -603,7 +629,7 @@ def main() -> int:
     # --providers / CONDUCTORSCORE_PROVIDERS override, no cached consent) and
     # metadata-only detection finds >1 agent with recent activity, emit a
     # structured ASK line and STOP without scanning. The launching agent
-    # presents the choice and re-runs with --providers=all|claude|codex. A
+    # presents the choice and re-runs with --providers=all|claude|codex|cursor. A
     # single agent scans straight through with no prompt.
     if not os.environ.get("CONDUCTORSCORE_PROVIDERS"):
         import scripts.agents.consent as consent_mod
@@ -620,7 +646,7 @@ def main() -> int:
                         return 0
                     os.environ["CONDUCTORSCORE_PROVIDERS"] = choice
                 else:
-                    _emit_providers_ask()
+                    _emit_providers_ask(detected)
                     return 0
 
     # Cache setup is best-effort: even after _writable_cache_dir()'s temp

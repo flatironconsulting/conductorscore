@@ -118,21 +118,35 @@ def main() -> int:
             last_emit = now
 
     # Cross-provider consent gate. Decide WHICH providers to scan before we
-    # touch any transcript. When the non-launched provider has recent activity
-    # but the user hasn't consented (and there's no override / cached consent),
-    # we scan ONLY the launch provider and emit a structured permission-needed
-    # line so the agent can ask the user. We NEVER silently scan the other
-    # provider — only its metadata-only preflight ran.
+    # touch any transcript. Any non-launched provider(s) with recent activity
+    # but no consent (and no override / cached consent) are listed in
+    # permission_needed — we scan ONLY decision.providers and emit a
+    # structured permission-needed line per pending provider so the agent can
+    # ask the user. We NEVER silently scan a provider that's merely in
+    # permission_needed — only its metadata-only preflight ran.
     decision = consent_mod.decide()
-    if decision.permission_needed is not None:
-        print(
-            f"CONDUCTORSCORE_PERMISSION_NEEDED provider={decision.permission_needed} "
-            f"sessions_30d={decision.permission_sessions_30d}"
+    if decision.permission_needed:
+        provider_ids = ",".join(decision.permission_needed)
+        session_counts = ",".join(
+            f"{p}={decision.permission_sessions_30d.get(p, 0)}"
+            for p in decision.permission_needed
         )
-        other = "Codex" if decision.permission_needed == "codex" else "Claude"
         print(
-            f"I found {other} activity from the last 30 days. Scan {other} too "
-            f"and include it in your aggregate ConductorScore?"
+            f"CONDUCTORSCORE_PERMISSION_NEEDED provider={provider_ids} "
+            f"sessions_30d={session_counts}"
+        )
+        names = [
+            consent_mod.PROVIDER_LABELS.get(p, p.title())
+            for p in decision.permission_needed
+        ]
+        names_joined = (
+            names[0]
+            if len(names) == 1
+            else ", ".join(names[:-1]) + f" and {names[-1]}"
+        )
+        print(
+            f"I found {names_joined} activity from the last 30 days. Scan "
+            f"{names_joined} too and include it in your aggregate ConductorScore?"
         )
 
     try:

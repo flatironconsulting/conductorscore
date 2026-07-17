@@ -9,6 +9,14 @@ user opts into daily scoring:
     per-day throttle above keeps it cheap).
   * Codex → Codex has no settings-hook surface, so return an automation
     instruction the agent can wire up (run ``$conductorscore`` daily).
+  * Cursor → Cursor is rumored to have a ``hooks.json`` automation surface,
+    but CURSOR_FORMAT.md's config-surfaces recon (§8) never observed one at
+    all (no hooks.json, no session-start-equivalent event was found on disk),
+    so writing a real hook here would be pure speculation about a shape and
+    trigger event that were never confirmed to exist. Recon-gated: mirror the
+    Codex branch instead and return an automation instruction. Upgrade to a
+    real hooks.json entry only once CURSOR_FORMAT.md documents a confirmed
+    hook surface + event.
 """
 from __future__ import annotations
 import json, os, sys, subprocess, time
@@ -20,7 +28,7 @@ THROTTLE_SECONDS = 20 * 3600
 
 @dataclass
 class DailyResult:
-    kind: str  # "hook" (Claude) | "codex_automation"
+    kind: str  # "hook" (Claude) | "codex_automation" | "cursor_automation"
     instruction: str = ""
 
 
@@ -39,11 +47,21 @@ _CODEX_INSTRUCTION = (
     "ConductorScore skill throttles itself, so a daily trigger is safe."
 )
 
+_CURSOR_INSTRUCTION = (
+    "Cursor's daily-hook wiring is unverified (no confirmed hooks.json "
+    "session-start event), so wire up daily scoring via a Cursor "
+    "automation/scheduled task (or your OS scheduler) that runs "
+    "`$conductorscore` once per day. The ConductorScore skill throttles "
+    "itself, so a daily trigger is safe."
+)
+
 
 def enable_daily(provider: str) -> DailyResult:
     """Enable once-per-day scoring for ``provider``. Never raises."""
     if provider == "codex":
         return DailyResult(kind="codex_automation", instruction=_CODEX_INSTRUCTION)
+    if provider == "cursor":
+        return DailyResult(kind="cursor_automation", instruction=_CURSOR_INSTRUCTION)
 
     # Claude (and any settings.json-based provider): merge a SessionStart hook.
     run_py = _run_py_path()
