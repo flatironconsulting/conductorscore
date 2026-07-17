@@ -46,6 +46,8 @@ the 5-minute HITL/AFK threshold.
 """
 from __future__ import annotations
 
+import hashlib
+
 from scripts.scanner import extract
 from tests.fixtures.cursor.builder import (
     MS,
@@ -56,7 +58,7 @@ from tests.fixtures.cursor.builder import (
     write_ide_store,
 )
 from tests.integration.test_extractor_integration import (
-    cursor_home, _cursor_consent,  # noqa: F401  (cursor_home is a fixture)
+    cursor_home, _cursor_consent, _now_ms,  # noqa: F401  (cursor_home is a fixture)
 )
 
 
@@ -403,3 +405,93 @@ def test_tokens_by_model_keyed_by_model_id(cursor_home, monkeypatch):
     # pytest fixtures aren't re-enterable mid-test.
     wire = _scan_dict(cursor_home, monkeypatch, composer, now_ms=T0 + 10 * MS)
     assert "token_data_missing" not in wire
+
+
+# ---------------------------------------------------------------------------
+# (f) Task 2.2 golden — IDE + CLI sessions merge under one provider.
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_ide_and_cli_sessions_merge_under_one_provider(
+    cursor_home, monkeypatch
+):
+    """Both Cursor surfaces feeding ONE ``extract()`` run must merge into a
+    single ``provider: "cursor"``: one session discovered from the IDE's
+    ``state.vscdb`` and one from a CLI ``store.db``, two DISTINCT
+    provider-namespaced ``session_hash`` values, ``providers_seen`` carrying
+    ``"cursor"`` exactly once (not "cursor-ide" / "cursor-cli" — there is
+    only one provider identity for both surfaces).
+
+    The CLI session must also come out ``token_data_missing`` -- CLI
+    ``store.db`` blobs carry no per-message token fields at all (§6/§7 of
+    CURSOR_FORMAT.md), unlike the IDE surface which can carry real
+    ``tokenCount`` data.
+    """
+    from tests.fixtures.cursor.cli_builder import (
+        assistant_message as cli_assistant_message,
+        user_message as cli_user_message,
+        write_cli_store,
+    )
+
+    now = _now_ms()
+
+    # --- IDE surface: one composer session. ---
+    ide_composer_id = "cur-merge-ide"
+    ide_db = write_ide_store(
+        cursor_home / "state.vscdb",
+        [
+            {
+                "composerId": ide_composer_id,
+                "createdAt": now - 10 * MS,
+                "lastUpdatedAt": now - 9 * MS,
+                "workspacePath": "/repo/merge-ide",
+                "bubbles": [
+                    user_bubble("b1", "hi from the IDE", now - 10 * MS),
+                    assistant_bubble("b2", "hello from the IDE", now - 9 * MS),
+                ],
+            }
+        ],
+    )
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(ide_db))
+
+    # --- CLI surface: one store.db session (a distinct chats dir). ---
+    cli_agent_id = "cur-merge-cli"
+    chats_dir = cursor_home / "cli_chats"
+    write_cli_store(
+        chats_dir,
+        {
+            "agentId": cli_agent_id,
+            "createdAt": now - 8 * MS,
+            "messages": [
+                cli_user_message("hi from the CLI", wrap_user_query=True),
+                cli_assistant_message(text="hello from the CLI"),
+            ],
+        },
+    )
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(chats_dir))
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=now,
+        consent_decision=_cursor_consent(),
+    )
+    payload = out.to_dict()
+
+    sessions = payload["sessions"]
+    assert len(sessions) == 2, sessions
+    # One provider VALUE across both surfaces, not per-surface providers.
+    assert {s["provider"] for s in sessions} == {"cursor"}
+    assert "cursor" in payload["providers_seen"]
+
+    ide_hash = hashlib.sha256(f"cursor:{ide_composer_id}".encode()).hexdigest()[:16]
+    cli_hash = hashlib.sha256(f"cursor:{cli_agent_id}".encode()).hexdigest()[:16]
+    hashes = {s["session_hash"] for s in sessions}
+    assert len(hashes) == 2, "IDE and CLI sessions must hash to DISTINCT values"
+    assert hashes == {ide_hash, cli_hash}
+
+    by_hash = {s["session_hash"]: s for s in sessions}
+    # CLI store.db carries no per-message token fields at all -- the CLI
+    # session must be flagged missing (byte-parity: present and True, not
+    # merely absent/False).
+    assert by_hash[cli_hash].get("token_data_missing") is True

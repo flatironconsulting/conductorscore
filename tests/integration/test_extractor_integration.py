@@ -1309,6 +1309,154 @@ def test_cursor_planted_secrets_never_reach_wire_payload(
     assert "token_data_missing" not in s
 
 
+def test_cursor_cli_planted_secrets_never_reach_wire_payload(
+    cursor_home, isolated_claude_home, monkeypatch
+):
+    """CLI-surface mirror of ``test_cursor_planted_secrets_never_reach_wire_payload``
+    above (Task 1.7's IDE privacy invariant, now for Task 2.2's CLI reader):
+    plant distinct secrets in EVERY raw-text surface a Cursor **CLI**
+    ``store.db`` session can carry (user prompt inside a
+    ``<user_query>...</user_query>`` wrapper, a Shell tool-call's env-var
+    VALUE, a Shell command's by-path first token, an edit tool-call's
+    ``file_path`` arg, a tool-result body, an assistant reasoning/thinking
+    text, the session title ``meta.name``, and the raw ``agentId``/session
+    id) and assert none reaches the serialized (``to_dict``) numbers-only
+    wire payload -- scanned recursively, not a top-level substring check.
+    """
+    from tests.fixtures.cursor.cli_builder import (
+        assistant_message,
+        tool_result_message,
+        user_message,
+        write_cli_store,
+    )
+
+    sec_prompt = "CLISECRET_PROMPT_AAA"
+    sec_cmd_value = "CLISECRET_ENVVALUE_BBB"
+    sec_shell_path = "CLISECRET_SHELLPATH_CCC"
+    sec_edit_path = "/home/u/CLISECRET_EDITPATH_DDD/app.py"
+    sec_tool_result = "CLISECRET_TOOLRESULT_EEE"
+    sec_thinking = "CLISECRET_THINKING_FFF"
+    sec_name = "CLISECRET_SESSIONNAME_GGG"
+    sec_agent_id = "clisecret-agentid-HHH"
+
+    now = _now_ms()
+    messages = [
+        # User turn — wrapped in <user_query>...</user_query>; the reader
+        # must strip the wrapper before hashing, but the raw text (wrapper
+        # and all) must never cross the wire either way.
+        user_message(sec_prompt, wrap_user_query=True),
+        assistant_message(
+            text="ok, starting",
+            tool_calls=[
+                {
+                    "id": "t1",
+                    "name": "Shell",
+                    # Secret in the env-var VALUE — must be skipped by the
+                    # leading NAME=value guard in
+                    # approval_counter.signature_for_bash if ever reduced,
+                    # and must never be serialized raw regardless.
+                    "args": {"command": f"TOKEN={sec_cmd_value} git push"},
+                }
+            ],
+        ),
+        tool_result_message("t1", "Shell", "ok"),
+        assistant_message(
+            text="next",
+            tool_calls=[
+                {
+                    "id": "t2",
+                    "name": "Shell",
+                    # Secret in a first token that IS a path — must collapse
+                    # to the "path" sentinel if ever reduced, never cross
+                    # the wire raw.
+                    "args": {
+                        "command": f"/home/u/{sec_shell_path}/deploy.sh --now"
+                    },
+                }
+            ],
+        ),
+        tool_result_message("t2", "Shell", "ok"),
+        assistant_message(
+            text="editing",
+            tool_calls=[
+                {
+                    "id": "t3",
+                    "name": "StrReplace",
+                    # Secret in file_path — hashed immediately by the
+                    # reader; only the hash may cross the wire.
+                    "args": {
+                        "file_path": sec_edit_path,
+                        "old_string": "a",
+                        "new_string": "b",
+                    },
+                }
+            ],
+        ),
+        tool_result_message("t3", "StrReplace", "ok"),
+        assistant_message(
+            text="reading",
+            tool_calls=[
+                {"id": "t4", "name": "Read", "args": {"file_path": "/p/file.txt"}}
+            ],
+        ),
+        # Tool result body — secret in the (discarded) result text.
+        tool_result_message(
+            "t4", "Read", f"contents include {sec_tool_result} here"
+        ),
+        # Assistant reasoning/thinking block.
+        assistant_message(reasoning=sec_thinking, text="done"),
+    ]
+
+    chats_dir = cursor_home / "cli_chats"
+    write_cli_store(
+        chats_dir,
+        {
+            "agentId": sec_agent_id,
+            "name": sec_name,
+            "createdAt": now - 5 * 60_000,
+            "messages": messages,
+        },
+    )
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(chats_dir))
+    # Hermetically isolate the IDE surface too, so this test only exercises
+    # the CLI reader path (no real host state.vscdb can leak in).
+    monkeypatch.setenv(
+        "CONDUCTORSCORE_CURSOR_IDE_STORE", str(cursor_home / "no-such-state.vscdb")
+    )
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=now,
+        consent_decision=_cursor_consent(),
+    )
+    payload = out.to_dict()
+
+    # Sanity: the CLI session was actually scanned (so the absence check
+    # below is meaningful, not a vacuous pass on an empty payload).
+    assert len(out.sessions) == 1
+    assert out.sessions[0].provider == "cursor"
+
+    for secret, where in (
+        (sec_prompt, "CLI user message text (<user_query> wrapper)"),
+        (sec_cmd_value, "CLI shell env-var value"),
+        (sec_shell_path, "CLI shell first-token path"),
+        (sec_edit_path, "CLI edit tool-call file_path"),
+        (sec_tool_result, "CLI tool-result body"),
+        (sec_thinking, "CLI assistant reasoning/thinking text"),
+        (sec_name, "CLI meta.name (session title)"),
+        (sec_agent_id, "CLI meta.agentId (raw session id)"),
+    ):
+        _assert_secret_absent(payload, secret, where=where)
+
+    [s] = payload["sessions"]
+    assert s["provider"] == "cursor"
+    expected_hash = hashlib.sha256(
+        f"cursor:{sec_agent_id}".encode()
+    ).hexdigest()[:16]
+    assert s["session_hash"] == expected_hash
+
+
 def test_cursor_token_data_missing_set_when_all_zero(cursor_home, monkeypatch):
     """A Cursor session whose assistant bubbles ALL carry 0/0 tokenCount is
     flagged ``token_data_missing``; a sibling session with real token usage
