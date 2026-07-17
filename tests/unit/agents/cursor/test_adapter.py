@@ -19,7 +19,13 @@ def test_cursor_adapter_satisfies_protocol():
     assert CursorAdapter().agent_id == "cursor"
 
 
-def test_cursor_adapter_scan_config_is_all_zero_stub():
+def test_cursor_adapter_scan_config_is_all_zero_for_empty_home(monkeypatch, tmp_path):
+    # Task 3.1: scan_config now delegates to scripts.agents.cursor.config
+    # (real MCP/hooks/commands/skills/AGENTS.md+rules counts — see
+    # tests/unit/agents/cursor/test_config.py). Still all-zero for an
+    # empty/absent .cursor home, exercised here with an isolated tmp home
+    # so this doesn't depend on the actual machine's real ~/.cursor state.
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(tmp_path / "no-such-cursor-home"))
     cc = CursorAdapter().scan_config()
     assert cc == ConfigCounts()
 

@@ -10,17 +10,18 @@ The :class:`CursorAdapter` satisfies the ``AgentAdapter`` protocol
 registry hands the scanner instances of this class when the provider
 selection includes ``cursor``.
 
-``scan_config`` is a STUB for this task: it returns an all-zero
-``ConfigCounts`` unconditionally. The real Cursor config scan (MCP
-servers, hooks, custom commands, ``.cursor`` instruction files) lands in
-Task 3.1.
+``scan_config`` delegates to :mod:`scripts.agents.cursor.config` (Task
+3.1): MCP servers (``mcp.json``), hooks (``hooks.json``), custom commands
+(``commands/*.md`` + ``skills/*`` dirs, excluding product-bundled
+``skills-cursor/``), and instruction-file line counts (``AGENTS.md`` +
+``rules/*.mdc``).
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from scripts.agents.base import AgentId
-from scripts.agents.cursor import discovery, events, store, taxonomy
+from scripts.agents.cursor import config, discovery, events, store, taxonomy
 from scripts.agents.cursor.events import read_events, read_events_and_text
 from scripts.core.normalized import Event, SessionMeta
 from scripts.output_schema import ConfigCounts
@@ -42,9 +43,7 @@ class CursorAdapter:
         return events.read_events_and_text(jsonl_path)
 
     def scan_config(self) -> ConfigCounts:
-        # Stub — Task 3.1 implements the real Cursor config scan (MCP
-        # servers, hooks, custom commands, instruction-file line counts).
-        return ConfigCounts()
+        return config.scan_config()
 
     def preflight(self, now_ms: int, window_ms: int) -> dict:
         return discovery.preflight(now_ms, window_ms)
@@ -52,6 +51,7 @@ class CursorAdapter:
 
 __all__ = [
     "CursorAdapter",
+    "config",
     "discovery",
     "events",
     "read_events",
