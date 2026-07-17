@@ -1168,3 +1168,266 @@ def test_cursor_session_hash_is_provider_namespaced(
     unprefixed = hashlib.sha256(composer_id.encode()).hexdigest()[:16]
     if unprefixed != expected:
         assert unprefixed not in out.to_json()
+
+
+# ---------------------------------------------------------------------------
+# Cursor provider — privacy + token_data_missing invariants (Slice 3)
+#
+# Same shape as the Codex block above: plant distinct synthetic secrets in
+# every raw-text surface a Cursor IDE bubble can carry (user prompt +
+# richText fallback, a Shell command's env-var VALUE, a Shell command whose
+# first token IS a path, an edit tool's file_path, a tool result body, a
+# thinking block, the workspaceIdentifier/project root, and the composerId
+# itself) and prove NONE reach the serialized (``to_dict``/``to_json``)
+# numbers-only wire payload. This is the real net for the Task 1.5
+# repr-only gap: it scans the actual JSON tree the server receives, not
+# ``repr(Event)``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cursor_home(tmp_path, monkeypatch):
+    """An isolated Cursor IDE store + ``.cursor`` home, pointed at by
+    ``CONDUCTORSCORE_CURSOR_IDE_STORE`` / ``CONDUCTORSCORE_CURSOR_HOME``."""
+    home = tmp_path / ".cursor"
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(home))
+    return tmp_path
+
+
+def _write_cursor_store(root: Path, composers: list[dict]):
+    from tests.fixtures.cursor.builder import write_ide_store
+
+    return write_ide_store(root / "state.vscdb", composers)
+
+
+def test_cursor_planted_secrets_never_reach_wire_payload(
+    cursor_home, isolated_claude_home, monkeypatch
+):
+    """Plant distinct secrets in EVERY Cursor raw-text surface and assert
+    none reaches the serialized numbers-only payload (recursively scanned)."""
+    from tests.fixtures.cursor.builder import (
+        MS,
+        T0,
+        assistant_bubble,
+        tool_bubble,
+        user_bubble,
+    )
+
+    sec_prompt = "CURSECRET_PROMPT_AAA"
+    sec_richtext = "CURSECRET_RICHTEXT_BBB"
+    sec_cmd_value = "CURSECRET_ENVVALUE_CCC"
+    sec_shell_path = "CURSECRET_SHELLPATH_DDD"
+    sec_edit_path = "/home/u/CURSECRET_EDITPATH_EEE/app.py"
+    sec_tool_result = "CURSECRET_TOOLRESULT_FFF"
+    sec_thinking = "CURSECRET_THINKING_GGG"
+    sec_cwd = "/home/u/CURSECRET_CWD_HHH/proj"
+    sec_session_id = "cursecret-session-III-id"
+
+    # A user bubble whose `text` is empty so the reader must fall back to
+    # `richText` (CURSOR_FORMAT.md §2) — exercises that fallback surface
+    # with its own distinct secret.
+    b_rich = user_bubble("b1b", sec_richtext, T0 + MS)
+    b_rich["text"] = ""
+
+    db = _write_cursor_store(cursor_home, [{
+        "composerId": sec_session_id,
+        "createdAt": T0,
+        "lastUpdatedAt": T0 + 10 * MS,
+        "workspacePath": sec_cwd,
+        "bubbles": [
+            user_bubble("b1", sec_prompt, T0),
+            b_rich,
+            # Shell — secret in the env-var VALUE (must be skipped by the
+            # leading NAME=value guard in approval_counter.signature_for_bash).
+            tool_bubble(
+                "b2", "Shell",
+                {"command": f"TOKEN={sec_cmd_value} git push"}, T0 + 2 * MS,
+            ),
+            # Shell — secret in a first token that IS a path (must collapse
+            # to the "path" sentinel, never cross the wire raw).
+            tool_bubble(
+                "b3", "Shell",
+                {"command": f"/home/u/{sec_shell_path}/deploy.sh --now"},
+                T0 + 3 * MS,
+            ),
+            # Edit tool — secret in file_path (hashed immediately by the
+            # reader; only the hash may cross the wire).
+            tool_bubble(
+                "b4", "StrReplace",
+                {"file_path": sec_edit_path, "old_string": "a", "new_string": "b"},
+                T0 + 4 * MS,
+            ),
+            # Tool result body — secret in the (discarded) result text.
+            tool_bubble(
+                "b5", "Read", {"file_path": "/p/file.txt"}, T0 + 5 * MS,
+                result=f"contents include {sec_tool_result} here",
+            ),
+            # Assistant bubble carrying a thinking block + real token usage
+            # (so this session is NOT flagged token_data_missing below).
+            assistant_bubble(
+                "b6", "done", T0 + 6 * MS, model="composer-2",
+                input_tokens=100, output_tokens=10, thinking=sec_thinking,
+            ),
+        ],
+    }])
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(db))
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=T0 + 20 * MS,
+        consent_decision=_cursor_consent(),
+    )
+    payload = out.to_dict()
+
+    # Sanity: the Cursor session was actually scanned (so the absence check
+    # below is meaningful, not a vacuous pass on an empty payload).
+    assert len(out.sessions) == 1
+    assert out.sessions[0].provider == "cursor"
+
+    for secret, where in (
+        (sec_prompt, "user prompt text"),
+        (sec_richtext, "user richText fallback"),
+        (sec_cmd_value, "shell env-var value"),
+        (sec_shell_path, "shell first-token path"),
+        (sec_edit_path, "edit tool file_path"),
+        (sec_tool_result, "tool_result output body"),
+        (sec_thinking, "thinking block text"),
+        (sec_cwd, "workspaceIdentifier / project root"),
+        (sec_session_id, "raw composerId / session id"),
+    ):
+        _assert_secret_absent(payload, secret, where=where)
+
+    [s] = payload["sessions"]
+    assert s["provider"] == "cursor"
+    expected_hash = hashlib.sha256(
+        f"cursor:{sec_session_id}".encode()
+    ).hexdigest()[:16]
+    assert s["session_hash"] == expected_hash
+    # Real (non-zero) assistant tokens were recorded — the flag must be
+    # suppressed entirely, not merely False.
+    assert "token_data_missing" not in s
+
+
+def test_cursor_token_data_missing_set_when_all_zero(cursor_home, monkeypatch):
+    """A Cursor session whose assistant bubbles ALL carry 0/0 tokenCount is
+    flagged ``token_data_missing``; a sibling session with real token usage
+    must NOT emit the key at all (suppressed, byte-parity pattern)."""
+    from tests.fixtures.cursor.builder import (
+        MS,
+        T0,
+        assistant_bubble,
+        user_bubble,
+    )
+
+    zero_id = "cur-token-zero"
+    nonzero_id = "cur-token-nonzero"
+    db = _write_cursor_store(cursor_home, [
+        {
+            "composerId": zero_id,
+            "createdAt": T0,
+            "lastUpdatedAt": T0 + 5 * MS,
+            "workspacePath": "/p/zero",
+            "bubbles": [
+                user_bubble("b1", "hi", T0),
+                assistant_bubble("b2", "yo", T0 + MS),
+            ],
+        },
+        {
+            "composerId": nonzero_id,
+            "createdAt": T0,
+            "lastUpdatedAt": T0 + 5 * MS,
+            "workspacePath": "/p/nonzero",
+            "bubbles": [
+                user_bubble("b1", "hi", T0),
+                assistant_bubble(
+                    "b2", "yo", T0 + MS, input_tokens=5, output_tokens=5
+                ),
+            ],
+        },
+    ])
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(db))
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=T0 + 10 * MS,
+        consent_decision=_cursor_consent(),
+    )
+    payload = out.to_dict()
+
+    by_hash = {s["session_hash"]: s for s in payload["sessions"]}
+    zero_hash = hashlib.sha256(f"cursor:{zero_id}".encode()).hexdigest()[:16]
+    nonzero_hash = hashlib.sha256(
+        f"cursor:{nonzero_id}".encode()
+    ).hexdigest()[:16]
+    assert len(payload["sessions"]) == 2
+    assert by_hash[zero_hash]["token_data_missing"] is True
+    assert "token_data_missing" not in by_hash[nonzero_hash]
+
+
+def test_claude_still_safe_with_cursor_consent(
+    cursor_home, isolated_claude_home, monkeypatch
+):
+    """After the Cursor work, a Claude secret must STILL never leak — even
+    when the run also scans Cursor (both-provider consent)."""
+    from tests.fixtures.cursor.builder import MS, assistant_bubble, user_bubble
+
+    sec_claude = "CLAUDE_AFTER_CURSOR_SECRET_JJJ"
+    sec_session = "claude-after-cursor-session-KKK"
+
+    proj_dir = isolated_claude_home / "projects" / "-home-u-proj"
+    _write_jsonl(
+        proj_dir / f"{sec_session}.jsonl",
+        [
+            {
+                "type": "user",
+                "timestamp": _ts(0),
+                "message": {"role": "user", "content": f"remember {sec_claude}"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": _ts(5),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "ls"}}
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 5},
+                },
+            },
+        ],
+    )
+
+    # Minimal valid Cursor session alongside it, using recent (in-window)
+    # timestamps since `now` below is real wall-clock time.
+    now = _now_ms()
+    db = _write_cursor_store(cursor_home, [{
+        "composerId": "cur-min-after-claude",
+        "createdAt": now - 10 * MS,
+        "lastUpdatedAt": now - 5 * MS,
+        "workspacePath": "/p",
+        "bubbles": [
+            user_bubble("b1", "hi", now - 10 * MS),
+            assistant_bubble("b2", "ok", now - 5 * MS),
+        ],
+    }])
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(db))
+
+    out = extract(
+        device_id="dev-1",
+        client_version="0.1.0",
+        now_ms=now,
+        consent_decision=ConsentDecision(
+            launch_provider="claude",
+            providers=["claude", "cursor"],
+            source="override",
+        ),
+    )
+    payload = json.loads(out.to_json())
+
+    providers = {s.provider for s in out.sessions}
+    assert providers == {"claude", "cursor"}, providers
+    _assert_secret_absent(payload, sec_claude, where="claude prompt text")
+    _assert_secret_absent(payload, sec_session, where="claude session id")

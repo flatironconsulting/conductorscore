@@ -393,6 +393,30 @@ def extract(
             slot["input_hit"] += in_hit
             slot["output"] += out
 
+        # Slice 3 — Cursor-only: flag sessions whose assistant turns recorded
+        # zero token usage everywhere (tool-call ASSISTANT_TOOL events are
+        # structurally always zero for Cursor; only ASSISTANT_TEXT bubbles
+        # carry its tokenCount, and that's 0/0 at a very high rate per
+        # recon). Gated on provider == "cursor" so Claude/Codex sessions
+        # NEVER set this — their PerSession.token_data_missing stays the
+        # dataclass default (False), which output_schema.py suppresses on
+        # the wire, so those payloads are byte-identical to before this
+        # field existed.
+        assistant_events = [
+            e for e in events
+            if e.kind in (EventKind.ASSISTANT_TEXT, EventKind.ASSISTANT_TOOL)
+        ]
+        token_data_missing = (
+            provider == "cursor"
+            and bool(assistant_events)
+            and all(
+                e.input_tokens == 0
+                and e.output_tokens == 0
+                and e.cache_input_tokens == 0
+                for e in assistant_events
+            )
+        )
+
         # Namespace the session hash by provider to avoid cross-provider
         # collisions. Claude stays UNPREFIXED so the v0.11 Claude payload is
         # byte-identical; only non-default providers (codex) get the
@@ -412,6 +436,7 @@ def extract(
                 started_at_ms=s.first_ts_ms,
                 ended_at_ms=s.last_ts_ms,
                 provider=provider,
+                token_data_missing=token_data_missing,
                 distinct_skills=distinct_skills,
                 distinct_mcp_tools=distinct_mcp_tools,
                 distinct_builtin_tools=distinct_builtin_tools,

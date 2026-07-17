@@ -221,6 +221,19 @@ class PerSession:
     # and is serialized only when it isn't the default (see to_dict), so a
     # Claude-only payload stays byte-equivalent to v0.11.
     provider: Provider = _DEFAULT_PROVIDER
+    # Slice 3 — Cursor-only: True when every assistant turn in this session
+    # recorded zero token usage. Cursor tool-call (ASSISTANT_TOOL) events
+    # are structurally always zero (only ASSISTANT_TEXT bubbles carry
+    # Cursor's per-bubble tokenCount, and recon found that field is 0/0 at a
+    # very high rate); this flags those sessions so the server can exclude
+    # them from cost/efficiency denominators (Task 4.2) instead of treating
+    # the zero as a real zero-cost turn. NEVER set for non-cursor providers
+    # (scanner.py gates it on provider == "cursor"), so Claude/Codex
+    # payloads are unaffected. Suppressed on the wire when False, same
+    # byte-parity pattern as ``provider`` (see to_dict) — deliberately NOT
+    # folded into ``compute_session_chain``, which only covers the fields
+    # the server integrity-checks.
+    token_data_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -310,6 +323,11 @@ class ExtractorOutput:
                         s.plugin_invocations_by_name
                     ),
             }
+            # Cursor-only flag: emit ONLY when True (byte parity — a
+            # Claude/Codex payload, and a Cursor session with real token
+            # data, never carries this key).
+            if s.token_data_missing:
+                d["token_data_missing"] = True
             # Emit ``provider`` only for non-default (codex) sessions so the
             # Claude-only payload is byte-identical to v0.11.
             if s.provider != _DEFAULT_PROVIDER:
