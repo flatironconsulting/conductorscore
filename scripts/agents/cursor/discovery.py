@@ -10,9 +10,15 @@ session is its own ``store.db`` file under
 ``<chats-dir>/<agentId-hash-dir>/<chatId>/store.db``. ``cli_store_paths()``
 honors ``CONDUCTORSCORE_CURSOR_CLI_DIR`` (an explicit chats-style directory
 to glob two levels deep -- the test/E2E seam, same override style as
-``CONDUCTORSCORE_CURSOR_IDE_STORE``); without it, probes
-``cursor_home()/"chats"`` and, per recon's path-drift note (§8), also
-``~/.config/cursor/chats``. Unlike the IDE store (one composer index per
+``CONDUCTORSCORE_CURSOR_IDE_STORE``) first; else, if
+``CONDUCTORSCORE_CURSOR_HOME`` is set (an explicit ``.cursor`` home --
+same seam ``cursor_home()`` honors), probes ONLY ``<that home>/chats`` --
+an explicit home means "look only here", so it does NOT also fall back to
+the real ``~/.config/cursor/chats`` drift location (this is what keeps CLI
+discovery hermetic under test isolation without a second env var); else
+(true default, no override at all) probes ``cursor_home()/"chats"`` and,
+per recon's path-drift note (§8), also ``~/.config/cursor/chats``. Unlike
+the IDE store (one composer index per
 DB), a CLI session's ``session_id`` is that session's OWN ``store.db``
 ``meta.agentId`` (falling back to the ``<chatId>`` directory-name uuid if
 ``meta`` is unreadable) -- there is no shared index table to enumerate from,
@@ -116,17 +122,33 @@ def cli_store_paths() -> list[Path]:
     ``<dir>/*/*/store.db`` and nothing else (never falls back to probing),
     mirroring ``ide_store_paths``'s override semantics.
 
-    Without the override, probes ``cursor_home()/"chats"`` (the primary
-    location) and, per recon's path-drift note (CURSOR_FORMAT.md §8),
-    ``~/.config/cursor/chats`` as a secondary/alternate install location --
-    each globbed the same two levels deep.
+    Without the override, precedence is:
+      1. ``CONDUCTORSCORE_CURSOR_CLI_DIR`` set -> glob ONLY that dir (above).
+      2. ``CONDUCTORSCORE_CURSOR_HOME`` set (the test/explicit-home seam,
+         same env var ``cursor_home()`` honors) -> glob ONLY
+         ``<that home>/chats``. An explicit home means "look only here" --
+         it must NOT also fall back to the real ``~/.config/cursor/chats``
+         drift location, since that would leak a real, unrelated CLI
+         session past test isolation (any test/caller that sets
+         ``CONDUCTORSCORE_CURSOR_HOME`` to isolate IDE discovery gets CLI
+         discovery isolated for free, without needing to also set
+         ``CONDUCTORSCORE_CURSOR_CLI_DIR``).
+      3. Neither set (true default, no env override at all) -> probe BOTH
+         ``cursor_home()/"chats"`` and, per recon's path-drift note
+         (CURSOR_FORMAT.md §8), ``~/.config/cursor/chats`` as a
+         secondary/alternate install location.
+    Each candidate dir is globbed the same two levels deep.
     """
     override = os.environ.get("CONDUCTORSCORE_CURSOR_CLI_DIR")
     if override:
         base = Path(override)
         return sorted(base.glob("*/*/store.db")) if base.is_dir() else []
 
-    dirs = [cursor_home() / "chats", Path.home() / ".config" / "cursor" / "chats"]
+    if os.environ.get("CONDUCTORSCORE_CURSOR_HOME"):
+        dirs = [cursor_home() / "chats"]
+    else:
+        dirs = [cursor_home() / "chats", Path.home() / ".config" / "cursor" / "chats"]
+
     out: list[Path] = []
     seen: set[Path] = set()
     for d in dirs:

@@ -73,6 +73,35 @@ _MODEL_SENTINEL = "default"
 _MAX_BLOBS_VISITED = 5000
 _MAX_DEPTH = 2000
 
+# Per-node fan-out bounds (paired with the two caps above). Those two caps
+# only bound work *between* distinct popped nodes; nothing previously
+# bounded how much work a SINGLE node's child-pointer scan could do before
+# either cap was re-checked. A store.db blob is fully attacker-controlled
+# (that's this reader's whole threat model), so a hostile blob can pack
+# millions of repeated valid 32-byte pointers into one node -- confirmed by
+# direct repro: one ~102MB blob with 3,000,000 duplicate valid pointers to
+# one real leaf caused ~14.6s wall / ~556MB peak from a SINGLE node,
+# nowhere near _MAX_BLOBS_VISITED. Three layered bounds close this:
+#   1. _MAX_BLOB_SCAN_BYTES -- a blob larger than this is never scanned for
+#      child pointers at all (real linkage blobs are tiny per §4; a
+#      multi-MB blob is adversarial by construction).
+#   2. Candidate child pointers are deduped via a set WITHIN a node, before
+#      any per-pointer membership/recurse work, so millions of duplicates
+#      collapse to the handful of distinct ids they actually represent.
+#   3. _MAX_CHILDREN_PER_NODE bounds how many distinct children a single
+#      node may contribute, and the global _MAX_BLOBS_VISITED budget is
+#      re-checked INSIDE the per-node collection loop (not only between
+#      pops), so a single node can't out-run the total-node cap either.
+_MAX_BLOB_SCAN_BYTES = 8 * 1024 * 1024  # 8 MiB; real blobs are far smaller.
+_MAX_CHILDREN_PER_NODE = 1024
+
+# Aggregate cap on bytes loaded by `_load_blobs` (independent of the walk
+# bound above -- a hostile store.db could otherwise blow memory at LOAD
+# time via many large blobs, before the walk ever starts). Real sessions
+# total well under 1MB across all blobs (§4: 11-53 small blobs); this is
+# generous headroom, not a tuned real-world size.
+_MAX_TOTAL_BLOB_BYTES = 64 * 1024 * 1024  # 64 MiB.
+
 _USER_QUERY_RE = re.compile(r"^\s*<user_query>(.*)</user_query>\s*$", re.DOTALL)
 
 # Synthetic per-message timestamp increment (ms) -- see module docstring.
@@ -160,17 +189,24 @@ def _read_meta(con: sqlite3.Connection) -> dict | None:
 
 
 def _load_blobs(con: sqlite3.Connection) -> dict[str, bytes]:
-    """Load the ENTIRE ``blobs`` table once, as ``{id: data}``. Real CLI
-    sessions have 11-53 blobs (§4) -- small enough to hold in memory, and
-    loading once (vs. per-lookup queries during the tree walk) keeps this
-    module's connection usage matching the "single open" contract shared
-    with the IDE reader. Never raises -- a missing/corrupt table yields
-    an empty dict, which soft-fails the whole read upstream."""
+    """Load the ``blobs`` table once, as ``{id: data}``. Real CLI sessions
+    have 11-53 blobs (§4) -- small enough to hold in memory, and loading
+    once (vs. per-lookup queries during the tree walk) keeps this module's
+    connection usage matching the "single open" contract shared with the
+    IDE reader. Never raises -- a missing/corrupt table yields an empty
+    dict, which soft-fails the whole read upstream.
+
+    Bounded by ``_MAX_TOTAL_BLOB_BYTES``: a hostile store.db could pack
+    many large blobs and blow memory at LOAD time, before the tree walk
+    (and its own bounds) ever runs -- once the running total would exceed
+    the cap, loading stops early with whatever was already loaded (soft
+    degradation, not a raise)."""
     out: dict[str, bytes] = {}
     try:
         rows = con.execute("SELECT id, data FROM blobs").fetchall()
     except sqlite3.Error:
         return out
+    total_bytes = 0
     for bid, data in rows:
         if not isinstance(bid, str) or data is None:
             continue
@@ -178,6 +214,9 @@ def _load_blobs(con: sqlite3.Connection) -> dict[str, bytes]:
             data = data.encode("utf-8")
         if not isinstance(data, (bytes, bytearray)):
             continue
+        total_bytes += len(data)
+        if total_bytes > _MAX_TOTAL_BLOB_BYTES:
+            break
         out[bid] = bytes(data)
     return out
 
@@ -288,6 +327,14 @@ def _walk_tree(root_id: str, blobs: dict[str, bytes]) -> list[dict]:
     ``visited`` set, so a corrupt/cyclic/pathologically-wide chain can
     never hang the scanner or blow the stack -- it just stops early and
     returns whatever leaves were found before the bound was hit.
+
+    Also bounded PER NODE (see ``_MAX_BLOB_SCAN_BYTES``/
+    ``_MAX_CHILDREN_PER_NODE`` above): a single node's child-pointer scan
+    is capped in blob size, deduped against itself, capped in distinct
+    children collected, and re-checked against the global visited budget
+    DURING collection -- not just between pops -- so one hostile node
+    packed with millions of duplicate valid pointers can't do unbounded
+    work before the node-count/depth caps are ever consulted again.
     """
     if root_id not in blobs:
         return []
@@ -308,13 +355,30 @@ def _walk_tree(root_id: str, blobs: dict[str, bytes]) -> list[dict]:
         if msg is not None:
             leaves.append(msg)
             continue
+        if len(data) > _MAX_BLOB_SCAN_BYTES:
+            # Adversarially oversized blob -- never scanned for child
+            # pointers at all; real linkage blobs are tiny (§4). See the
+            # _MAX_BLOB_SCAN_BYTES docstring above for the confirmed DoS
+            # repro this guards against.
+            continue
         children: list[str] = []
+        seen: set[str] = set()  # dedupe candidate pointers WITHIN this node
         for _field_no, payload in _iter_top_level_length_delimited_fields(data):
             if len(payload) != 32:
                 continue
             hex_id = payload.hex()
+            if hex_id in seen:
+                continue
+            seen.add(hex_id)
             if hex_id in blobs and hex_id not in visited:
                 children.append(hex_id)
+                if len(children) >= _MAX_CHILDREN_PER_NODE:
+                    break
+            # Global budget re-checked INSIDE the per-node collection loop
+            # (not only between pops) -- a single node's fan-out can't
+            # out-run the total-node cap either.
+            if len(visited) + len(children) >= _MAX_BLOBS_VISITED:
+                break
         # Push in reverse so pop() (LIFO) visits children in the order the
         # byte stream declared them -- a pre-order DFS, not required for
         # correctness (order among distinct leaves under different

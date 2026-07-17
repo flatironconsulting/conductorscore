@@ -331,6 +331,103 @@ def test_preflight_counts_cli_sessions_in_window(tmp_path, monkeypatch):
     assert pf["home_exists"] is True
 
 
+# ---------------------------------------------------------------------------
+# I1 regression: CURSOR_HOME isolation must also isolate CLI discovery,
+# without callers needing to separately set CONDUCTORSCORE_CURSOR_CLI_DIR.
+#
+# Review repro (task-2.1-review.md, "I1"): `cli_store_paths()` probed
+# `~/.config/cursor/chats` UNGATED whenever `CONDUCTORSCORE_CURSOR_CLI_DIR`
+# was unset -- even with `CONDUCTORSCORE_CURSOR_HOME`/
+# `CONDUCTORSCORE_CURSOR_IDE_STORE` both pointed at an isolated tmp dir
+# (exactly the pattern `_store()` above uses), a REAL `~/.config/cursor/
+# chats` session on the host machine still leaked into
+# `find_sessions()`/`preflight()`. Every pre-existing IDE-only test in this
+# file uses `_store()`, which sets `CONDUCTORSCORE_CURSOR_HOME` but never
+# `CONDUCTORSCORE_CURSOR_CLI_DIR` -- so all of them were silently exposed.
+#
+# On THIS dev machine ~/.config/cursor/chats doesn't happen to exist, so a
+# naive test wouldn't distinguish pre-fix from post-fix (the review noted
+# exactly this: the leak is real but host-dependent). To make the
+# regression host-independent, these tests reproduce the review's own
+# method: point $HOME itself at a fake "real machine home" that DOES have a
+# `~/.config/cursor/chats` session, while `CONDUCTORSCORE_CURSOR_HOME`
+# isolates the ``.cursor`` side to an unrelated empty tmp dir -- mirroring
+# how a real dev machine (real $HOME with real Cursor data) differs from a
+# test's isolated `CONDUCTORSCORE_CURSOR_HOME` sandbox.
+# ---------------------------------------------------------------------------
+
+
+def _fake_real_home_with_leaked_cli_session(tmp_path, monkeypatch):
+    """Point $HOME at a fake dir with a REAL-shaped `.config/cursor/chats`
+    session in it, independent of any CONDUCTORSCORE_* override -- this is
+    what a real developer machine with Cursor CLI installed at the drift
+    location looks like. Returns the leaked db path."""
+    fake_home = tmp_path / "fake-real-home"
+    db = write_cli_store(fake_home / ".config" / "cursor" / "chats", {
+        "agentId": "leaked-real-session", "createdAt": T0,
+        "messages": [user_message("hi")],
+    })
+    monkeypatch.setenv("HOME", str(fake_home))
+    return db
+
+
+def test_cli_store_paths_does_not_fall_back_to_config_dir_when_cursor_home_set(
+    tmp_path, monkeypatch
+):
+    # A real ~/.config/cursor/chats session exists (via the faked $HOME),
+    # but CONDUCTORSCORE_CURSOR_HOME isolates to an unrelated, empty tmp
+    # dir and CONDUCTORSCORE_CURSOR_CLI_DIR is unset -- cli_store_paths()
+    # must return empty, NOT fall back to probing the real drift location.
+    leaked_db = _fake_real_home_with_leaked_cli_session(tmp_path, monkeypatch)
+    isolated_home = tmp_path / ".cursor"
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(isolated_home))
+    monkeypatch.delenv("CONDUCTORSCORE_CURSOR_CLI_DIR", raising=False)
+
+    paths = discovery.cli_store_paths()
+    assert leaked_db not in paths
+    assert paths == []
+
+
+def test_cli_store_paths_only_probes_isolated_home_chats_when_cursor_home_set(
+    tmp_path, monkeypatch
+):
+    # With CONDUCTORSCORE_CURSOR_HOME set, a session under
+    # <isolated_home>/chats IS discovered (the override doesn't disable CLI
+    # discovery entirely, it scopes it) -- proving this isn't just "always
+    # returns []" but genuinely "only this one location, not the
+    # ~/.config drift path" -- even while a real leaked session exists at
+    # the drift location via the faked $HOME.
+    _fake_real_home_with_leaked_cli_session(tmp_path, monkeypatch)
+    isolated_home = tmp_path / ".cursor"
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(isolated_home))
+    monkeypatch.delenv("CONDUCTORSCORE_CURSOR_CLI_DIR", raising=False)
+    db = write_cli_store(
+        isolated_home / "chats",
+        {"agentId": "cli-agent-iso", "createdAt": T0, "messages": [user_message("hi")]},
+    )
+    assert discovery.cli_store_paths() == [db]
+
+
+def test_find_sessions_hermetic_under_cursor_home_isolation_alone(tmp_path, monkeypatch):
+    # The full end-to-end proof: with a real ~/.config/cursor/chats session
+    # present (faked $HOME) and ONLY CONDUCTORSCORE_CURSOR_HOME (plus the
+    # pre-existing CONDUCTORSCORE_CURSOR_IDE_STORE seam) isolated -- exactly
+    # the _store() pattern every pre-existing IDE-only test in this file
+    # uses -- find_sessions()/preflight() must be fully hermetic even
+    # though CONDUCTORSCORE_CURSOR_CLI_DIR was never set.
+    _fake_real_home_with_leaked_cli_session(tmp_path, monkeypatch)
+    _store(tmp_path, monkeypatch, [{
+        "composerId": "c1", "createdAt": T0, "lastUpdatedAt": T0 + MS,
+        "bubbles": [user_bubble("b1", "hi", T0)]}])
+    monkeypatch.delenv("CONDUCTORSCORE_CURSOR_CLI_DIR", raising=False)
+
+    sessions = discovery.find_sessions()
+    assert {s.session_id for s in sessions} == {"c1"}  # no leaked CLI session
+
+    pf = discovery.preflight(now_ms=T0 + 2 * MS, window_ms=30 * 24 * 60 * MS)
+    assert pf["sessions_in_window"] == 1
+
+
 def test_preflight_counts_both_ide_and_cli_sessions(tmp_path, monkeypatch):
     ide_db = write_ide_store(tmp_path / "state.vscdb", [{
         "composerId": "ide-c2", "createdAt": T0, "lastUpdatedAt": T0 + MS,
