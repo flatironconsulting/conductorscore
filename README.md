@@ -2,7 +2,7 @@
 
 The open-source scanner behind [conductorscore.com](https://conductorscore.com).
 
-This is the code that runs on your machine, reads your local Claude Code transcripts, and uploads a **numbers-only** payload to the server for scoring. It's public, auditable, and dependency-free on purpose — the whole point of ConductorScore is that you can verify what crosses the wire before you trust the score.
+This is the code that runs on your machine, reads your local Claude Code, Codex, and Cursor transcripts, and uploads a **numbers-only** payload to the server for scoring. It's public, auditable, and dependency-free on purpose — the whole point of ConductorScore is that you can verify what crosses the wire before you trust the score.
 
 ```
 ~/.claude/projects/**/*.jsonl   (your transcripts)
@@ -16,12 +16,12 @@ conductorscore.com              (scoring)
 
 ## What gets uploaded
 
-Per Claude Code session in the last 30 days, the client emits ~38 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
+Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~38 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
 
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
-- a **boolean**, or
-- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, Anthropic model IDs like `claude-opus-4-7`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
+- a **boolean** — including a small number of provider-specific flags, e.g. `token_data_missing` (Cursor-only in practice: set when the device couldn't read a session's token usage, so the server excludes it from cost/efficiency denominators instead of treating it as zero-cost), or
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, model IDs like `claude-opus-4-7` / `gpt-5-codex` / `composer-2.5`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), a closed `provider` enum (`claude` / `codex` / `cursor`), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
 
 ## What is never uploaded
 
@@ -102,7 +102,7 @@ Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.t
 Install the skill with the GitHub CLI or skills.sh:
 
 ```
-# GitHub CLI (gh) — works for every agent, including Codex
+# GitHub CLI (gh) — works for every agent, including Codex and Cursor
 gh skill install flatironconsulting/conductorscore conductorscore
 
 # skills.sh — Claude Code and other agents that read ~/.agents/skills/

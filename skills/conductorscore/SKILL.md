@@ -14,8 +14,9 @@ on the next line, the skill version the script reports (its first output line is
 orchestrator from **this skill's own directory** — the folder that contains this
 SKILL.md, with `run.py` in its `scripts/` subdirectory. Don't assume a fixed
 location: depending on the agent and installer the skill may live under
-`~/.claude/skills/conductorscore/`, `~/.codex/skills/conductorscore/`, or
-`~/.agents/skills/conductorscore/`. Use the `scripts/run.py` next to this file:
+`~/.claude/skills/conductorscore/`, `~/.codex/skills/conductorscore/`,
+`~/.cursor/skills/conductorscore/`, or `~/.agents/skills/conductorscore/`.
+Use the `scripts/run.py` next to this file:
 
 ```
 python3 <this-skill-dir>/scripts/run.py
@@ -42,7 +43,8 @@ prose), then re-run `run.py` with the matching flag:
   authorize in their browser, and when they confirm ("I've authorized") re-run
   `run.py` with NO new flag — it resumes the login and continues. On Cancel, stop.
 - `providers` → re-run with `--providers=all` (All), `--providers=claude`
-  (Claude Code), or `--providers=codex` (Codex). On Cancel, stop.
+  (Claude Code), `--providers=codex` (Codex), or `--providers=cursor`
+  (Cursor). On Cancel, stop.
 - `daily` → present EXACTLY two choices, **Yes** and **No** (no Cancel, no other
   options). Re-run with ONLY `--daily=yes` or `--daily=no` — do NOT add
   `--providers`; this enables/declines the once-per-day hook and does NOT re-scan.

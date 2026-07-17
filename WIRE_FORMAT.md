@@ -841,23 +841,26 @@ tokens already emitted in `distinct_skills` / counted in
 - MCP and plugin keys are unvalidated raw strings — the server MUST
   NOT fail validation on unfamiliar names.
 
-## Provider tagging (Codex support) — additive, no schema bump
+## Provider tagging (Codex, Cursor support) — additive, no schema bump
 
 ConductorScore scans more than one coding agent. Each session is produced
 by exactly one **provider**; the device reports which providers it scanned.
 This is **additive on top of v0.11** — there is no schema-version bump.
+Codex support landed first; Cursor support (2026-07-17) extends the same
+closed enum and adds one new Cursor-only field, `token_data_missing` (see
+below) — also additive, also no schema-version bump.
 
 ### `sessions[].provider`
 
 | Field      | Type   | Default    | Notes                                                                                   |
 |------------|--------|------------|-----------------------------------------------------------------------------------------|
-| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
+| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"` \| `"cursor"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"` / `"cursor"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
 
 ### Top-level `providers_seen`
 
 | Field            | Type             | Default      | Notes                                                                                  |
 |------------------|------------------|--------------|----------------------------------------------------------------------------------------|
-| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run (`["claude"]`, `["codex"]`, or `["claude","codex"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
+| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run — a subset of `["claude","codex","cursor"]` in sorted order (e.g. `["claude"]`, `["codex"]`, `["cursor"]`, `["claude","codex"]`, `["claude","codex","cursor"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
 
 ### Byte-equivalence guarantee
 
@@ -870,12 +873,13 @@ tests are unaffected.
 ### Privacy posture
 
 `provider` and `providers_seen` are closed-set categorical labels
-(`"claude"` / `"codex"`) — no transcript content. Codex sessions follow the
-same privacy invariant as Claude: the project `cwd` is hashed into
-`project_hash` (namespaced `codex:<cwd>` to avoid cross-provider hash
-collisions), user prose is reduced to a hash + token count, and shell
-commands / `apply_patch` file paths are never serialized. The Codex model
-id (e.g. `gpt-5-codex`) is a public categorical and rides plaintext in
+(`"claude"` / `"codex"` / `"cursor"`) — no transcript content. Codex and
+Cursor sessions follow the same privacy invariant as Claude: the project
+`cwd` is hashed into `project_hash` (namespaced `codex:<cwd>` / `cursor:<cwd>`
+to avoid cross-provider hash collisions), user prose is reduced to a hash +
+token count, and shell commands / `apply_patch` file paths are never
+serialized. The Codex model id (e.g. `gpt-5-codex`) and the Cursor model id
+(e.g. `composer-2.5`) are public categoricals and ride plaintext in
 `assistant_msgs_by_model` / `tokens_by_model`, exactly like Anthropic model
 ids.
 
@@ -887,16 +891,53 @@ ids.
 > and a read does not guarantee use (over-count). Do not compare Codex skill counts
 > 1:1 with Claude's directly-observed counts.
 
+### `sessions[].token_data_missing` (Cursor)
+
+| Field                 | Type    | Default | Notes                                                                                 |
+|-----------------------|---------|---------|----------------------------------------------------------------------------------------|
+| `token_data_missing`  | boolean | `false` | The device could not read per-session token usage for this session. **Omitted** when it would be the default (`false`); present (`true`) only when token data is known to be missing. The server MUST treat an absent `token_data_missing` as `false`. |
+
+`token_data_missing` is currently **Cursor-only in practice** — Cursor's
+per-bubble `tokenCount` is frequently absent or `0` even on real, substantive
+turns (see `CURSOR_FORMAT.md` § tokenCount population), so the device cannot
+reliably attribute token usage to the session — but the field itself is
+**provider-neutral**: it is a plain boolean on `sessions[]`, not gated to any
+one provider, and a future provider with the same token-visibility gap can
+set it too. When `token_data_missing` is `true`, the server MUST treat that
+session as having **unknown** token usage and **exclude it** from
+cost/efficiency denominators, rather than counting it as zero-cost (a
+zero-cost read would understate cost-per-session and other efficiency
+ratios for every other session).
+
+A session with real token data (Claude, Codex, or a Cursor session where
+`tokenCount` was actually populated) never carries this key — omitting it
+keeps the non-Cursor, non-gap-case payload byte-identical to the pre-existing
+shape.
+
 ### Compatibility
 
-- No `schema_version` bump: provider tagging rides on the v0.11 envelope.
-  The server's ingest validator MUST accept `provider` / `providers_seen`
-  (absent on Claude-only uploads, present on Codex/mixed uploads).
+- No `schema_version` bump: provider tagging (Codex, Cursor) and
+  `token_data_missing` all ride on the v0.11 envelope. The server's ingest
+  validator MUST accept `provider` / `providers_seen` (absent on Claude-only
+  uploads, present on Codex/Cursor/mixed uploads) and MUST accept the new
+  optional `token_data_missing` boolean on any session.
 - `provider` defaults to `"claude"`; `providers_seen` defaults to
-  `["claude"]`. The server MUST treat absence identically to those
-  defaults.
-- `provider` values are a CLOSED enum (`"claude"`, `"codex"`). Unknown
-  provider strings indicate a drift the server hasn't acknowledged.
+  `["claude"]`; `token_data_missing` defaults to `false`. The server MUST
+  treat absence identically to those defaults.
+- `provider` values are a CLOSED enum (`"claude"`, `"codex"`, `"cursor"`).
+  Unknown provider strings indicate a drift the server hasn't acknowledged.
+
+### Changelog
+
+- **2026-07-17** — Cursor added as a third provider: `provider` /
+  `providers_seen` closed enum extended from (`"claude"` \| `"codex"`) to
+  (`"claude"` \| `"codex"` \| `"cursor"`); `project_hash` namespacing note
+  extended with `cursor:<cwd>`; new optional field
+  `sessions[].token_data_missing` (boolean, default `false`, omitted when
+  default) added for Cursor's token-visibility gap. Additive, mirrors the
+  Codex provider addition above — **no `schema_version` bump**.
+- Codex added as a second provider (see section intro above) — additive,
+  no `schema_version` bump.
 
 ## Schema v0.12 — Codex AGENTS.md line-count split
 

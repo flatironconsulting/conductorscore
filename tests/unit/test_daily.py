@@ -1,9 +1,10 @@
 """Unit tests for scripts.daily.enable_daily — Task 3.2 adds a cursor branch.
 
-Cursor has a hooks.json surface (CURSOR_FORMAT.md §8) but a verified
-session-start hook event was NOT confirmed during recon, so — mirroring the
-existing codex branch — enable_daily("cursor") returns an automation
-instruction string rather than writing a settings.json hook.
+Cursor is rumored to have a hooks.json automation surface, but
+CURSOR_FORMAT.md's config-surfaces recon (§8) never observed one at all (no
+hooks.json, no session-start-equivalent event was found on disk) — so,
+mirroring the existing codex branch, enable_daily("cursor") returns an
+automation instruction string rather than writing a settings.json hook.
 """
 from __future__ import annotations
 
