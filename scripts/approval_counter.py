@@ -12,7 +12,7 @@ data-grounded signals are counted, grouped by signature:
    never logged, so a long gap between dispatching a tool and its result
    is the only data-grounded proxy for "execution waited for the human
    to click approve." This covers Claude (``Bash`` + Edit/Write/MultiEdit)
-   and Codex (``shell`` / ``exec_command`` + ``apply_patch``) symmetrically.
+   and Codex shell tools + ``apply_patch`` symmetrically.
 
    CODEX CAVEAT: Codex rollouts examined so far carry NO explicit
    sandbox / escalation / approval record, so the wait-gap proxy is the
@@ -56,10 +56,10 @@ import re
 _EDIT_TOOL_NAMES: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
 
 # Shell-family tool names whose ``raw_input["command"]`` yields a Bash-style
-# signature: ``Bash`` (Claude) + ``shell`` / ``exec_command`` (Codex; the
-# reader normalized both arg shapes to one command string).
+# signature: ``Bash`` (Claude) + Codex shell tools. The reader normalized all
+# Codex shell arg shapes to one command string.
 _SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command"}
+    {"Bash", "shell", "exec_command", "shell_command"}
 )
 
 # Codex applies edits through ``apply_patch``. It carries no single

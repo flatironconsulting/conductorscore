@@ -27,9 +27,11 @@ EDIT_TOOL_NAMES: frozenset[str] = frozenset({"apply_patch"})
 
 # Codex shell-family tools (the Bash analog). ``shell`` carries the OLD
 # ``{"command":[...]}`` arg shape, ``exec_command`` the NEW ``{"cmd":...}``
-# shape; both reduce to a single normalized command string for the shared
-# revert / approval detectors.
-SHELL_TOOL_NAMES: frozenset[str] = frozenset({"shell", "exec_command"})
+# shape, and ``shell_command`` is emitted by Codex Desktop. All reduce to a
+# single normalized command string for the shared shell detectors.
+SHELL_TOOL_NAMES: frozenset[str] = frozenset(
+    {"shell", "exec_command", "shell_command"}
+)
 
 # ---------------------------------------------------------------------------
 # apply_patch structural header parsing.
@@ -172,13 +174,10 @@ def skill_names_from_shell_command(cmd: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-# The shell tools are the Codex Bash analog (``shell`` = old ``{"command"}``
-# arg shape, ``exec_command`` = new ``{"cmd"}`` shape); apply_patch carries
-# file edits. These are the calls whose (in-memory only) raw input the
-# Feature-7 detectors would consume, were they wired for Codex (a later slice).
-RAW_INPUT_TOOLS: frozenset[str] = (
-    frozenset({"shell", "exec_command"}) | EDIT_TOOL_NAMES
-)
+# The shell tools are the Codex Bash analog; apply_patch carries file edits.
+# These are the calls whose in-memory-only raw input is consumed by shared
+# shell/edit detectors.
+RAW_INPUT_TOOLS: frozenset[str] = SHELL_TOOL_NAMES | EDIT_TOOL_NAMES
 
 # Plan affordance: Codex emits ``update_plan`` for structured plan updates,
 # the rough analog of Claude's ``TodoWrite`` / ``EnterPlanMode``.
