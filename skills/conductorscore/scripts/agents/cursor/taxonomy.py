@@ -31,6 +31,7 @@ Cursor events reader (task 1.5) and tool counting (task 1.6).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from os.path import basename
 
@@ -83,52 +84,49 @@ def canonical_tool_name(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shell command normalization.
+# Shell command extraction (arg-shape only -- NO reduction here).
 # ---------------------------------------------------------------------------
 #
 # Cursor's Shell tool args carry the command under the key ``"command"`` (a
-# plain string, unlike Codex's dual old/new arg shapes). We apply the same
-# privacy rules as Claude's Bash reduction (see ``scripts/approval_counter.py
-# ::signature_for_bash``): a leading ``NAME=value`` env assignment is
-# stripped so a secret value can never ride along in the reduced string, and
-# a first token invoked BY PATH (contains a path separator, or is
-# home-relative) collapses to the literal sentinel ``"path"`` so directory
-# names / usernames never cross into the reduced command. When a genuine
-# subcommand follows (a second token that is not itself a flag), the two are
-# joined so downstream detectors can distinguish e.g. ``git push`` from
-# ``git status``; a flag following a by-path first token is NOT a
-# subcommand and is dropped from the reduction.
-
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_PATH_LIKE_RE = re.compile(r"[/]|^~")
-_PATH_SENTINEL = "path"
+# plain string, unlike Codex's dual old/new arg shapes). This function's job
+# is ONLY to pull that raw string out of Cursor's arg shape -- exactly the
+# same division of labor as Codex's ``normalize_shell_command`` (see
+# ``scripts/agents/codex/taxonomy.py``). Env-var stripping, by-path->"path"
+# collapse, and first-token/subcommand reduction are NOT done here; that is
+# the job of the single shared reducer, ``scripts/approval_counter.py
+# ::signature_for_bash``, which operates on the raw command string pulled
+# from ``event.raw_input["command"]`` regardless of which agent produced it.
+# Duplicating that reduction here would be a second, divergent place for
+# privacy-relevant logic to drift out of sync -- see the review that flagged
+# the prior inline-reduction version of this function as a cross-provider
+# consistency defect.
 
 
-def normalize_shell_command(args: dict) -> str | None:
-    """Reduce a Cursor Shell tool's ``args`` to one privacy-safe command
-    string, or ``None`` if no command text is recoverable.
+def normalize_shell_command(args: object) -> str | None:
+    """Extract the raw command string from a Cursor Shell tool's ``args``,
+    or ``None`` if no command text is recoverable.
 
-    ``args["command"]`` is a plain string. Leading ``NAME=value`` env
-    assignment tokens are stripped; a by-path first token collapses to the
-    ``"path"`` sentinel. Returns the first token alone, or the first two
-    tokens space-joined when the second token looks like a genuine
-    subcommand (i.e. does not start with ``-``)."""
-    if not isinstance(args, dict):
+    ``args`` may be a plain dict (Cursor's observed shape) or the raw JSON
+    string form of one -- accepted for symmetry with Codex's
+    ``normalize_shell_command``, which takes either. The command lives under
+    the key ``"command"`` (a plain string). Returns that string UNCHANGED:
+    no env-var stripping, no by-path collapse, no truncation to the first
+    token. The string is consumed in-memory only -- by
+    ``approval_counter.signature_for_bash`` and friends -- and is never
+    serialized as-is; reduction/privacy-collapse happens there, not here.
+    """
+    payload = args
+    if isinstance(args, str):
+        try:
+            payload = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(payload, dict):
         return None
-    cmd = args.get("command")
+    cmd = payload.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         return None
-    tokens = cmd.strip().split()
-    while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
-        tokens = tokens[1:]
-    if not tokens:
-        return None
-    first = tokens[0]
-    if _PATH_LIKE_RE.search(first):
-        first = _PATH_SENTINEL
-    if len(tokens) > 1 and not tokens[1].startswith("-"):
-        return f"{first} {tokens[1]}"
-    return first
+    return cmd
 
 
 # ---------------------------------------------------------------------------

@@ -71,9 +71,20 @@ def test_families():
     )
 
 
-def test_normalize_shell_command_strips_env_prefix():
-    assert normalize_shell_command({"command": "FOO=secret git push"}) == "git push"
-    assert normalize_shell_command({"command": "./deploy.sh --x"}) == "path"
+# normalize_shell_command is pure arg-shape EXTRACTION -- it must return the
+# RAW command string verbatim, unreduced. Reduction (env-var stripping,
+# by-path->"path" collapse, first-token/subcommand extraction) is the job of
+# the single shared reducer, approval_counter.signature_for_bash, which is
+# exercised by its own tests, not here -- see that module's tests for
+# coverage of the reduction behavior itself.
+
+
+def test_normalize_shell_command_returns_raw_passthrough():
+    assert (
+        normalize_shell_command({"command": "FOO=secret git push"})
+        == "FOO=secret git push"
+    )
+    assert normalize_shell_command({"command": "./deploy.sh --x"}) == "./deploy.sh --x"
     assert normalize_shell_command({}) is None
 
 
@@ -83,20 +94,31 @@ def test_normalize_shell_command_empty_and_missing():
     assert normalize_shell_command({"command": None}) is None
 
 
-def test_normalize_shell_command_bare_env_assignment_only():
-    # No command left after stripping the env assignment -> None.
-    assert normalize_shell_command({"command": "FOO=bar"}) is None
+def test_normalize_shell_command_bare_env_assignment_only_still_raw():
+    # No reduction happens here -- a bare env assignment is still a
+    # non-empty command string and passes through unchanged.
+    assert normalize_shell_command({"command": "FOO=bar"}) == "FOO=bar"
 
 
 def test_normalize_shell_command_single_bare_token():
     assert normalize_shell_command({"command": "ls"}) == "ls"
 
 
-def test_normalize_shell_command_by_path_first_token_no_subcommand_join():
-    # A by-path first token collapses to the literal "path"; a following
-    # flag (not a genuine subcommand) must not be joined onto it.
-    assert normalize_shell_command({"command": "/usr/bin/ls -la"}) == "path"
-    assert normalize_shell_command({"command": "~/bin/tool run"}) == "path run"
+def test_normalize_shell_command_by_path_first_token_not_collapsed():
+    # Raw passthrough -- by-path tokens are NOT collapsed to "path" here;
+    # that collapse happens downstream in signature_for_bash.
+    assert normalize_shell_command({"command": "/usr/bin/ls -la"}) == "/usr/bin/ls -la"
+    assert normalize_shell_command({"command": "~/bin/tool run"}) == "~/bin/tool run"
+
+
+def test_normalize_shell_command_accepts_json_string_input():
+    # Mirrors Codex's normalize_shell_command, which also accepts either an
+    # already-parsed dict or the raw JSON string form of one.
+    assert (
+        normalize_shell_command('{"command": "git status"}') == "git status"
+    )
+    assert normalize_shell_command("not json") is None
+    assert normalize_shell_command("[]") is None
 
 
 def test_edit_footprint_hashes_path():
