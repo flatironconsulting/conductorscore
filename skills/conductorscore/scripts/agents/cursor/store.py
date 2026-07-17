@@ -150,7 +150,29 @@ def parse_locator(locator: Path) -> tuple[Path, str, str]:
     return Path(db), kind, session_id
 
 
+def is_cursor_locator(path: Path) -> bool:
+    """True iff ``path`` is a Cursor session locator, not a real file.
+
+    A locator (``make_locator`` output: ``"<db>#ide:<id>"`` /
+    ``"<db>#cli:<id>"``) is opaque to shared/generic code and, unlike a
+    Claude/Codex transcript path, is NOT directly openable -- its ``#kind:id``
+    suffix does not exist on disk. Any dispatch code (the ``scripts.events``
+    facade, ``scripts.session_viewer``) MUST check this BEFORE sniffing the
+    path as a real file (e.g. Codex's ``is_codex_jsonl``, which opens it) --
+    otherwise a locator gets misread as a missing/corrupt file instead of
+    being routed to the Cursor reader.
+
+    Implemented via :func:`parse_locator` (rather than a naive ``"#ide:" in
+    str(path)`` substring check) so it shares that function's exact
+    ``rpartition``/``partition`` parsing -- including its Windows-drive-letter
+    safety (``C:\\...`` never false-positives as kind ``"C"``).
+    """
+    _, kind, _ = parse_locator(path)
+    return kind in ("ide", "cli")
+
+
 __all__ = [
+    "is_cursor_locator",
     "kv_get_json",
     "kv_iter_prefix",
     "make_locator",

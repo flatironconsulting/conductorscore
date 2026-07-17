@@ -45,6 +45,10 @@ from pathlib import Path
 # Shared classifier — single source of truth (also drives the live card).
 from scripts.agents.claude.events import _approx_token_count, _sha16
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
+from scripts.agents.cursor.events import (
+    read_events_and_text as _cursor_read_events_and_text,
+)
+from scripts.agents.cursor.store import is_cursor_locator as _is_cursor_locator
 from scripts.events import EventKind, _strip_synthetic_content, read_events
 from scripts.turn_classifier import (
     ASK_USER_QUESTION_TOOL,
@@ -472,11 +476,88 @@ def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
     return messages
 
 
+def parse_cursor_session(locator: Path) -> list[TimelineMessage]:
+    """Parse a Cursor session locator into chronological timeline bubbles.
+
+    Unlike Claude/Codex, a Cursor session has no on-disk JSONL to line-parse
+    -- the locator (``"<db>#ide:<id>"``/``"<db>#cli:<id>"``, see
+    ``scripts.agents.cursor.store.make_locator``) points into a SQLite store
+    read via ``scripts.agents.cursor.events.read_events_and_text``. Bubbles
+    are built directly from that already-normalized ``Event`` stream instead
+    of raw rows:
+
+      * ``USER`` -> 'user' bubble. Raw text comes from the in-memory
+        ``text_map`` (id(event) -> text) the Cursor reader returns
+        side-channel -- never from the ``Event`` itself -- so redaction
+        (``_redact_messages``) replaces it with the same wire-equivalent
+        hash+count marker used for Claude/Codex, and ``--no-redact`` reveals
+        the same real text.
+      * ``ASSISTANT_TEXT`` -> 'assistant_text' bubble. The Cursor reader does
+        not capture raw assistant response text (only token counts -- see
+        ``scripts.agents.cursor.events``), so the bubble text is always
+        empty; ``is_end_turn`` still reflects ``stop_reason == "end_turn"``.
+      * ``ASSISTANT_TOOL``/``TOOL_RESULT`` -> one 'assistant_tool' bubble per
+        call, paired by ``tool_use_id`` (mirrors the Claude/Codex
+        pending_tools pairing above) so the tool's wall-time renders as a
+        duration span. Bubble text is intentionally left empty --
+        ``Event.raw_input`` is an in-process-detector-only field
+        (``repr=False``, never serialized) and must not be surfaced in the
+        viewer, matching Codex's tool bubbles (which also render no input
+        summary).
+      * ``ASSISTANT_THINKING`` -> no bubble (mirrors Claude/Codex, which
+        don't render thinking blocks either).
+    """
+    events, text_map = _cursor_read_events_and_text(locator)
+    messages: list[TimelineMessage] = []
+    # tool_use_id -> message index of the tool bubble awaiting its result.
+    pending_tools: dict[str, int] = {}
+
+    for ev in events:
+        if ev.kind == EventKind.USER:
+            text = text_map.get(id(ev), "")
+            if text:
+                messages.append(
+                    TimelineMessage(ts_ms=ev.timestamp_ms, role="user", text=_truncate(text))
+                )
+        elif ev.kind == EventKind.ASSISTANT_TEXT:
+            messages.append(
+                TimelineMessage(
+                    ts_ms=ev.timestamp_ms,
+                    role="assistant_text",
+                    text="",
+                    is_end_turn=(ev.stop_reason == "end_turn"),
+                )
+            )
+        elif ev.kind == EventKind.ASSISTANT_TOOL:
+            messages.append(
+                TimelineMessage(
+                    ts_ms=ev.timestamp_ms,
+                    role="assistant_tool",
+                    tool_name=ev.tool_name,
+                    tool_use_id=ev.tool_use_id,
+                    text="",
+                )
+            )
+            if ev.tool_use_id:
+                pending_tools[ev.tool_use_id] = len(messages) - 1
+        elif ev.kind == EventKind.TOOL_RESULT:
+            if ev.tool_use_id and ev.tool_use_id in pending_tools:
+                idx = pending_tools.pop(ev.tool_use_id)
+                messages[idx].end_ts_ms = ev.timestamp_ms
+
+    messages.sort(key=lambda m: m.ts_ms)
+    return messages
+
+
 def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
     """Parse the main JSONL into chronological timeline bubbles.
 
-    Auto-detects Codex rollouts and delegates to ``parse_codex_session``;
-    otherwise parses the Claude row vocabulary below.
+    Auto-detects a Cursor session LOCATOR and delegates to
+    ``parse_cursor_session``; else a Codex rollout and delegates to
+    ``parse_codex_session``; otherwise parses the Claude row vocabulary
+    below. The Cursor check MUST run first: a locator is not a real,
+    directly-openable file, so it must never reach the Codex JSONL sniff
+    (``_is_codex_jsonl``), which opens the path.
 
     Mirrors the notebook prototype's parser, with one addition: the
     AskUserQuestion tool_result is materialized as a USER bubble (its
@@ -484,6 +565,8 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
     classifier already treats it as a soft-USER event upstream, so this
     keeps the rendered timeline consistent with the classification.
     """
+    if _is_cursor_locator(jsonl_path):
+        return parse_cursor_session(jsonl_path)
     if _is_codex_jsonl(jsonl_path):
         return parse_codex_session(jsonl_path)
 
@@ -1449,6 +1532,7 @@ def render_session(
   <p class="help">This shows exactly how ConductorScore measured your coding session — minute by minute. Every minute is sorted into one of four buckets: <b>HITL</b> (you and the agent working together), <b>AFK</b> (the agent working on its own), <b>Tool</b> (a command or tool running), or <b>Idle</b> (nothing happening). Those are the coloured bars on the left, and they add up to the <b>Turns</b> table — which adds up to the whole session. The <b>Agent&nbsp;Runs</b> table lists every stretch the agent ran on its own; the longest one is your <b>"longest run"</b> score, and the trace under it shows how your longest-run and leverage numbers are calculated. Tool bars: <span class="k-real">solid yellow</span> = a real tool/command, <span class="k-disp">dashed yellow</span> = the agent handing work to a sub-agent, <span class="k-idle">grey</span> = aborted or idle.<br><br><b>Think your ConductorScore is wrong?</b> Use this to find the minutes that look mis-classified — for example idle or waiting time counted as work, or a hung command that should be idle — then <b>save this page and attach it to a bug report</b> and we'll take a look.</p>
   <div class="meta">
     <div>File: {html.escape(jsonl_path.name)}</div>
+    <div>Provider: {html.escape(_provider_label(jsonl_path))}</div>
     <div>Duration: {_fmt_dur(session_s)}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Turns: {len(turns)}</div>
   </div>
   <div style="height:14px"></div>
@@ -1631,7 +1715,13 @@ def render_session(
     }
 
 
-__all__ = ["render_session", "parse_session", "parse_codex_session", "main"]
+__all__ = [
+    "render_session",
+    "parse_session",
+    "parse_codex_session",
+    "parse_cursor_session",
+    "main",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -1661,15 +1751,17 @@ def _captured_transcript() -> Path | None:
 
 
 def _all_sessions_sorted() -> list:
-    """All discoverable local sessions (Claude + Codex), newest activity first.
+    """All discoverable local sessions (Claude + Codex + Cursor), newest
+    activity first.
 
-    Reuses the production discovery (``find_sessions`` / ``find_codex_sessions``)
-    — the same code that finds sessions for the scan.
+    Reuses the production discovery (``find_sessions`` / ``find_codex_sessions``
+    / ``find_cursor_sessions``) — the same code that finds sessions for the
+    scan.
     """
-    from scripts.events import find_codex_sessions, find_sessions
+    from scripts.events import find_codex_sessions, find_cursor_sessions, find_sessions
 
     sessions = []
-    for finder in (find_sessions, find_codex_sessions):
+    for finder in (find_sessions, find_codex_sessions, find_cursor_sessions):
         try:
             sessions.extend(finder())
         except Exception:
@@ -1677,6 +1769,19 @@ def _all_sessions_sorted() -> list:
     sessions = [s for s in sessions if getattr(s, "jsonl_path", None)]
     sessions.sort(key=lambda s: s.last_ts_ms, reverse=True)
     return sessions
+
+
+def _provider_label(jsonl_path: Path) -> str:
+    """``'cursor'`` | ``'codex'`` | ``'claude'`` — the provider that produced
+    ``jsonl_path``. Cursor is checked first: a locator's ``#kind:id`` suffix
+    is not a real, directly-openable file, so it must never reach the Codex
+    sniff (``_is_codex_jsonl``), which opens the path.
+    """
+    if _is_cursor_locator(jsonl_path):
+        return "cursor"
+    if _is_codex_jsonl(jsonl_path):
+        return "codex"
+    return "claude"
 
 
 def _latest_session() -> Path | None:
@@ -1732,11 +1837,12 @@ def _print_session_list() -> None:
     if not sessions:
         print("No local sessions found.")
         return
-    print(f"{'#':>3}  {'started':16}  {'session':14}  project")
+    print(f"{'#':>3}  {'started':16}  {'session':14}  {'provider':8}  project")
     for i, s in enumerate(sessions):
         started = _fmt_date(s.first_ts_ms)
         sid = (s.session_id or "")[:12]
-        print(f"{i:>3}  {started:16}  {sid:14}  {s.project_root}")
+        provider = _provider_label(s.jsonl_path) if s.jsonl_path else "?"
+        print(f"{i:>3}  {started:16}  {sid:14}  {provider:8}  {s.project_root}")
 
 
 def _print_console_summary(
