@@ -13,7 +13,7 @@ shape.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -114,8 +114,10 @@ class Event:
     # ``file_path``). It is intentionally NOT serialized — the
     # ``ExtractorOutput.to_dict`` builder never calls ``asdict(event)``
     # so this attribute stays in-process. The privacy invariant test
-    # pins this contract.
-    raw_input: dict | None = None
+    # pins this contract. ``repr=False`` so a stray ``repr(event)``/log
+    # line can never echo the raw command/path it carries either --
+    # belt-and-suspenders on top of never being serialized.
+    raw_input: dict | None = field(default=None, repr=False)
     is_auto_compaction_marker: bool = False
     stop_reason: str | None = None        # ASSISTANT_TEXT/TOOL: 'end_turn' | 'tool_use' | 'stop_sequence' | 'max_tokens' | None
     tool_use_id: str | None = None        # ASSISTANT_TOOL: dispatch id; TOOL_RESULT: matching id
