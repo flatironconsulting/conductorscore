@@ -55,8 +55,20 @@ def _load_auth() -> dict:
     return entry
 
 
-def _profile_url(auth: dict) -> str:
-    handle = auth.get("github_username") or "me"
+def _profile_url(auth: dict, resp: dict | None = None) -> str:
+    """The user's public profile URL, from the most authoritative slug we have:
+    the ingest response's canonical ``handle`` (fresh from the server on every
+    upload), then the stored auth entry's ``handle`` (saved at login), then —
+    legacy fallback only — the raw github_username, which is NOT the slug
+    (lowercasing, collision suffixes, and GitHub renames all diverge; #4/#6).
+    Built against API_BASE so localhost testing stays self-consistent.
+    """
+    handle = (
+        (resp or {}).get("handle")
+        or auth.get("handle")
+        or auth.get("github_username")
+        or "me"
+    )
     return f"{API_BASE}/u/{handle}"
 
 
@@ -195,7 +207,7 @@ def main() -> int:
         total=last_progress["total"],
         score=resp.get("score"),
         verification=resp.get("verification"),
-        profile_url=_profile_url(auth),
+        profile_url=_profile_url(auth, resp),
         # Surface the cross-provider consent decision through the structured
         # status channel so the orchestrator (run.py) can re-emit the prompt to
         # the agent. scan.py also prints it to stdout, but run.py redirects that
@@ -206,16 +218,38 @@ def main() -> int:
     return 0
 
 
+def _write_crash_log() -> Path | None:
+    """Persist the current exception's traceback to <cache>/crash.log so a
+    swallowed backstop error is still diagnosable (issue #5: 'unexpected error'
+    with no actionable detail). Appended with a timestamp; best-effort — a
+    logging failure must never mask the original error path."""
+    import datetime
+    import traceback
+
+    try:
+        path = _cache_dir() / "crash.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with open(path, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"\n--- {stamp} scan.py ---\n{traceback.format_exc()}")
+        return path
+    except Exception:
+        return None
+
+
 def _backstop_main() -> int:
     """Last-resort guard so the scan subprocess never surfaces a Python traceback
     to the host session. SystemExit raised intentionally by inner code is
     re-raised unchanged; any other uncaught error prints one clean line and
-    exits 0 (run.py reads status.json / the log, not the traceback)."""
+    exits 0 (run.py reads status.json / the log, not the traceback). The full
+    traceback is preserved in <cache>/crash.log (and echoed to stderr with
+    CONDUCTORSCORE_DEBUG=1)."""
     try:
         return main()
     except SystemExit:
         raise
     except OSError:
+        _write_crash_log()
         print(
             "ConductorScore couldn't write its cache (read-only filesystem); "
             "skipping the scan.",
@@ -223,8 +257,14 @@ def _backstop_main() -> int:
         )
         return 0
     except Exception:
+        if os.environ.get("CONDUCTORSCORE_DEBUG"):
+            import traceback
+
+            traceback.print_exc()
+        crash_path = _write_crash_log()
+        detail = f" Details: {crash_path}" if crash_path else ""
         print(
-            "ConductorScore hit an unexpected error and stopped.",
+            f"ConductorScore hit an unexpected error and stopped.{detail}",
             file=sys.stderr,
         )
         return 0

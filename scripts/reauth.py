@@ -56,6 +56,10 @@ def _entry_from(body: dict) -> dict:
     return {
         "device_token": body["device_token"],
         "github_username": body.get("github_username"),
+        # The server's canonical public slug. Profile URLs must be built from
+        # this, never from github_username — the slug is lowercased, may carry
+        # a collision suffix, and survives GitHub renames (issues #4/#6).
+        "handle": body.get("handle"),
         "email": body.get("email"),
         "paired_at": _now_iso(),
     }

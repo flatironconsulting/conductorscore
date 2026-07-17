@@ -513,7 +513,8 @@ def _print_summary(final: dict) -> None:
     if total:
         print(f"  Based on {total} sessions from your local transcripts.")
     ver = final.get("verification") or {}
-    if ver.get("github") is True:
+    # The server's verification shape is {"has_github": bool, "has_email": bool}.
+    if ver.get("has_github") is True:
         print("  Verified via GitHub.")
     print(
         "  Only your score (the numbers) was uploaded — never any transcript text."
@@ -531,7 +532,7 @@ def _emit_result(final: dict) -> None:
                 "score": _score_of(final),
                 "url": final.get("profile_url"),
                 "sessions": final.get("total"),
-                "verified_github": bool((final.get("verification") or {}).get("github")),
+                "verified_github": bool((final.get("verification") or {}).get("has_github")),
             }
         )
     )
@@ -716,16 +717,37 @@ def _read_status(path: Path) -> dict | None:
         return None
 
 
+def _write_crash_log() -> Path | None:
+    """Persist the current exception's traceback to <cache>/crash.log so a
+    swallowed backstop error is still diagnosable (issue #5: 'unexpected error'
+    with no actionable detail). Appended with a timestamp; best-effort — a
+    logging failure must never mask the original error path."""
+    import datetime
+    import traceback
+
+    try:
+        path = _cache_dir() / "crash.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with open(path, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"\n--- {stamp} run.py ---\n{traceback.format_exc()}")
+        return path
+    except Exception:
+        return None
+
+
 def _backstop_main() -> int:
     """Run main() under a last-resort guard so NO Python traceback ever reaches
     the user's Claude Code session. SystemExit raised intentionally by inner code
     is re-raised unchanged; any other uncaught error prints one clean human line
-    and exits 0 (host-session-safe)."""
+    and exits 0 (host-session-safe). The full traceback is preserved in
+    <cache>/crash.log (and echoed to stderr with CONDUCTORSCORE_DEBUG=1)."""
     try:
         return main()
     except SystemExit:
         raise
     except OSError:
+        _write_crash_log()
         print(
             "ConductorScore needs write access to its cache (read-only "
             "filesystem) — allow the command and re-run to continue.",
@@ -733,9 +755,15 @@ def _backstop_main() -> int:
         )
         return 0
     except Exception:
+        if os.environ.get("CONDUCTORSCORE_DEBUG"):
+            import traceback
+
+            traceback.print_exc()
+        crash_path = _write_crash_log()
+        detail = f" Details: {crash_path}" if crash_path else ""
         print(
             "ConductorScore hit an unexpected error and stopped. "
-            "Your Claude Code session is unaffected.",
+            f"Your Claude Code session is unaffected.{detail}",
             file=sys.stderr,
         )
         return 0
