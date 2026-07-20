@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import MutableMapping
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -202,6 +203,31 @@ def _scan_cmd() -> list[str]:
 
 def _pending_path() -> Path:
     return _cache_dir() / "pending_login.json"
+
+
+def _default_skill_dir() -> str:
+    """This file's own install location: scripts/run.py is physically
+    installed at ``<skill-dir>/scripts/run.py`` (e.g.
+    ``~/.cursor/skills/conductorscore/scripts/run.py``), so ``__file__`` two
+    levels up IS the skill dir — the launch surface reveals itself without
+    needing anything else to have set it."""
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _ensure_skill_dir_env(env: MutableMapping[str, str] = os.environ) -> None:
+    """Populate CONDUCTORSCORE_SKILL_DIR from this file's own path, unless it
+    is already set (explicit env wins; CONDUCTORSCORE_LAUNCH_PROVIDER, checked
+    first by detect_launch_provider, wins regardless of this).
+
+    Fixes a bug where scripts/agents/consent.py's detect_launch_provider()
+    documented reading CONDUCTORSCORE_SKILL_DIR, but nothing ever set it — an
+    install under ~/.cursor/skills/conductorscore silently detected as
+    "claude" (live symptom: a Windows Cursor user's scan found 0 sessions,
+    "for: Claude Code"). Called early in main(), before consent/detect logic
+    and before scan.py is spawned, so the value propagates to the scan
+    subprocess via its inherited os.environ.
+    """
+    env.setdefault("CONDUCTORSCORE_SKILL_DIR", _default_skill_dir())
 
 
 def _load_pending() -> dict | None:
@@ -610,6 +636,13 @@ def main() -> int:
         # Test/diagnostic seam: prove the __main__ backstop swallows an uncaught
         # error so no Python traceback ever reaches the host session.
         raise RuntimeError("forced backstop")
+    # scripts/run.py lives under <skill-dir>/scripts, so its own path reveals
+    # which surface installed it (~/.cursor/skills/..., ~/.codex/skills/...,
+    # etc.). Populate CONDUCTORSCORE_SKILL_DIR from that self-location EARLY —
+    # before any consent/detect logic and before scan.py is spawned — so
+    # detect_launch_provider() (scripts/agents/consent.py) has the install
+    # path it documents reading, and the scan subprocess inherits it too.
+    _ensure_skill_dir_env()
     _make_output_live()
     # If invoked as a SessionStart hook, capture this session's transcript path
     # for the session viewer ("visualize this session"). No-op otherwise.
