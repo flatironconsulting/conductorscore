@@ -68,6 +68,25 @@ def test_detect_launch_provider_cursor_skill_dir_heuristic():
     ) == "cursor"
 
 
+def test_detect_launch_provider_windows_backslash_skill_dir():
+    # Windows skill dirs use backslashes (e.g. "C:\Users\u\.cursor\skills\...").
+    # The forward-slash-only heuristic must not miss these (live Windows
+    # failure: launch-provider detection silently defaulted to "claude").
+    assert C.detect_launch_provider(
+        {"CONDUCTORSCORE_SKILL_DIR": "C:\\Users\\u\\.cursor\\skills\\conductorscore"}
+    ) == "cursor"
+    assert C.detect_launch_provider(
+        {"CONDUCTORSCORE_SKILL_DIR": "C:\\Users\\u\\.codex\\skills\\conductorscore"}
+    ) == "codex"
+    # endswith-the-dir-itself case, backslash form.
+    assert C.detect_launch_provider(
+        {"CONDUCTORSCORE_SKILL_DIR": "C:\\Users\\u\\.cursor"}
+    ) == "cursor"
+    assert C.detect_launch_provider(
+        {"CONDUCTORSCORE_SKILL_DIR": "C:\\Users\\u\\.codex"}
+    ) == "codex"
+
+
 def test_other_providers_is_canonical_order_minus_launch():
     assert C._other_providers("claude") == ["codex", "cursor"]
     assert C._other_providers("codex") == ["claude", "cursor"]

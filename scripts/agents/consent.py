@@ -81,7 +81,10 @@ def detect_launch_provider(env: Mapping[str, str] = os.environ) -> AgentId:
       2. install-path / command context heuristic: a ``.codex`` (or
          ``.cursor``) segment in the skill install path
          (``CONDUCTORSCORE_SKILL_DIR`` / argv[0]) implies a Codex (or Cursor)
-         launch.
+         launch. Path separators are normalized (backslash to forward slash)
+         before matching, so a Windows install path
+         (``C:\\Users\\u\\.cursor\\skills\\conductorscore``) is detected the
+         same as its POSIX equivalent.
       3. default ``claude``.
     """
     explicit = (env.get("CONDUCTORSCORE_LAUNCH_PROVIDER") or "").strip().lower()
@@ -89,8 +92,12 @@ def detect_launch_provider(env: Mapping[str, str] = os.environ) -> AgentId:
         return explicit  # type: ignore[return-value]
     # Fall back to install path / command context only when the env var is
     # absent. A skill installed under ~/.codex/... launches from Codex; under
-    # ~/.cursor/... launches from Cursor.
-    skill_dir = (env.get("CONDUCTORSCORE_SKILL_DIR") or "").lower()
+    # ~/.cursor/... launches from Cursor. Normalize backslashes to forward
+    # slashes first — Windows skill dirs (CONDUCTORSCORE_SKILL_DIR) use
+    # backslashes and would otherwise never match, silently defaulting to
+    # "claude" (live Windows failure: a Cursor-launched run scanned as
+    # launch-provider claude with 0 sessions).
+    skill_dir = (env.get("CONDUCTORSCORE_SKILL_DIR") or "").lower().replace("\\", "/")
     if "/.codex/" in skill_dir or skill_dir.endswith("/.codex"):
         return "codex"
     if "/.cursor/" in skill_dir or skill_dir.endswith("/.cursor"):

@@ -2,8 +2,9 @@
 """Scan transcripts and upload extracted features. Subprocess-friendly.
 
 Writes status to ~/.cache/conductorscore/status.json on each tick and on
-terminal phases (done, error). Stdout/stderr are intentionally minimal —
-the orchestrator (run.py) is responsible for surfacing progress to the user.
+terminal phases (done, no_sessions, error). Stdout/stderr are intentionally
+minimal — the orchestrator (run.py) is responsible for surfacing progress to
+the user.
 """
 from __future__ import annotations
 
@@ -176,6 +177,27 @@ def main() -> int:
     else:
         seen = ", ".join(seen_list)
     print(f"providers_seen: {seen}")
+
+    # A zero-session scan must NEVER upload. compute_session_chain([]) == "" and
+    # the server 422s on session_chain "" fails /^[a-f0-9]{16}$/ — and a
+    # 0-session payload is useless regardless (live Windows failure: this
+    # exact path uploaded an empty payload and got rejected). Skip the POST
+    # entirely and surface a friendly "nothing to upload" outcome instead.
+    if sessions is not None and len(sessions) == 0:
+        providers_str = ", ".join(
+            consent_mod.PROVIDER_LABELS.get(p, p.title()) for p in seen_list
+        )
+        print(
+            f"No sessions found in the last 30 days for: {providers_str}. "
+            "Nothing to upload."
+        )
+        sw.write(
+            phase="no_sessions",
+            providers=list(seen_list),
+            permission_needed=decision.permission_needed,
+            permission_sessions_30d=decision.permission_sessions_30d,
+        )
+        return 0
 
     sw.write(phase="uploading", current=last_progress["current"], total=last_progress["total"])
 

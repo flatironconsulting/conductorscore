@@ -19,6 +19,8 @@ import pytest
 import scripts.reauth as reauth
 import scripts.run as run
 import scripts.scan as scan
+from scripts.agents.consent import ConsentDecision
+from scripts.output_schema import DeviceMeta, ExtractorOutput, PerSession
 
 
 # ── #4/#6: canonical profile slug ──────────────────────────────────────────
@@ -87,6 +89,24 @@ def test_print_summary_reads_has_github(capsys):
     assert "Verified via GitHub." in capsys.readouterr().out
 
 
+# ── no_sessions phase renders a friendly message, not a crash ──────────────
+
+
+def test_print_no_sessions_lists_providers(capsys):
+    run._print_no_sessions({"phase": "no_sessions", "providers": ["claude"]})
+    out = capsys.readouterr().out
+    assert "No sessions found in the last 30 days for: Claude Code" in out
+    assert "Nothing to upload." in out
+
+
+def test_emit_no_sessions_agent_line(capsys):
+    run._emit_no_sessions({"phase": "no_sessions", "providers": ["claude", "cursor"]})
+    line = capsys.readouterr().out.strip()
+    payload = json.loads(line.removeprefix("CONDUCTORSCORE_RESULT "))
+    assert payload["status"] == "no_sessions"
+    assert payload["providers"] == ["claude", "cursor"]
+
+
 # ── #5: swallowed backstop errors stay diagnosable ─────────────────────────
 
 
@@ -122,3 +142,82 @@ def test_backstop_debug_env_prints_traceback(tmp_path, monkeypatch, capsys):
     assert run._backstop_main() == 0
     err = capsys.readouterr().err
     assert "Traceback" in err and "kaboom-sentinel" in err
+
+
+# ── zero-session scans never POST an upload ────────────────────────────────
+#
+# Live Windows failure: a scan that resolved to zero sessions still built and
+# POSTed a payload; compute_session_chain([]) == "" and the server 422s on
+# session_chain "" fails /^[a-f0-9]{16}$/. A 0-session payload is useless
+# regardless — the fix is to never send it.
+
+
+def _fake_decision(providers):
+    return ConsentDecision(launch_provider=providers[0], providers=list(providers))
+
+
+def _fake_auth():
+    return {"device_token": "tok", "handle": "me"}
+
+
+def test_zero_sessions_skips_upload_and_writes_no_sessions_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(scan, "_load_auth", _fake_auth)
+    monkeypatch.setattr(scan.auth_store, "load_or_create_device_id", lambda: "dev1")
+    monkeypatch.setattr(scan.consent_mod, "decide", lambda: _fake_decision(["claude"]))
+
+    empty_output = ExtractorOutput(
+        device=DeviceMeta(device_id="dev1", client_version="0.0.0", extracted_at_ms=0),
+        sessions=(),
+    )
+    monkeypatch.setattr(scan, "extract", lambda **kwargs: empty_output)
+
+    upload_calls = []
+    monkeypatch.setattr(
+        scan, "_upload", lambda *a, **kw: upload_calls.append((a, kw)) or ("ok", {})
+    )
+
+    rc = scan.main()
+
+    assert rc == 0
+    assert upload_calls == []  # never attempted the HTTP POST
+
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["phase"] == "no_sessions"
+    assert status["providers"] == ["claude"]
+
+
+def test_one_session_still_uploads(tmp_path, monkeypatch):
+    # Guard must fire ONLY on zero sessions — a 1-session payload uploads as before.
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(scan, "_load_auth", _fake_auth)
+    monkeypatch.setattr(scan.auth_store, "load_or_create_device_id", lambda: "dev1")
+    monkeypatch.setattr(scan.consent_mod, "decide", lambda: _fake_decision(["claude"]))
+
+    session = PerSession(
+        session_hash="a" * 16,
+        project_hash="b" * 16,
+        started_at_ms=0,
+        ended_at_ms=1000,
+    )
+    one_session_output = ExtractorOutput(
+        device=DeviceMeta(device_id="dev1", client_version="0.0.0", extracted_at_ms=0),
+        sessions=(session,),
+    )
+    monkeypatch.setattr(scan, "extract", lambda **kwargs: one_session_output)
+
+    upload_calls = []
+
+    def fake_upload(*a, **kw):
+        upload_calls.append((a, kw))
+        return "ok", {"score": {"total": 1}, "verification": {}}
+
+    monkeypatch.setattr(scan, "_upload", fake_upload)
+
+    rc = scan.main()
+
+    assert rc == 0
+    assert len(upload_calls) == 1  # the HTTP POST WAS attempted
+
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["phase"] == "done"

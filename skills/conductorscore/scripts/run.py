@@ -545,6 +545,39 @@ def _print_summary(final: dict) -> None:
     )
 
 
+def _no_sessions_message(final: dict) -> str:
+    providers = final.get("providers") or []
+    labels = [_provider_label(p) for p in providers] or ["your coding agents"]
+    joined = (
+        labels[0]
+        if len(labels) == 1
+        else ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    )
+    return f"No sessions found in the last 30 days for: {joined}. Nothing to upload."
+
+
+def _print_no_sessions(final: dict) -> None:
+    """Human-readable outcome for a real terminal when the scan resolved to
+    zero sessions (see scan.py's ``no_sessions`` phase: a 0-session payload is
+    never uploaded)."""
+    print(_no_sessions_message(final))
+
+
+def _emit_no_sessions(final: dict) -> None:
+    """Agent path: emit the zero-session outcome as ONE structured line,
+    mirroring ``_emit_result`` so the agent renders it instead of treating a
+    scan that found nothing as a failure."""
+    print(
+        "CONDUCTORSCORE_RESULT "
+        + json.dumps(
+            {
+                "status": "no_sessions",
+                "providers": final.get("providers") or [],
+            }
+        )
+    )
+
+
 def _emit_result(final: dict) -> None:
     """Agent path: emit the scan result as ONE structured line and nothing else.
     The agent turns it into the final report (see SKILL.md), so the script never
@@ -723,6 +756,18 @@ def main() -> int:
         else:
             _emit_result(final)
         _finish_daily()
+        return 0
+
+    if final.get("phase") == "no_sessions":
+        # A zero-session scan is not an error — scan.py deliberately skipped
+        # the upload (an empty payload is both useless and server-rejected).
+        # Surface the friendly outcome instead of falling through to the
+        # generic "no status" error below. No score was produced, so there's
+        # no consent choice to persist and no daily-refresh follow-up.
+        if sys.stdin.isatty():
+            _print_no_sessions(final)
+        else:
+            _emit_no_sessions(final)
         return 0
 
     if final.get("phase") == "error":
