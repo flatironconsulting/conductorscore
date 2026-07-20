@@ -51,6 +51,49 @@ def test_meta_hex_decoded_createdat_used_as_base_timestamp(tmp_path):
     assert u.session_id == "agent-1"
 
 
+def test_events_spread_across_real_session_span_from_meta_json(tmp_path):
+    """The DB blob meta carries only ``createdAt`` (no end), so the reader used
+    a fixed 1ms/message synthetic step -- collapsing a multi-message session to
+    a single instant (span ~= 0), which zeroed wallclock/HITL minutes for every
+    Cursor CLI session. The reader now reads the sibling ``meta.json``'s
+    ``updatedAtMs`` (Cursor's real last-update time) and spreads per-message
+    timestamps EVENLY across the true [createdAt, updatedAtMs] span.
+
+    Three messages over a real 20-minute span -> first@createdAt,
+    last@updatedAt, middle at the midpoint. Without the fix the three events
+    would sit at T0, T0+1ms, T0+2ms (span 2ms).
+    """
+    db = _db(tmp_path, {
+        "agentId": "agent-span", "createdAt": T0, "updatedAt": T0 + 20 * MS,
+        "messages": [
+            user_message("start"),
+            assistant_message(text="working"),
+            assistant_message(text="done"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-span", want_text=False)[0]
+    ts = [e.timestamp_ms for e in evs]
+    assert ts == sorted(ts)          # strictly non-decreasing
+    assert min(ts) == T0             # first message anchored at createdAt
+    assert max(ts) == T0 + 20 * MS   # last message anchored at the REAL end
+    assert max(ts) - min(ts) == 20 * MS
+
+
+def test_no_meta_json_falls_back_to_legacy_step(tmp_path):
+    """Without a sibling meta.json (or a valid updatedAtMs), the reader keeps
+    the legacy strictly-increasing 1ms step -- no real span to spread across."""
+    db = _db(tmp_path, {
+        "agentId": "agent-nospan", "createdAt": T0,
+        "messages": [user_message("a"), assistant_message(text="b")],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-nospan", want_text=False)[0]
+    ts = [e.timestamp_ms for e in evs]
+    assert ts == sorted(ts)
+    assert min(ts) == T0
+    # Legacy fallback: tightly packed, not spread across a real span.
+    assert max(ts) - min(ts) <= 2
+
+
 def test_last_used_model_applied_to_assistant_events(tmp_path):
     db = _db(tmp_path, {
         "agentId": "agent-2", "createdAt": T0, "lastUsedModel": "claude-4.5-sonnet",

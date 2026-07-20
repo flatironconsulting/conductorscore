@@ -28,10 +28,15 @@ and recursing toward ancestors necessarily visits messages newest-first;
 ``read_cli_events_and_text`` reverses the result ONCE to produce the
 oldest -> newest order every other provider's Event stream uses.
 
-Per-message timestamps do not exist in the CLI store (§7): every message's
-``timestamp_ms`` is ``meta.createdAt`` plus a small synthetic monotonic
-per-message-index increment (1ms) -- enough for stable ordering/turn
-segmentation, not a claim of real per-message timing. Token fields are
+Per-message timestamps do not exist in the CLI store (§7). The session's real
+[start, end] span DOES: ``start`` = ``meta.createdAt`` (DB blob meta), ``end``
+= the sibling ``meta.json``'s ``updatedAtMs`` (Cursor's last-update time --
+``_session_end_ms``). Messages are spread EVENLY across that real span
+(``_message_ts``) so per-message gaps reflect real elapsed time and the turn
+classifier yields non-zero HITL/AFK/wallclock -- not a claim of exact per-
+message timing, but the true session duration rather than a collapsed instant.
+When no valid ``updatedAtMs`` is available the reader falls back to the legacy
+1ms/message monotonic step (stable ordering only, ~zero span). Token fields are
 likewise absent (§6, by omission -- no per-message usage was found in any
 CLI blob); ``Event.input_tokens``/``output_tokens`` stay at their 0
 defaults, which correctly triggers ``token_data_missing`` downstream.
@@ -106,6 +111,43 @@ _USER_QUERY_RE = re.compile(r"^\s*<user_query>(.*)</user_query>\s*$", re.DOTALL)
 
 # Synthetic per-message timestamp increment (ms) -- see module docstring.
 _SYNTHETIC_TS_STEP_MS = 1
+
+
+def _session_end_ms(db_path: Path) -> int | None:
+    """Best-effort REAL session end from the sibling ``meta.json``'s
+    ``updatedAtMs`` (Cursor's last-update wall-clock for the chat).
+
+    The DB blob ``meta`` carries only ``createdAt`` (no end), so without this
+    the reader had no real span to place messages in and collapsed the whole
+    session onto ``createdAt`` (+1ms/message) -- which zeroed wallclock and
+    HITL/AFK minutes for every Cursor CLI session. ``meta.json`` sits next to
+    ``store.db`` in a real CLI chat dir (CURSOR_FORMAT.md §4). Only the two
+    epoch-ms ints are read; ``title``/``cwd`` (privacy-relevant) are never
+    touched. Returns ``None`` on any failure -- never raises."""
+    try:
+        raw = (db_path.parent / "meta.json").read_text(encoding="utf-8")
+        doc = json.loads(raw)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    updated = doc.get("updatedAtMs")
+    return updated if isinstance(updated, int) and updated > 0 else None
+
+
+def _message_ts(base_ts: int, end_ts: int | None, i: int, n: int) -> int:
+    """Timestamp (epoch ms) for the ``i``-th of ``n`` messages (0-based).
+
+    When a real end is known (sibling ``meta.json`` ``updatedAtMs`` > base) and
+    there are >=2 messages, spread messages EVENLY across the true
+    ``[base_ts, end_ts]`` span so per-message gaps reflect real elapsed time
+    (the turn classifier then produces non-zero HITL/AFK -> non-zero
+    wallclock). First message anchors at ``base_ts``, last at ``end_ts``.
+    Otherwise fall back to the legacy strictly-increasing 1ms step (single-
+    message sessions, or no/invalid end -- no real duration to spread)."""
+    if end_ts is not None and end_ts > base_ts and n >= 2:
+        return base_ts + round((end_ts - base_ts) * i / (n - 1))
+    return base_ts + i * _SYNTHETIC_TS_STEP_MS
 
 
 def _sha16(s: str) -> str:
@@ -587,6 +629,8 @@ def read_cli_events_and_text(
         model = _model_or_none(meta.get("lastUsedModel"))
         created_at = meta.get("createdAt")
         base_ts = created_at if isinstance(created_at, int) else 0
+        end_ts = _session_end_ms(db_path)
+        n_msgs = len(messages)
 
         events: list[Event] = []
         text_map: dict[int, str] = {}
@@ -594,7 +638,7 @@ def read_cli_events_and_text(
             if not isinstance(msg, dict):
                 continue
             try:
-                ts = base_ts + i * _SYNTHETIC_TS_STEP_MS
+                ts = _message_ts(base_ts, end_ts, i, n_msgs)
                 events.extend(
                     _events_for_message(
                         session_id, ts, model, msg,

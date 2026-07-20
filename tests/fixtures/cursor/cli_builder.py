@@ -261,6 +261,22 @@ def write_cli_store(chats_dir: Path, session: dict) -> Path:
 
     con.commit()
     con.close()
+
+    # Sibling ``meta.json`` (real CLI stores write one next to store.db, see
+    # CURSOR_FORMAT.md §4). The reader reads ``updatedAtMs`` from it to learn
+    # the session's REAL end time (the DB blob meta carries only ``createdAt``)
+    # and spread per-message timestamps across the true span. Only written when
+    # ``updatedAt`` is supplied, so existing fixtures (no meta.json) keep
+    # exercising the legacy single-instant fallback.
+    if "updatedAt" in session:
+        meta_json = {
+            "schemaVersion": 1,
+            "createdAtMs": session.get("createdAt", T0),
+            "updatedAtMs": session["updatedAt"],
+            "hasConversation": True,
+        }
+        (db_dir / "meta.json").write_text(json.dumps(meta_json), encoding="utf-8")
+
     return db_path
 
 

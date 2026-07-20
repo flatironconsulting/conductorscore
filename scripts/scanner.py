@@ -50,6 +50,21 @@ from scripts.tool_counter import (
 WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
+# Cursor sessions very often carry NO resolved model id: Cursor's on-disk
+# model of record is the ``default``/``auto`` sentinel (mapped to ``None`` by
+# the cursor readers, which must not report a sentinel as a concrete model —
+# CURSOR_FORMAT.md §5). The message/token aggregators below key off the model
+# and skip model-less events, which silently zeroed EVERY assistant turn (and
+# token) of an unresolved-model Cursor session — the profile message bar
+# rendered empty. For provider=="cursor" ONLY, a model-less assistant event is
+# attributed to this stable Cursor-family placeholder so its activity still
+# counts. ``composer`` classifies to the server's Cursor "Composer" tier via
+# the ``/^composer/`` rule and is seeded in ``model_pricing`` (migration 0029),
+# so it never trips the S_unknown_model integrity signal. It is a placeholder,
+# NOT a claim that the session ran a specific Composer version. Claude/Codex
+# sessions never hit this path (they always resolve a concrete model id).
+_CURSOR_UNRESOLVED_MODEL = "composer"
+
 
 def _sha16(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -335,7 +350,10 @@ def extract(
         # message may emit multiple Events (text + tool_use + thinking)
         # sharing one timestamp_ms — dedupe on that pair so one line is
         # one message. ``model`` is only set on assistant-side events;
-        # the reader leaves it None elsewhere.
+        # the reader leaves it None elsewhere. For Cursor, a model-less
+        # assistant event is attributed to the Cursor-family placeholder
+        # (``_CURSOR_UNRESOLVED_MODEL``) so unresolved-model sessions still
+        # count their turns instead of vanishing from the message bar.
         seen_assistant_msgs: set[tuple[int, str]] = set()
         assistant_msgs_by_model: dict[str, int] = {}
         for e in events:
@@ -345,14 +363,17 @@ def extract(
                 EventKind.ASSISTANT_THINKING,
             ):
                 continue
-            if not e.model:
+            model = e.model or (
+                _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
+            )
+            if not model:
                 continue
-            key = (e.timestamp_ms, e.model)
+            key = (e.timestamp_ms, model)
             if key in seen_assistant_msgs:
                 continue
             seen_assistant_msgs.add(key)
-            assistant_msgs_by_model[e.model] = (
-                assistant_msgs_by_model.get(e.model, 0) + 1
+            assistant_msgs_by_model[model] = (
+                assistant_msgs_by_model.get(model, 0) + 1
             )
 
         # Skill invocation counts (total + per-name) come from `tc` above —
@@ -379,7 +400,10 @@ def extract(
         #   Σ tokens_by_model[m].output      == total_output_tokens
         tokens_by_model: dict[str, dict[str, int]] = {}
         for e in events:
-            if not e.model:
+            model = e.model or (
+                _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
+            )
+            if not model:
                 continue
             in_miss = int(getattr(e, "cache_creation_input_tokens", 0) or 0)
             in_hit = int(getattr(e, "cache_input_tokens", 0) or 0)
@@ -387,7 +411,7 @@ def extract(
             if in_miss == 0 and in_hit == 0 and out == 0:
                 continue
             slot = tokens_by_model.setdefault(
-                e.model, {"input_miss": 0, "input_hit": 0, "output": 0}
+                model, {"input_miss": 0, "input_hit": 0, "output": 0}
             )
             slot["input_miss"] += in_miss
             slot["input_hit"] += in_hit

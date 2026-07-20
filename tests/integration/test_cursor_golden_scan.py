@@ -408,6 +408,54 @@ def test_tokens_by_model_keyed_by_model_id(cursor_home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# (e2) Unresolved-model Cursor sessions still count their assistant turns.
+# ---------------------------------------------------------------------------
+
+
+def test_model_less_cursor_assistant_msgs_counted_under_composer(
+    cursor_home, monkeypatch
+):
+    """A Cursor session whose model is UNRESOLVED (the ``default`` sentinel
+    or an absent modelName -> ``None``) must still count its assistant turns.
+
+    Before the fix, ``scanner.py``'s ``assistant_msgs_by_model`` /
+    ``tokens_by_model`` aggregators both ``continue`` on any assistant event
+    with a falsy ``model``, so an unresolved-model Cursor session reported
+    ZERO messages (the profile message bar rendered empty) even though it
+    clearly had assistant turns. Cursor's ``default``/``auto`` selection is
+    common on real CLI/IDE sessions, so this silently zeroed a large share
+    of Cursor activity.
+
+    The fix (provider-gated) attributes a model-less Cursor assistant turn
+    to the registered Cursor family placeholder ``"composer"`` — it
+    classifies to the ``Composer`` tier via the server's ``/^composer/``
+    rule and is seeded in ``model_pricing`` so it never trips
+    ``S_unknown_model``. Two distinct-timestamp assistant bubbles -> 2
+    messages under ``"composer"``.
+    """
+    composer_id = "cur-modelless"
+    bubbles = [
+        user_bubble("b1", "hi", T0),
+        assistant_bubble("b2", "reply one", T0 + 1 * MS),   # no model -> None
+        assistant_bubble("b3", "reply two", T0 + 2 * MS),   # no model -> None
+    ]
+    s = _scan(
+        cursor_home,
+        monkeypatch,
+        {
+            "composerId": composer_id,
+            "createdAt": T0,
+            "lastUpdatedAt": T0 + 2 * MS,
+            "workspacePath": "/repo/modelless",
+            "bubbles": bubbles,
+        },
+        now_ms=T0 + 10 * MS,
+    )
+
+    assert s.assistant_msgs_by_model == {"composer": 2}
+
+
+# ---------------------------------------------------------------------------
 # (f) Task 2.2 golden — IDE + CLI sessions merge under one provider.
 # ---------------------------------------------------------------------------
 
