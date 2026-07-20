@@ -56,7 +56,12 @@ def open_ro(db_path: Path) -> sqlite3.Connection | None:
         return None
     try:
         con = sqlite3.connect(f"file:{copy_path}?mode=ro", uri=True)
-        con.execute("SELECT 1").fetchone()
+        # Force a header/schema read so a corrupt or non-SQLite file is
+        # rejected here (-> None), not lazily on first real query. `SELECT 1`
+        # is a constant that never touches the DB file, so on some SQLite
+        # versions it succeeds even for a non-database file; reading
+        # `sqlite_master` requires a valid header and raises across versions.
+        con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
         return con
     except sqlite3.Error:
         return None
