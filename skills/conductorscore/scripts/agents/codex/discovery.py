@@ -13,11 +13,24 @@ registry and scanner treat Codex sessions identically to Claude ones.
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import json
 import os
 from pathlib import Path
 
 from scripts.core.normalized import SessionMeta
+from scripts.agents.codex.events import read_rollout_lines
+
+
+def _rollout_files(sessions_dir: Path):
+    """All rollout files, PLAIN and zstd-compressed. Codex compresses
+    rollouts older than 7 days in place (``rollout-*.jsonl`` →
+    ``rollout-*.jsonl.zst``), so a ``*.jsonl``-only glob silently loses
+    week-old sessions — worst on a new user's first backfill scan."""
+    return itertools.chain(
+        sessions_dir.rglob("rollout-*.jsonl"),
+        sessions_dir.rglob("rollout-*.jsonl.zst"),
+    )
 
 
 def codex_home() -> Path:
@@ -107,13 +120,10 @@ def preflight(now_ms: int, window_ms: int) -> dict:
         return out
     cutoff = now_ms - window_ms
     count = 0
-    for jsonl in sessions_dir.rglob("rollout-*.jsonl"):
+    for jsonl in _rollout_files(sessions_dir):
         if not jsonl.is_file():
             continue
-        try:
-            lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
+        lines = read_rollout_lines(jsonl)
         if not lines:
             continue
         last: int | None = None
@@ -143,13 +153,10 @@ def find_sessions() -> list[SessionMeta]:
     out: list[SessionMeta] = []
     # Codex lays sessions out as sessions/YYYY/MM/DD/rollout-*.jsonl; a
     # recursive glob is robust to that fixed depth without hard-coding it.
-    for jsonl in sorted(sessions_dir.rglob("rollout-*.jsonl")):
+    for jsonl in sorted(_rollout_files(sessions_dir)):
         if not jsonl.is_file():
             continue
-        try:
-            lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
+        lines = read_rollout_lines(jsonl)
         if not lines:
             continue
 

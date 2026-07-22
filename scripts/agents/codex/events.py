@@ -38,11 +38,14 @@ from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
 from scripts.agents.codex.taxonomy import (
+    DENIAL_MARKER,
     EDIT_TOOL_NAMES,
     SHELL_TOOL_NAMES,
+    extract_shell_commands_from_exec_js,
     multi_agent_action,
     normalize_shell_command,
     parse_apply_patch_files,
+    parse_patch_changes,
 )
 
 # Top-level Codex rollout row types — presence of any of these is the
@@ -63,11 +66,48 @@ def _approx_token_count(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _read_lines(jsonl_path: Path) -> list[str]:
+def _zstd_decompress(data: bytes) -> bytes | None:
+    """Best-effort zstd decompression. SOFT dependency chain: stdlib
+    ``compression.zstd`` (Python 3.14+), then the optional ``zstandard``
+    package; returns ``None`` when no backend is available (the caller skips
+    the file — never crashes). The client stays stdlib-only: neither backend
+    is required, they are only used when already present."""
+    try:  # Python 3.14+ stdlib
+        from compression import zstd  # type: ignore[import-not-found]
+
+        return zstd.decompress(data)
+    except Exception:
+        pass
+    try:  # optional third-party package
+        import zstandard  # type: ignore[import-not-found]
+
+        # decompressobj handles frames without a content-size header (the
+        # streaming writer Codex uses does not always record one).
+        return zstandard.ZstdDecompressor().decompressobj().decompress(data)
+    except Exception:
+        return None
+
+
+def read_rollout_lines(jsonl_path: Path) -> list[str] | None:
+    """Read a Codex rollout's lines, transparently decompressing
+    ``.jsonl.zst`` rollouts (Codex zstd-compresses rollouts older than 7
+    days IN PLACE — rollout/src/compression.rs). Returns ``None`` when the
+    file is unreadable or compressed with no decompression backend
+    available, so callers can distinguish "empty" from "unreadable"."""
     try:
+        if jsonl_path.name.endswith(".zst"):
+            raw = _zstd_decompress(jsonl_path.read_bytes())
+            if raw is None:
+                return None
+            return raw.decode("utf-8", errors="replace").splitlines()
         return jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return []
+        return None
+
+
+def _read_lines(jsonl_path: Path) -> list[str]:
+    lines = read_rollout_lines(jsonl_path)
+    return lines if lines is not None else []
 
 
 def _iter_rows(jsonl_path: Path):
@@ -129,9 +169,12 @@ def is_codex_jsonl(jsonl_path: Path) -> bool:
 
 
 # Codex shell/exec outputs are plain strings that include a
-# "Process exited with code N" trailer; a non-zero code is a tool error. We
-# parse ONLY this boolean signal transiently — the raw output is never stored.
-_EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
+# Exit-code trailer; a non-zero code is a tool error. TWO formats exist:
+# older "Process exited with code N" and the newer (0.14x) "Exit code: N"
+# (codex-rs/core/src/tools/context.rs vs core/src/unified_exec/process.rs).
+# We parse ONLY this boolean signal transiently — the raw output is never
+# stored.
+_EXIT_CODE_RE = re.compile(r"(?:Process exited with code|Exit code:)\s*(\d+)")
 
 # A Codex tool call the user interrupted/killed mid-run reports an abort in its
 # output (e.g. "aborted by user after 11399.5s"). We parse ONLY this boolean
@@ -154,6 +197,42 @@ def _output_is_aborted(output: object) -> bool:
     if not text:
         return False
     return bool(_ABORTED_RE.search(text))
+
+
+def _output_is_denied(output: object) -> bool:
+    """True when a Codex tool output records a user DENIAL of the call.
+
+    The approval-request events are transient (never persisted), but a
+    declined call's synthesized output carries "exec command rejected by
+    user" / "patch rejected by user" (codex-rs/core/src/tools/events.rs) —
+    matched on the stable "rejected by user" substring (taxonomy
+    ``DENIAL_MARKER``). Only a boolean crosses out of here — never the raw
+    output text.
+    """
+    text = output if isinstance(output, str) else None
+    if text is None and isinstance(output, dict):
+        inner = output.get("output")
+        text = inner if isinstance(inner, str) else None
+    if not text:
+        return False
+    return DENIAL_MARKER in text
+
+
+def _mcp_result_is_error(result: object) -> bool:
+    """True when an ``mcp_tool_call_end.result`` records a failed call.
+
+    The field is a Rust ``Result<CallToolResult, String>``: ``{"Err": …}``
+    on failure, ``{"Ok": {…, "isError": bool}}`` on success (isError True =
+    the tool itself reported an error). Only a boolean crosses out of here.
+    """
+    if not isinstance(result, dict):
+        return False
+    if "Err" in result:
+        return True
+    ok = result.get("Ok")
+    if isinstance(ok, dict):
+        return bool(ok.get("isError"))
+    return False
 
 
 def _output_is_error(output: object) -> bool:
@@ -360,6 +439,16 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
             # In-memory ONLY — the revert + approval detectors read
             # ``raw_input["command"]``; it is never serialized.
             craft["raw_input"] = {"command": cmd}
+    elif name == "exec":
+        # 0.14x JS runtime cell: shell commands ride inside the JS source as
+        # literal ``shell(...)`` arguments. Extract ONLY those literals
+        # (precision-first — see taxonomy) and join with newlines; the
+        # commit/revert segment splitters treat ``\n`` as a separator.
+        # In-memory ONLY, never serialized. Deliberately NOT fed to the
+        # approval-signature shell set (semantics fuzzier for a JS cell).
+        cmds = extract_shell_commands_from_exec_js(payload.get("input"))
+        if cmds:
+            craft["raw_input"] = {"command": "\n".join(cmds)}
     elif multi_agent_action(name) is not None:
         raw = _multi_agent_call_input(name, payload)
         if raw:
@@ -444,6 +533,23 @@ def _read(
             m = payload.get("model")
             if isinstance(m, str) and m:
                 current_model = m
+            continue
+
+        if top == "compacted":
+            # Context compaction marker — the ``compacted`` top-level row is
+            # persisted in ALL history modes (rollout policy.rs: "Persist
+            # Codex executive markers"), making it the canonical compaction
+            # signal. The legacy-mode ``event_msg.context_compacted`` that
+            # follows a few rows later describes the SAME compaction and is
+            # deliberately ignored below to avoid double-counting.
+            events.append(
+                Event(
+                    kind=EventKind.SYSTEM,
+                    session_id=session_id,
+                    timestamp_ms=ts_ms,
+                    is_auto_compaction_marker=True,
+                )
+            )
             continue
 
         if top == "session_meta":
@@ -585,6 +691,12 @@ def _read(
                         # User aborted/killed the call mid-run → exclude its
                         # call→result span from tool-runtime crediting.
                         is_aborted=_output_is_aborted(payload.get("output")),
+                        # User DECLINED the call at the approval prompt —
+                        # "… rejected by user" synthesized output (the
+                        # approval-request events themselves are transient
+                        # and never persisted). Feeds the approval-friction
+                        # (denial) metrics like Claude's DENIAL_MARKERS.
+                        is_denied=_output_is_denied(payload.get("output")),
                     )
                 )
                 continue
@@ -671,6 +783,130 @@ def _read(
                 # clear so a later turn's usage doesn't re-attach here.
                 last_assistant_idx = None
                 continue
+            # mcp_tool_call_end is the ONLY persisted MCP record in modern
+            # (0.14x) rollouts — MCP/connector tools are invoked from the JS
+            # ``exec`` runtime and never appear as function_call rows. Fold
+            # ``invocation.{server,tool}`` into the canonical
+            # ``mcp__server__tool`` name (same shape the old namespace fold
+            # produced) and emit a call+result pair so MCP counting, HITL MCP
+            # invocations, and tool errors all work. ``result`` is a Rust
+            # Result: {"Err": …} or {"Ok": {isError: bool}}. The payload's
+            # ``plugin_id`` (marketplace plugins) is not yet counted — no
+            # Event field carries it today.
+            if ptype == "mcp_tool_call_end":
+                invocation = payload.get("invocation")
+                server = tool = None
+                if isinstance(invocation, dict):
+                    server = invocation.get("server")
+                    tool = invocation.get("tool")
+                if (
+                    isinstance(server, str)
+                    and server
+                    and isinstance(tool, str)
+                    and tool
+                ):
+                    name = f"mcp__{server}__{tool}"
+                    call_id = payload.get("call_id")
+                    call_id = call_id if isinstance(call_id, str) else None
+                    # Marketplace-plugin marker (``<plugin>@<marketplace>``,
+                    # protocol.rs McpToolCallEndEvent.plugin_id) — absent on
+                    # plain connector/app calls.
+                    plugin_id = payload.get("plugin_id")
+                    plugin_id = (
+                        plugin_id
+                        if isinstance(plugin_id, str) and plugin_id
+                        else None
+                    )
+                    events.append(
+                        Event(
+                            kind=EventKind.ASSISTANT_TOOL,
+                            session_id=session_id,
+                            timestamp_ms=ts_ms,
+                            tool_name=name,
+                            tool_use_id=call_id,
+                            stop_reason="tool_use",
+                            plugin_name=plugin_id,
+                        )
+                    )
+                    turn_close_idx = len(events) - 1
+                    events.append(
+                        Event(
+                            kind=EventKind.TOOL_RESULT,
+                            session_id=session_id,
+                            timestamp_ms=ts_ms,
+                            tool_name=name,
+                            tool_use_id=call_id,
+                            is_error=_mcp_result_is_error(payload.get("result")),
+                        )
+                    )
+                continue
+
+            # patch_apply_end carries the file-edit footprint in modern
+            # (0.14x) rollouts — no ``apply_patch`` custom_tool_call exists
+            # there. Emit an apply_patch call+result pair with hashed paths +
+            # line counts (``changes`` parsed by taxonomy.parse_patch_changes;
+            # raw paths hashed IMMEDIATELY, never stored) and surface
+            # ``success: false`` as a tool error. Guarded on call_id NOT
+            # already seen as a custom_tool_call so a rollout that carries
+            # BOTH shapes never double-counts the edit.
+            if ptype == "patch_apply_end":
+                call_id = payload.get("call_id")
+                call_id = call_id if isinstance(call_id, str) else None
+                if call_id and call_id in call_names:
+                    continue
+                files = parse_patch_changes(payload.get("changes"))
+                craft: dict = {}
+                if files:
+                    from scripts.agents.claude.events import (
+                        _is_excluded_edit_path,
+                        _sha16 as _edit_sha16,
+                    )
+                    from scripts.plan_signals import is_plan_shaped_path
+
+                    edit_files = []
+                    is_plan_write = False
+                    for path, lines in files:
+                        edit_files.append(
+                            (_edit_sha16(path), lines, _is_excluded_edit_path(path))
+                        )
+                        if path.lower().endswith(".md") and is_plan_shaped_path(path):
+                            is_plan_write = True
+                    craft = {
+                        "edit_files": tuple(edit_files),
+                        "edit_file_path_hash": edit_files[0][0],
+                        "edit_line_count": edit_files[0][1],
+                        "is_excluded_edit_path": edit_files[0][2],
+                        "is_plan_file_write": is_plan_write,
+                    }
+                if call_id:
+                    call_names[call_id] = "apply_patch"
+                events.append(
+                    Event(
+                        kind=EventKind.ASSISTANT_TOOL,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        tool_name="apply_patch",
+                        tool_use_id=call_id,
+                        stop_reason="tool_use",
+                        **craft,
+                    )
+                )
+                turn_close_idx = len(events) - 1
+                events.append(
+                    Event(
+                        kind=EventKind.TOOL_RESULT,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        tool_name="apply_patch",
+                        tool_use_id=call_id,
+                        is_error=payload.get("success") is False,
+                    )
+                )
+                continue
+
+            # context_compacted: legacy-mode duplicate of the top-level
+            # ``compacted`` row handled above — deliberately ignored so one
+            # compaction never counts twice.
             # Other event_msg payloads: must not crash, no event emitted.
             continue
 

@@ -106,9 +106,13 @@ def assistant_message(
     reasoning: str | None = None,
     tool_calls: list[dict] | None = None,
     id: str | None = None,
+    routed_model: str | None = None,
 ) -> dict:
     """Assistant turn. ``tool_calls`` items: ``{"id": str, "name": str,
-    "args": dict}`` -> emitted as ``tool-call`` content items."""
+    "args": dict}`` -> emitted as ``tool-call`` content items.
+    ``routed_model`` emits the observed per-message
+    ``providerOptions: {"cursor": {"modelName": ...}}`` envelope (the
+    routed model Cursor records even for Auto sessions)."""
     content: list[dict] = []
     if reasoning is not None:
         content.append({"type": "reasoning", "text": reasoning})
@@ -124,6 +128,8 @@ def assistant_message(
     msg: dict = {"role": "assistant", "content": content}
     if id is not None:
         msg["id"] = id
+    if routed_model is not None:
+        msg["providerOptions"] = {"cursor": {"modelName": routed_model}}
     return msg
 
 

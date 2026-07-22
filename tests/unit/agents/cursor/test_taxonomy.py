@@ -174,3 +174,20 @@ def test_edit_footprint_falls_back_to_path_key():
 def test_edit_footprint_falls_back_to_target_file_key():
     h, _, _ = edit_footprint("Delete", {"target_file": "/x/y.py"})
     assert len(h) == 16
+
+
+def test_bundle_confirmed_ide_raw_names_normalize_to_pascal():
+    """The full ``aiserver.v1.ClientSideToolV2`` enum was extracted from the
+    shipped Cursor 2.x bundle (workbench.desktop.main.js) during the
+    2026-07-20 recon -- these IDE-raw snake_case names are CONFIRMED, not
+    speculative. Each folds onto the PascalCase canon."""
+    assert canonical_tool_name("edit_file_v2") == "StrReplace"
+    assert canonical_tool_name("read_file_v2") == "Read"
+    assert canonical_tool_name("list_dir_v2") == "Glob"
+    assert canonical_tool_name("file_search") == "Glob"
+    assert canonical_tool_name("ripgrep_search") == "Grep"
+    assert canonical_tool_name("ripgrep_raw_search") == "Grep"
+    assert canonical_tool_name("semantic_search_full") == "SemanticSearch"
+    assert canonical_tool_name("read_semsearch_files") == "SemanticSearch"
+    assert canonical_tool_name("task_v2") == "Task"
+    assert canonical_tool_name("web_fetch") == "WebFetch"

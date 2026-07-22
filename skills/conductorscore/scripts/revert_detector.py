@@ -24,11 +24,13 @@ import re
 # Shell-family tool names whose ``raw_input["command"]`` is checked for
 # reverts. ``Bash`` is Claude; ``shell`` (old ``{"command":[...]}`` arg shape),
 # ``exec_command`` (new ``{"cmd":...}`` shape), and ``shell_command`` are
-# Codex. The reader has already normalized Codex shell shapes to one command on
-# ``raw_input["command"]``, so this detector reuses the SAME regexes with no
-# per-provider branching.
+# Codex; ``Shell`` is Cursor's canonical PascalCase shell tool (see
+# ``scripts.agents.cursor.taxonomy``). The reader has already normalized every
+# provider's shell shape to one command on ``raw_input["command"]``, so this
+# detector reuses the SAME regexes with no per-provider branching. Kept in
+# lockstep with ``approval_counter._SHELL_TOOL_NAMES`` and ``commit_counter``.
 SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command"}
+    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
 )
 
 # Patterns that flag a Bash segment as a destructive revert. Each is
@@ -52,7 +54,10 @@ REVERT_PATTERNS: tuple[re.Pattern[str], ...] = (
 # not attempt to parse shell quoting — the cost of a false-positive on a
 # revert inside a quoted string is negligible vs. the win of catching
 # real chained reverts.)
-_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;)\s*")
+# ``\n`` is a separator too (matching commit_counter): multi-line Bash
+# commands and Codex 0.14x exec-JS extraction (which newline-joins multiple
+# ``shell(...)`` literals) each need per-line segment checks.
+_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;|\n)\s*")
 
 
 def is_revert_command(cmd: str) -> bool:

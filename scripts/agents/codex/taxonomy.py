@@ -185,7 +185,12 @@ PLAN_TOOL_NAMES: frozenset[str] = frozenset({"update_plan"})
 
 # Full closed set of Codex built-in tool names we recognize today. Both shell
 # arg shapes (``shell`` old, ``exec_command`` new) are distinct names but the
-# same Bash-analog category — both count as built-in invocations.
+# same Bash-analog category — both count as built-in invocations. Codex
+# 0.144.x replaced the shell-family tools with a JS runtime cell: ``exec``
+# (custom_tool_call whose ``input`` is raw JavaScript source, NOT a shell
+# command — it must never join SHELL_TOOL_NAMES or JS text would feed the
+# git-commit/revert regexes) and ``wait`` (function_call polling a running
+# cell: ``{cell_id, yield_time_ms, max_tokens}``).
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "shell",
@@ -196,8 +201,142 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "update_plan",
         "web_search",
         "view_image",
+        "exec",           # 0.144.x JS runtime cell (NOT shell — input is JS)
+        "wait",           # 0.144.x cell poll
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# 0.14x exec-cell shell extraction (precision-first).
+# ---------------------------------------------------------------------------
+#
+# Modern Codex runs shell inside a JS runtime cell: ``custom_tool_call`` name
+# ``exec`` whose ``input`` is raw JavaScript, with shell commands as LITERAL
+# arguments of ``shell(...)`` calls (observed live:
+# ``await shell(`git commit ...`)``). We extract ONLY literals — template
+# literals without ``${`` interpolation, plain single/double-quoted strings.
+# Dynamically-composed commands are deliberately missed: an undercount beats
+# a false commit/revert count. The extracted strings are consumed in-memory
+# only (``raw_input``), never serialized.
+
+_EXEC_SHELL_CALL_RE = re.compile(
+    r"""\bshell\s*\(\s*(?:
+        `((?:\\.|[^`\\])*)`     |   # template literal
+        "((?:\\.|[^"\\])*)"     |   # double-quoted string
+        '((?:\\.|[^'\\])*)'         # single-quoted string
+    )""",
+    re.VERBOSE | re.DOTALL,
+)
+
+_JS_ESCAPE_RE = re.compile(r"\\(.)")
+_JS_ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
+
+
+def _js_unescape(lit: str) -> str:
+    return _JS_ESCAPE_RE.sub(
+        lambda m: _JS_ESCAPE_MAP.get(m.group(1), m.group(1)), lit
+    )
+
+
+# The REAL invocation shape in live 0.144.5 rollouts (golden-data recon: 696
+# call sites vs 0 ``shell(`` sites): ``tools.exec_command({cmd: "<cmd>", …})``
+# — the old exec_command tool surfaced as a JS function with the same
+# ``{cmd:...}`` arg shape. The ``cmd`` key's literal is read ONLY within a
+# short window after a ``tools.exec_command(`` call site, so a bare ``cmd:``
+# key in unrelated data is never mistaken for a shell command.
+_EXEC_COMMAND_CALL_RE = re.compile(r"\btools\.exec_command\s*\(")
+_CMD_KEY_LITERAL_RE = re.compile(
+    r"""["']?cmd["']?\s*:\s*(?:
+        `((?:\\.|[^`\\])*)`     |   # template literal
+        "((?:\\.|[^"\\])*)"     |   # double-quoted string
+        '((?:\\.|[^'\\])*)'         # single-quoted string
+    )""",
+    re.VERBOSE | re.DOTALL,
+)
+_CMD_KEY_WINDOW = 800  # chars searched after a call site for its cmd key
+
+
+def extract_shell_commands_from_exec_js(src: object) -> tuple[str, ...]:
+    """Literal shell commands from a 0.14x ``exec`` cell's JS source.
+
+    Extracts, in source order, the string literals passed as (a) the first
+    ``cmd`` key after a ``tools.exec_command(`` call site (the shape live
+    rollouts actually use) and (b) ``shell(...)`` call arguments (kept for
+    other builds). Template literals containing ``${`` (dynamic
+    interpolation) are skipped — precision over recall. Non-string / empty
+    input yields ``()``.
+    """
+    if not isinstance(src, str) or not src:
+        return ()
+    found: list[tuple[int, str]] = []
+
+    def _literal(groups: tuple[str | None, ...]) -> str | None:
+        lit = next((g for g in groups if g is not None), None)
+        if lit is None or "${" in lit:
+            return None
+        cmd = _js_unescape(lit)
+        return cmd if cmd.strip() else None
+
+    for m in _EXEC_SHELL_CALL_RE.finditer(src):
+        cmd = _literal(m.groups())
+        if cmd is not None:
+            found.append((m.start(), cmd))
+    for site in _EXEC_COMMAND_CALL_RE.finditer(src):
+        window = src[site.end(): site.end() + _CMD_KEY_WINDOW]
+        m = _CMD_KEY_LITERAL_RE.search(window)
+        if m is None:
+            continue
+        cmd = _literal(m.groups())
+        if cmd is not None:
+            found.append((site.start(), cmd))
+    found.sort(key=lambda pair: pair[0])
+    return tuple(cmd for _pos, cmd in found)
+
+
+# A tool call the user DECLINED at the approval prompt. The approval-request
+# events themselves are transient (never persisted — rollout policy.rs), but
+# the synthesized output row carries a canonical marker: "exec command
+# rejected by user" (shell/unified_exec) or "patch rejected by user"
+# (apply_patch) — codex-rs/core/src/tools/events.rs. Free-form rejection
+# strings exist (ReviewDecision::Denied{rejection}) but the stable substring
+# across both canonical forms is "rejected by user".
+DENIAL_MARKER = "rejected by user"
+
+
+def parse_patch_changes(changes: object) -> list[tuple[str, int]]:
+    """Parse a ``patch_apply_end.changes`` dict into ``[(path, lines), …]``.
+
+    Modern (0.144.x) rollouts carry file edits on the legacy-persisted
+    ``event_msg.patch_apply_end`` row — ``changes`` maps each raw path to
+    ``{"type": "update", "unified_diff": …[, "move_path": …]}`` or
+    ``{"type": "add", "content": …}`` (``delete`` carries no body → 0 lines).
+    Lines are the ``+``/``-`` body lines of the unified diff (``@@``/``+++``/
+    ``---`` markers excluded) or the line count of an added file's content —
+    symmetric with :func:`parse_apply_patch_files`.
+
+    Privacy: the raw path is returned to the immediate caller ONLY so it can
+    be hashed at once; it is never placed on an Event or serialized.
+    """
+    if not isinstance(changes, dict):
+        return []
+    out: list[tuple[str, int]] = []
+    for path, change in changes.items():
+        if not isinstance(path, str) or not path or not isinstance(change, dict):
+            continue
+        lines = 0
+        diff = change.get("unified_diff")
+        content = change.get("content")
+        if isinstance(diff, str) and diff:
+            for raw_line in diff.splitlines():
+                if raw_line.startswith(("+++", "---", "@@")):
+                    continue
+                if raw_line.startswith(("+", "-")):
+                    lines += 1
+        elif isinstance(content, str) and content:
+            lines = content.count("\n") + (0 if content.endswith("\n") else 1)
+        out.append((path, lines))
+    return out
 
 
 _MULTI_AGENT_TOOL_RE = re.compile(
@@ -219,6 +358,7 @@ def multi_agent_action(name: str | None) -> str | None:
 
 __all__ = [
     "CODEX_SKILL_MD_RE",
+    "DENIAL_MARKER",
     "EDIT_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
     "PLAN_TOOL_NAMES",
@@ -227,5 +367,6 @@ __all__ = [
     "multi_agent_action",
     "normalize_shell_command",
     "parse_apply_patch_files",
+    "parse_patch_changes",
     "skill_names_from_shell_command",
 ]

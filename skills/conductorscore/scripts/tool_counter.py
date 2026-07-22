@@ -345,11 +345,20 @@ def count_codex_tools(events) -> ToolCounts:
     skills: set[str] = set()
     skill_invocations = 0
     skills_by_name: dict[str, int] = {}
+    plugin_invocations = 0
+    plugins_by_name: dict[str, int] = {}
     diagnostics: dict[str, int] = {}
 
     for e in events:
         if e.kind != EventKind.ASSISTANT_TOOL:
             continue
+        # Marketplace-plugin marker (Codex ``mcp_tool_call_end.plugin_id``,
+        # ``<plugin>@<marketplace>``) — RAW name tally, same wire fields
+        # Claude's ``<command-name>``-sourced plugin counts use.
+        plugin = getattr(e, "plugin_name", None)
+        if isinstance(plugin, str) and plugin:
+            plugin_invocations += 1
+            plugins_by_name[plugin] = plugins_by_name.get(plugin, 0) + 1
         name = e.tool_name
         if not isinstance(name, str) or not name:
             continue
@@ -373,15 +382,15 @@ def count_codex_tools(events) -> ToolCounts:
             # Unknown multi-agent shape (future version / action) — surface it
             # so drift is detected, not silently zero-counted.
             diagnostics[name] = diagnostics.get(name, 0) + 1
-        elif "__" in name:
+        elif is_mcp_tool_name(name):
             # MCP session invocation. Codex names MCP tools as
             # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix is
             # dropped when there's no name collision); both carry the ``server``
-            # via the ``__`` separator. A ``__`` in a non-builtin tool name is
-            # the structural MCP signal — bare single-word tools never infer
-            # MCP. (Bare provider tools that drop the server prefix entirely,
-            # e.g. ``list_deployments``, are unattributable and fall through to
-            # diagnostics.)
+            # via the ``__`` separator — the shared :func:`is_mcp_tool_name`
+            # predicate (also used by the HITL counters) is the single source
+            # of truth for that rule. (Bare provider tools that drop the
+            # server prefix entirely, e.g. ``list_deployments``, are
+            # unattributable and fall through to diagnostics.)
             mcp.add(name)
         else:
             # Unknown Codex tool kind — local diagnostics only, never uploaded.
@@ -395,6 +404,8 @@ def count_codex_tools(events) -> ToolCounts:
         agent_dispatches=agent_dispatches,
         skill_invocations=skill_invocations,
         skill_invocations_by_name=skills_by_name,
+        plugin_invocations=plugin_invocations,
+        plugin_invocations_by_name=plugins_by_name,
         codex_unknown_tool_diagnostics=diagnostics,
     )
 
@@ -452,9 +463,10 @@ def count_cursor_tools(events) -> ToolCounts:
         name = e.tool_name
         if not isinstance(name, str) or not name:
             continue
-        if "__" in name:
+        if is_mcp_tool_name(name):
             # MCP session invocation — same structural ``__`` signal Codex
-            # uses; a bare single-word tool is never guessed as MCP.
+            # uses (shared :func:`is_mcp_tool_name` predicate); a bare
+            # single-word tool is never guessed as MCP.
             mcp.add(name)
         elif name in KNOWN_TOOL_NAMES:
             builtin.add(name)
@@ -481,6 +493,26 @@ def count_cursor_tools(events) -> ToolCounts:
 # ---------------------------------------------------------------------------
 
 
+def is_mcp_tool_name(name: str | None) -> bool:
+    """Structural MCP-name test shared by the distinct-set and HITL counters.
+
+    MCP tools are named ``mcp__server__tool`` (Claude, and Codex when the
+    prefix survives) OR ``server__tool`` (Codex drops the ``mcp__`` prefix
+    when there's no collision; Cursor MCP names likewise carry ``__`` with no
+    guaranteed prefix). A ``__`` in the name is the structural signal — bare
+    single-word / single-underscore tools never infer MCP. Codex
+    ``multi_agent_v*__*`` tools carry ``__`` but are agent dispatch, not MCP
+    (the per-provider counters route them before their ``__`` check), so they
+    are excluded here too. Keeping ONE predicate stops the HITL counters
+    drifting from the distinct-set rules again.
+    """
+    if not name:
+        return False
+    if name.startswith("multi_agent_"):
+        return False
+    return "__" in name
+
+
 def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
     """Count of MCP tool calls whose timestamp falls in a HITL minute.
 
@@ -490,9 +522,10 @@ def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
     classifier marked as HITL. Calls outside that set (AFK / Idle /
     Cron) are ignored.
 
-    Only ``ASSISTANT_TOOL`` events with a tool name starting with
-    ``mcp__`` are counted; non-MCP tools and ``TOOL_RESULT`` events
-    never contribute.
+    Only ``ASSISTANT_TOOL`` events whose tool name passes
+    :func:`is_mcp_tool_name` (``mcp__``-prefixed or prefix-dropped
+    ``server__tool``) are counted; non-MCP tools and ``TOOL_RESULT``
+    events never contribute.
     """
     if not hitl_minutes:
         return 0
@@ -500,7 +533,7 @@ def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
     for e in events:
         if e.kind.name != "ASSISTANT_TOOL":
             continue
-        if not e.tool_name or not e.tool_name.startswith("mcp__"):
+        if not is_mcp_tool_name(e.tool_name):
             continue
         if (e.timestamp_ms // 60_000) in hitl_minutes:
             count += 1
@@ -523,7 +556,7 @@ def count_hitl_mcp_invocations_by_name(
     for e in events:
         if e.kind.name != "ASSISTANT_TOOL":
             continue
-        if not e.tool_name or not e.tool_name.startswith("mcp__"):
+        if not is_mcp_tool_name(e.tool_name):
             continue
         if (e.timestamp_ms // 60_000) in hitl_minutes:
             counts[e.tool_name] = counts.get(e.tool_name, 0) + 1

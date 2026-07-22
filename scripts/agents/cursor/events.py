@@ -24,9 +24,11 @@ on ``event.raw_input["command"]`` regardless of which agent produced it. See
 be a privacy-relevant cross-provider drift risk.
 
 ``userDecision == "rejected"`` (mapped to ``TOOL_RESULT.is_denied``) is
-SYNTHETIC/UNVERIFIED -- see the docstring on ``_tool_events`` below and
-``CURSOR_FORMAT.md`` § "Rejection/denial shapes actually found": no such
-shape was ever observed in live recon.
+CONFIRMED from the shipped Cursor 2.x bundle source (2026-07-20 recon):
+rejecting a tool sets ``userDecision:"rejected", status:"cancelled"`` --
+see ``CURSOR_FORMAT.md`` § "Rejection/denial shapes actually found"
+(addendum). A live-store example is still unobserved (recon sessions ran
+auto-approved), so keep fixtures for this branch marked synthetic.
 
 Soft-fail contract (never raises): a corrupt/unopenable DB, a missing
 ``composerData`` doc, or a single malformed bubble each degrade gracefully
@@ -133,13 +135,17 @@ def _tool_events(session_id: str, ts: int, model: str | None, tfd: dict) -> list
     so the pair matches the same id vocabulary the tool actually reports.
 
     Rejection handling (``userDecision == "rejected"`` or ``status`` in
-    ``{"rejected", "cancelled", "denied"}`` -> ``TOOL_RESULT.is_denied``) is
-    SYNTHETIC/UNVERIFIED: live recon searched the one fully-populated
-    composer and found only ``"completed"``/``"error"`` statuses -- no
-    rejection/denial shape was ever observed (CURSOR_FORMAT.md §
-    "Rejection/denial shapes actually found"). This branch exists purely so
-    denial-counting has a fixture to exercise; it must not be treated as
-    confirmed ground truth.
+    ``{"rejected", "cancelled", "denied"}`` -> ``TOOL_RESULT.is_denied``):
+    CONFIRMED from the shipped Cursor 2.x bundle source (2026-07-20 recon) --
+    rejecting a tool sets, verbatim, ``userDecision:"rejected",
+    status:"cancelled"`` (seen for the terminal + MCP tool paths; the
+    approval vocabulary in agent code is ``skipped|rejected|cancelled``).
+    The full status vocabulary is ``completed, error, loading, pending,
+    running, cancelled`` (+ ``submitted`` for askQuestion). A live-store
+    rejection row is still unobserved (recon sessions ran auto-approved), so
+    fixtures for this branch stay marked synthetic -- but the predicate
+    itself is grounded in source, no longer a guess. See CURSOR_FORMAT.md §
+    "Rejection/denial shapes actually found" (addendum).
     """
     name = taxonomy.canonical_tool_name(str(tfd.get("name") or ""))
     raw_tool_use_id = tfd.get("toolCallId")

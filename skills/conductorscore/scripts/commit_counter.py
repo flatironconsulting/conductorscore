@@ -28,9 +28,13 @@ from scripts.core.normalized import EventKind
 # Shell-family tool names whose ``raw_input["command"]`` carries a command
 # string: ``Bash`` (Claude); ``shell`` / ``exec_command`` (Codex, both arg
 # shapes already normalized by the reader); ``shell_command`` (observed Codex
-# shell-exec variant).
+# shell-exec variant); ``Shell`` (Cursor's canonical PascalCase shell tool —
+# see ``scripts.agents.cursor.taxonomy``; kept in lockstep with
+# ``approval_counter._SHELL_TOOL_NAMES`` and ``revert_detector``); ``exec``
+# (Codex 0.14x JS cell — the reader extracts literal ``shell(...)`` commands
+# from the JS source and newline-joins them onto ``raw_input["command"]``).
 _SHELL_TOOLS: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command"}
+    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
 )
 
 # A commit-creating ``git`` invocation: the program ``git`` followed (within

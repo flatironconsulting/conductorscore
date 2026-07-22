@@ -55,13 +55,28 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
 
 # Aliases folding vocabularies (a) IDE-raw and (c) legacy snake_case onto the
 # canon (b). Keys are the alias strings actually observed or explicitly
-# named in recon; do NOT add speculative IDE-raw names for tools that were
-# not exercised (Write/StrReplace/Delete/Grep/TodoWrite's IDE-raw forms are
-# UNOBSERVED).
+# named in recon. The IDE-raw set is no longer limited to the two
+# live-exercised names: the 2026-07-20 recon extracted the FULL
+# ``aiserver.v1.ClientSideToolV2`` enum from the shipped Cursor 2.x bundle
+# (workbench.desktop.main.js), so the ``*_v2``/search-family raw names below
+# are CONFIRMED from source, not speculation. Enum names with no canonical
+# family (todo_read, await_task, write_shell_stdin, reapply, ...) stay
+# unmapped on purpose -- they pass through to diagnostics.
 _ALIAS_TO_CANON: dict[str, str] = {
-    # (a) IDE raw internal names -- CONFIRMED, the only two observed.
+    # (a) IDE raw internal names -- confirmed from the bundle tool enum
+    # (run_terminal_command_v2 + glob_file_search were also live-observed).
     "run_terminal_command_v2": "Shell",
     "glob_file_search": "Glob",
+    "edit_file_v2": "StrReplace",
+    "read_file_v2": "Read",
+    "list_dir_v2": "Glob",
+    "file_search": "Glob",
+    "ripgrep_search": "Grep",
+    "ripgrep_raw_search": "Grep",
+    "semantic_search_full": "SemanticSearch",
+    "read_semsearch_files": "SemanticSearch",
+    "task_v2": "Task",
+    "web_fetch": "WebFetch",
     # (c) legacy community snake_case -- best-effort convenience layer.
     "run_terminal_cmd": "Shell",
     "edit_file": "StrReplace",

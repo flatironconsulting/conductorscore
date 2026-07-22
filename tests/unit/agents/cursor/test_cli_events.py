@@ -128,6 +128,58 @@ def test_last_used_model_absent_key_maps_to_none(tmp_path):
     assert a.model is None
 
 
+def test_provider_options_routed_model_overrides_meta_model(tmp_path):
+    """Assistant blobs carry the ROUTED model per message under
+    ``providerOptions.cursor.modelName`` (2026-07-20 recon: confirmed live,
+    e.g. an Auto session whose meta says ``lastUsedModel: "default"`` records
+    ``cursor-grok-4.5-high-fast`` per message). The per-message value is more
+    specific than the session-level ``lastUsedModel`` and must win -- this is
+    the ONLY local source of the real model for Auto-routed sessions."""
+    db = _db(tmp_path, {
+        "agentId": "agent-routed", "createdAt": T0, "lastUsedModel": "default",
+        "messages": [
+            user_message("hi"),
+            assistant_message(text="hello", routed_model="cursor-grok-4.5-high-fast"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-routed", want_text=False)[0]
+    [a] = [e for e in evs if e.kind is EventKind.ASSISTANT_TEXT]
+    assert a.model == "cursor-grok-4.5-high-fast"
+
+
+def test_provider_options_on_content_item_recovered(tmp_path):
+    """Golden-data shape (live 2026-07-20): ``modelName`` sits on a CONTENT
+    ITEM's ``providerOptions.cursor`` (observed on ``reasoning`` items) --
+    the top-level message ``providerOptions.cursor`` carries only ids
+    (requestId / modelProviderMessageId). The reader must scan content items
+    too."""
+    msg = assistant_message(reasoning="thinking", text="hello")
+    # Top level: only an id (the real shape) -- NOT a model name.
+    msg["providerOptions"] = {"cursor": {"modelProviderMessageId": "msg_x"}}
+    msg["content"][0]["providerOptions"] = {
+        "cursor": {"modelName": "cursor-grok-4.5-high-fast"}
+    }
+    db = _db(tmp_path, {
+        "agentId": "agent-item", "createdAt": T0, "lastUsedModel": "default",
+        "messages": [msg],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-item", want_text=False)[0]
+    texts = [e for e in evs if e.kind is EventKind.ASSISTANT_TEXT]
+    assert texts and texts[0].model == "cursor-grok-4.5-high-fast"
+
+
+def test_provider_options_default_sentinel_ignored(tmp_path):
+    """A routed-model value of the "default" sentinel is NOT a model id --
+    the session-level model (here a real one) must be kept."""
+    db = _db(tmp_path, {
+        "agentId": "agent-sent", "createdAt": T0, "lastUsedModel": "composer-2.5",
+        "messages": [assistant_message(text="hello", routed_model="default")],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-sent", want_text=False)[0]
+    [a] = evs
+    assert a.model == "composer-2.5"
+
+
 # ---------------------------------------------------------------------------
 # Ordering: user -> assistant(reasoning+text+tool-call) -> tool(result),
 # walked from root (newest) and reversed to oldest -> newest.
@@ -562,3 +614,112 @@ def test_reader_opens_db_exactly_once(tmp_path, monkeypatch):
     evs, _ = cli_events.read_cli_events_and_text(db, "agent-17", want_text=True)
     assert len(evs) >= 3
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-turn <timestamp> anchors (2026-07-20 recon): every CLI user message
+# body starts with an injected tag like
+#   <timestamp>Friday, Jul 17, 2026, 1:06 PM (UTC-4)</timestamp>
+# The reader must use parsed tags as REAL per-turn anchors (interpolating
+# un-anchored messages between them) instead of the blind even spread, and
+# must strip the tag from the hashed prose like other injected wrappers.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+
+
+def _tag_for(epoch_ms: int, offset_hours: int = -4) -> str:
+    """Format an epoch-ms instant the way Cursor's injected tag does, in the
+    given UTC offset (default UTC-4, the observed live shape)."""
+    local = _dt.datetime.fromtimestamp(
+        epoch_ms / 1000, _dt.timezone(_dt.timedelta(hours=offset_hours))
+    )
+    day = local.strftime("%A")
+    mon = local.strftime("%b")
+    hour12 = local.strftime("%I").lstrip("0") or "12"
+    ampm = local.strftime("%p")
+    off = f"UTC{offset_hours:+d}" if offset_hours else "UTC"
+    return (
+        f"<timestamp>{day}, {mon} {local.day}, {local.year}, "
+        f"{hour12}:{local.strftime('%M')} {ampm} ({off})</timestamp>"
+    )
+
+
+def test_timestamp_tags_anchor_user_turns_and_interpolate_between(tmp_path):
+    """Two tagged user turns anchor at their tag times (minute precision);
+    the assistant message between them lands at the midpoint; the ends stay
+    anchored at createdAt / updatedAtMs.
+
+    Anchors are minute-ALIGNED epochs: the tag format carries no seconds, so
+    only minute-aligned instants round-trip exactly through format+parse."""
+    t_u1 = (T0 // MS + 4) * MS
+    t_u2 = (T0 // MS + 10) * MS
+    db = _db(tmp_path, {
+        "agentId": "agent-anchor", "createdAt": T0, "updatedAt": T0 + 20 * MS,
+        "messages": [
+            user_message(_tag_for(t_u1) + "first question"),
+            assistant_message(text="working"),
+            user_message(_tag_for(t_u2) + "second question"),
+            assistant_message(text="done"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-anchor", want_text=False)[0]
+    ts = [e.timestamp_ms for e in evs]
+    assert ts == sorted(ts)
+    users = [e for e in evs if e.kind is EventKind.USER]
+    assert users[0].timestamp_ms == t_u1
+    assert users[1].timestamp_ms == t_u2
+    # Assistant between the anchors sits at their midpoint.
+    mid = [e for e in evs if e.kind is EventKind.ASSISTANT_TEXT][0]
+    assert mid.timestamp_ms == (t_u1 + t_u2) // 2
+    # Last message still anchored at the real session end.
+    assert ts[-1] == T0 + 20 * MS
+
+
+def test_timestamp_tag_stripped_from_hashed_text(tmp_path):
+    """The injected tag is Cursor chrome, not user prose -- the hash and the
+    in-memory side-map text must exclude it."""
+    tag = _tag_for(T0 + MS)
+    db = _db(tmp_path, {
+        "agentId": "agent-strip", "createdAt": T0,
+        "messages": [user_message(tag + SECRET_TEXT)],
+    })
+    evs, text_map = cli_events.read_cli_events_and_text(
+        db, "agent-strip", want_text=True
+    )
+    [u] = evs
+    expected = hashlib.sha256(SECRET_TEXT.encode()).hexdigest()[:16]
+    assert u.user_text_hash == expected
+    assert text_map[id(u)] == SECRET_TEXT
+
+
+def test_malformed_timestamp_tag_falls_back_to_spread(tmp_path):
+    """An unparseable tag body degrades to the existing even spread -- never
+    a crash, never a bogus anchor."""
+    db = _db(tmp_path, {
+        "agentId": "agent-bad", "createdAt": T0, "updatedAt": T0 + 20 * MS,
+        "messages": [
+            user_message("<timestamp>not a real date</timestamp>hello"),
+            assistant_message(text="working"),
+            assistant_message(text="done"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-bad", want_text=False)[0]
+    ts = [e.timestamp_ms for e in evs]
+    assert min(ts) == T0
+    assert max(ts) == T0 + 20 * MS
+
+
+def test_out_of_order_anchor_clamped_monotonic(tmp_path):
+    """A second anchor EARLIER than the first (clock skew) must not produce
+    backwards timestamps."""
+    db = _db(tmp_path, {
+        "agentId": "agent-skew", "createdAt": T0, "updatedAt": T0 + 20 * MS,
+        "messages": [
+            user_message(_tag_for(T0 + 10 * MS) + "later first"),
+            user_message(_tag_for(T0 + 5 * MS) + "earlier second"),
+        ],
+    })
+    evs = cli_events.read_cli_events_and_text(db, "agent-skew", want_text=False)[0]
+    ts = [e.timestamp_ms for e in evs]
+    assert ts == sorted(ts)

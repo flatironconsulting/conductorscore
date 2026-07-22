@@ -56,6 +56,7 @@ session is skipped; the rest of the session is still read.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import re
@@ -133,6 +134,108 @@ def _session_end_ms(db_path: Path) -> int | None:
         return None
     updated = doc.get("updatedAtMs")
     return updated if isinstance(updated, int) and updated > 0 else None
+
+
+# Injected per-turn timestamp tag (2026-07-20 recon, confirmed live): every
+# CLI user message body starts with e.g.
+#   <timestamp>Friday, Jul 17, 2026, 1:06 PM (UTC-4)</timestamp>
+# The tag is Cursor chrome, not user prose: it is parsed as a REAL per-turn
+# anchor and stripped before hashing.
+_TIMESTAMP_TAG_RE = re.compile(r"<timestamp>(.*?)</timestamp>", re.DOTALL)
+_TAG_BODY_RE = re.compile(
+    r"^\s*[A-Za-z]+,\s*([A-Za-z]{3})[a-z.]*\s+(\d{1,2}),\s*(\d{4}),\s*"
+    r"(\d{1,2}):(\d{2})\s*([AP]M)\s*\(UTC([+-]\d{1,2})?(?::(\d{2}))?\)\s*$"
+)
+_MONTHS = {
+    m: i
+    for i, m in enumerate(
+        "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1
+    )
+}
+
+
+def _parse_timestamp_tag_body(body: str) -> int | None:
+    """Parse the tag's English-formatted local time + UTC offset to epoch ms.
+
+    Hand-rolled (no ``strptime``) so the month/day-name parse is
+    locale-independent. Returns ``None`` on any mismatch — the caller then
+    degrades to the even-spread fallback, never a bogus anchor."""
+    m = _TAG_BODY_RE.match(body)
+    if not m:
+        return None
+    mon, day, year, hour, minute, ampm, off_h, off_m = m.groups()
+    month = _MONTHS.get(mon.title())
+    if month is None:
+        return None
+    try:
+        h = int(hour) % 12
+        if ampm == "PM":
+            h += 12
+        offset_min = 0
+        if off_h is not None:
+            offset_min = int(off_h) * 60
+            if off_m is not None:
+                offset_min += (1 if offset_min >= 0 else -1) * int(off_m)
+        local = dt.datetime(
+            int(year), month, int(day), h, int(minute),
+            tzinfo=dt.timezone(dt.timedelta(minutes=offset_min)),
+        )
+        return int(local.timestamp() * 1000)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _anchor_ts_ms(msg: dict) -> int | None:
+    """Epoch-ms anchor from a user message's injected ``<timestamp>`` tag,
+    or ``None`` (non-user message, no tag, unparseable body)."""
+    if msg.get("role") != "user":
+        return None
+    text = _message_text(msg.get("content"))
+    if not text:
+        return None
+    m = _TIMESTAMP_TAG_RE.search(text)
+    if not m:
+        return None
+    return _parse_timestamp_tag_body(m.group(1))
+
+
+def _message_timestamps(
+    messages: list, base_ts: int, end_ts: int | None, n: int
+) -> list[int] | None:
+    """Per-message timestamps from ``<timestamp>`` anchors, or ``None`` when
+    no message carries a parseable tag (caller keeps the legacy spread).
+
+    Anchored user turns land on their tag times (clamped monotonic against
+    prior anchors — clock skew must not produce backwards time); un-anchored
+    messages interpolate EVENLY between the surrounding anchors; the ends
+    stay anchored at ``base_ts`` (createdAt) / ``end_ts`` (updatedAtMs) when
+    those bound the anchor range."""
+    anchors: dict[int, int] = {}
+    prev = base_ts
+    for i, msg in enumerate(messages):
+        a = _anchor_ts_ms(msg) if isinstance(msg, dict) else None
+        if a is not None:
+            a = max(a, prev)
+            anchors[i] = a
+            prev = a
+    if not anchors:
+        return None
+    first_key = min(anchors)
+    if first_key != 0:
+        anchors[0] = min(base_ts, anchors[first_key])
+    last_key = max(anchors)
+    if last_key != n - 1:
+        tail = anchors[last_key]
+        anchors[n - 1] = end_ts if isinstance(end_ts, int) and end_ts > tail else tail
+    ts = [0] * n
+    keys = sorted(anchors)
+    for a_idx, b_idx in zip(keys, keys[1:]):
+        lo, hi = anchors[a_idx], anchors[b_idx]
+        span = b_idx - a_idx
+        for k in range(a_idx, b_idx):
+            ts[k] = lo + round((hi - lo) * (k - a_idx) / span)
+    ts[keys[-1]] = anchors[keys[-1]]
+    return ts
 
 
 def _message_ts(base_ts: int, end_ts: int | None, i: int, n: int) -> int:
@@ -521,6 +624,36 @@ def _events_for_message(
     content = msg.get("content")
     events: list[Event] = []
 
+    # Per-message ROUTED model: assistant blobs carry the model Cursor
+    # actually routed to under ``providerOptions.cursor.modelName`` -- even
+    # for Auto sessions whose ``meta.lastUsedModel`` is the "default"
+    # sentinel (2026-07-20 recon, confirmed live; see CURSOR_FORMAT.md
+    # addendum). Golden-data shape: the top-level message providerOptions
+    # carries only ids (requestId / modelProviderMessageId); ``modelName``
+    # sits on a CONTENT ITEM's providerOptions (observed on ``reasoning``
+    # items) -- so scan the top level first, then the items. More specific
+    # than the session-level model, so it wins; the sentinel filter
+    # (``_model_or_none``) still applies.
+    def _routed_model(container: object) -> str | None:
+        if not isinstance(container, dict):
+            return None
+        po = container.get("providerOptions")
+        if not isinstance(po, dict):
+            return None
+        cursor_po = po.get("cursor")
+        if not isinstance(cursor_po, dict):
+            return None
+        return _model_or_none(cursor_po.get("modelName"))
+
+    routed = _routed_model(msg)
+    if routed is None and isinstance(content, list):
+        for item in content:
+            routed = _routed_model(item)
+            if routed is not None:
+                break
+    if routed is not None:
+        model = routed
+
     if role == "system":
         # Mirrors the IDE/Codex readers: system rows carry no per-turn
         # signal this scanner scores on -- skipped, not an error.
@@ -528,6 +661,11 @@ def _events_for_message(
 
     if role == "user":
         raw_text = _message_text(content)
+        # The injected <timestamp> tag is Cursor chrome, not user prose —
+        # it was consumed as a timing anchor and must not pollute the hash
+        # or the in-memory side-map text.
+        if raw_text:
+            raw_text = _TIMESTAMP_TAG_RE.sub("", raw_text)
         text = _strip_user_query_wrapper(raw_text) if raw_text else raw_text
         token_count = _approx_token_count(text)
         # Late import to avoid a cycle: plan_signals imports Event from
@@ -632,13 +770,21 @@ def read_cli_events_and_text(
         end_ts = _session_end_ms(db_path)
         n_msgs = len(messages)
 
+        # Per-turn <timestamp> anchors (when present) beat the blind even
+        # spread; sessions without parseable tags keep the legacy behavior.
+        ts_list = _message_timestamps(messages, base_ts, end_ts, n_msgs)
+
         events: list[Event] = []
         text_map: dict[int, str] = {}
         for i, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 continue
             try:
-                ts = _message_ts(base_ts, end_ts, i, n_msgs)
+                ts = (
+                    ts_list[i]
+                    if ts_list is not None
+                    else _message_ts(base_ts, end_ts, i, n_msgs)
+                )
                 events.extend(
                     _events_for_message(
                         session_id, ts, model, msg,

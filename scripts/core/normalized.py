@@ -97,6 +97,10 @@ class Event:
     # v0.4 — plan signal + edit counter fields. All optional, default-safe.
     is_structured_prompt: bool = False
     skill_name: str | None = None
+    # ASSISTANT_TOOL (Codex ``mcp_tool_call_end``): the marketplace-plugin id
+    # (``<plugin>@<marketplace>``) when the MCP tool was provided by an
+    # installed plugin. Categorical name only — feeds plugin_invocations.
+    plugin_name: str | None = None
     todo_count: int = 0
     is_plan_file_write: bool = False
     is_plan_md_read: bool = False
