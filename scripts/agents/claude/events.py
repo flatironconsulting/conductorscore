@@ -11,11 +11,13 @@ entirely; only structural metadata survives.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
+from scripts.core.text import approx_token_count as _approx_token_count
+from scripts.core.text import flatten_content as _flatten_text
+from scripts.core.text import sha16 as _sha16
 from scripts.agents.claude.discovery import _parse_ts_ms
 from scripts.agents.claude.taxonomy import (
     AUTO_COMPACT_BANNER,
@@ -27,36 +29,6 @@ from scripts.agents.claude.taxonomy import (
     SYNTHETIC_SENTINELS,
     SYNTHETIC_TAG_RE,
 )
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
-
-
-def _approx_token_count(text: str) -> int:
-    """Rough token estimate — one token ~= 4 characters. Stdlib only, no model."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
-
-
-def _flatten_text(content) -> str:
-    """Reduce a Claude content field (string or list of blocks) to a flat string.
-
-    Used ONLY for hashing + token counting on user messages. The returned
-    string never escapes this module.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts)
-    return ""
 
 
 def _usage_tokens(message: dict) -> tuple[int, int]:

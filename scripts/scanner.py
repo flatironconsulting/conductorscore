@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import time
 
 from scripts.agents import consent as consent_mod
@@ -8,6 +7,7 @@ from scripts.agents.registry import adapters_for
 from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
 from scripts.config_scanner import scan_config
+from scripts.core.text import sha16 as _sha16
 from scripts.edit_counter import count_edits
 from scripts.events import (
     EventKind,
@@ -64,10 +64,6 @@ PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 # NOT a claim that the session ran a specific Composer version. Claude/Codex
 # sessions never hit this path (they always resolve a concrete model id).
 _CURSOR_UNRESOLVED_MODEL = "composer"
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
 def _merge_config_counts(a: ConfigCounts, b: ConfigCounts) -> ConfigCounts:

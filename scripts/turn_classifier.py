@@ -23,13 +23,13 @@ Anchors:
 
 from __future__ import annotations
 
-import datetime as _dt
 import json as _json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from scripts.agents.codex.taxonomy import multi_agent_action
+from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
 from scripts.events import Event, EventKind
 
 
@@ -388,17 +388,6 @@ def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
         if end > start:
             spans[sid] = (start, end)
     return spans
-
-
-def _parse_iso_ts_ms(ts) -> int | None:
-    if not isinstance(ts, str):
-        return None
-    try:
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        return int(_dt.datetime.fromisoformat(ts).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
 
 
 def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:

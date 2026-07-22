@@ -34,6 +34,11 @@ from scripts.events import Event, EventKind
 # already parsed its V4A headers into the per-file ``edit_files`` footprint
 # (hashed paths + line estimates), so this aggregator stays a pure,
 # provider-neutral counter.
+#
+# NOTE: deliberately NOT ``scripts.core.shell.EDIT_TOOL_NAMES`` — this set
+# additionally includes ``apply_patch`` (Codex's multi-file edit tool),
+# a confirmed divergence (task-2 audit); using the narrower shared set here
+# would silently drop all Codex edit counting.
 EDIT_TOOLS: frozenset[str] = frozenset(
     {"Edit", "Write", "MultiEdit", "apply_patch", "StrReplace", "Delete"}
 )

@@ -43,12 +43,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
-from scripts.agents.claude.events import _approx_token_count, _sha16
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
 )
 from scripts.agents.cursor.store import is_cursor_locator as _is_cursor_locator
+from scripts.core.text import approx_token_count as _approx_token_count
+from scripts.core.text import flatten_content
+from scripts.core.text import sha16 as _sha16
+from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.events import EventKind, _strip_synthetic_content, read_events
 from scripts.turn_classifier import (
     ASK_USER_QUESTION_TOOL,
@@ -262,29 +265,11 @@ def _redact_panels(
 
 
 def _parse_ts_ms(d: dict) -> int | None:
-    ts = d.get("timestamp")
-    if not isinstance(ts, str):
-        return None
-    try:
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
+    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def _flatten_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts)
-    return ""
+    return flatten_content(content)
 
 
 def _truncate(s: str, n: int = TRUNCATE_CHARS) -> str:

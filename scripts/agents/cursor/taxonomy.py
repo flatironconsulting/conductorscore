@@ -30,10 +30,11 @@ Cursor events reader (task 1.5) and tool counting (task 1.6).
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from os.path import basename
+
+from scripts.core.text import sha16 as _sha16
 
 # ---------------------------------------------------------------------------
 # Canonical tool-name families (PascalCase -- the CLI/JSONL vocabulary).
@@ -172,10 +173,6 @@ def _is_excluded_edit_path(path: str) -> bool:
     if any(part in norm for part in EXCLUDED_EDIT_DIR_PARTS):
         return True
     return basename(norm) in EXCLUDED_EDIT_BASENAMES
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 
 def _line_count(args: dict) -> int:

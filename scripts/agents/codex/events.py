@@ -29,14 +29,15 @@ the Event. ``cwd`` (project path) is sensitive and is never serialized.
 """
 from __future__ import annotations
 
-import datetime as dt
-import hashlib
 import json
 import re
 from dataclasses import replace
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
+from scripts.core.text import approx_token_count as _approx_token_count
+from scripts.core.text import sha16 as _sha16
+from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.agents.codex.taxonomy import (
     DENIAL_MARKER,
     EDIT_TOOL_NAMES,
@@ -53,17 +54,6 @@ from scripts.agents.codex.taxonomy import (
 _CODEX_TOP_TYPES = frozenset(
     {"session_meta", "turn_context", "response_item", "event_msg"}
 )
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
-
-
-def _approx_token_count(text: str) -> int:
-    """Rough token estimate — one token ~= 4 characters. Stdlib only."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
 
 
 def _zstd_decompress(data: bytes) -> bytes | None:
@@ -130,15 +120,7 @@ def _iter_rows(jsonl_path: Path):
 
 def _parse_ts_ms(d: dict) -> int | None:
     """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
-    ts = d.get("timestamp")
-    if not isinstance(ts, str):
-        return None
-    try:
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
+    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def is_codex_jsonl(jsonl_path: Path) -> bool:

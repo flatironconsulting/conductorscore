@@ -39,30 +39,20 @@ composer gap"), not an error -- it also returns ``([], {})``.
 """
 from __future__ import annotations
 
-import datetime as dt
-import hashlib
 import json
 from pathlib import Path
 
 from scripts.agents.cursor import taxonomy
 from scripts.agents.cursor.store import kv_get_json, open_ro, parse_locator
 from scripts.core.normalized import Event, EventKind
+from scripts.core.text import approx_token_count as _approx_token_count
+from scripts.core.text import sha16 as _sha16
+from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ms
 
 # "default" is Cursor's placeholder/alias model string (unresolved model
 # selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
 # strings", Decision 5. It must never be reported as a real model.
 _MODEL_SENTINEL = "default"
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
-
-
-def _approx_token_count(text: str) -> int:
-    """Rough token estimate -- one token ~= 4 characters. Stdlib only."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
 
 
 def _model_or_none(name: object) -> str | None:
@@ -71,17 +61,6 @@ def _model_or_none(name: object) -> str | None:
     if isinstance(name, str) and name and name != _MODEL_SENTINEL:
         return name
     return None
-
-
-def _parse_iso_ms(ts: str) -> int | None:
-    """Parse a Cursor bubble ``createdAt`` ISO-8601 string (ms + ``Z``,
-    e.g. ``"2026-07-17T17:33:25.305Z"``) to epoch milliseconds. Returns
-    ``None`` on any unparseable input -- never raises."""
-    try:
-        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
-        return int(dt.datetime.fromisoformat(s).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
 
 
 def _bubble_ts_ms(b: dict, fallback: int) -> int:

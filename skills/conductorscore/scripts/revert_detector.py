@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import re
 
+from scripts.core.shell import SHELL_TOOL_NAMES
+
 # Shell-family tool names whose ``raw_input["command"]`` is checked for
 # reverts. ``Bash`` is Claude; ``shell`` (old ``{"command":[...]}`` arg shape),
 # ``exec_command`` (new ``{"cmd":...}`` shape), and ``shell_command`` are
@@ -28,10 +30,9 @@ import re
 # ``scripts.agents.cursor.taxonomy``). The reader has already normalized every
 # provider's shell shape to one command on ``raw_input["command"]``, so this
 # detector reuses the SAME regexes with no per-provider branching. Kept in
-# lockstep with ``approval_counter._SHELL_TOOL_NAMES`` and ``commit_counter``.
-SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
-)
+# lockstep with ``approval_counter._SHELL_TOOL_NAMES`` and ``commit_counter``
+# — this IS ``scripts.core.shell.SHELL_TOOL_NAMES`` (the cross-provider
+# canonical set, task-2 audit).
 
 # Patterns that flag a Bash segment as a destructive revert. Each is
 # anchored at the start of the (stripped) segment so we don't false-fire
@@ -57,6 +58,13 @@ REVERT_PATTERNS: tuple[re.Pattern[str], ...] = (
 # ``\n`` is a separator too (matching commit_counter): multi-line Bash
 # commands and Codex 0.14x exec-JS extraction (which newline-joins multiple
 # ``shell(...)`` literals) each need per-line segment checks.
+#
+# NOTE: deliberately NOT ``scripts.core.shell.SEGMENT_SPLIT_RE`` /
+# ``split_segments`` — this pattern has no ``\|\|`` alternative (confirmed
+# functional divergence, task-2 audit: a ``false || git reset --hard``
+# segment would split under the shared regex but not under this one,
+# changing revert-detection sensitivity to ``||``-chained commands). Kept
+# local on purpose.
 _SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|;|\n)\s*")
 
 

@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from scripts.core.text import sha16 as _sha16
+
 SCHEMA_VERSION = "0.13"
-
-
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
 def compute_session_chain(sessions: list[dict]) -> str:

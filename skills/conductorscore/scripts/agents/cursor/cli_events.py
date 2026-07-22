@@ -57,7 +57,6 @@ session is skipped; the rest of the session is still read.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import re
 import sqlite3
@@ -66,6 +65,9 @@ from pathlib import Path
 from scripts.agents.cursor import taxonomy
 from scripts.agents.cursor.store import open_ro
 from scripts.core.normalized import Event, EventKind
+from scripts.core.text import approx_token_count as _approx_token_count
+from scripts.core.text import flatten_content
+from scripts.core.text import sha16 as _sha16
 
 # "default" is Cursor's placeholder/alias model string (unresolved model
 # selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
@@ -253,17 +255,6 @@ def _message_ts(base_ts: int, end_ts: int | None, i: int, n: int) -> int:
     return base_ts + i * _SYNTHETIC_TS_STEP_MS
 
 
-def _sha16(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
-
-
-def _approx_token_count(text: str) -> int:
-    """Rough token estimate -- one token ~= 4 characters. Stdlib only."""
-    if not text:
-        return 0
-    return max(1, len(text) // 4)
-
-
 def _model_or_none(name: object) -> str | None:
     """Map the ``"default"`` sentinel (and absence) to ``None``; pass any
     other non-empty string through unchanged."""
@@ -281,18 +272,13 @@ def _strip_user_query_wrapper(text: str) -> str:
 
 def _message_text(content: object) -> str:
     """Flatten a chat-turn ``content`` field (plain string OR a list of
-    typed items) to plain text by concatenating ``text``-typed items."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                t = item.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return "".join(parts)
-    return ""
+    typed items) to plain text by concatenating ``text``-typed items.
+
+    NOTE: unlike every other reader's flatten helper, this one joins with
+    ``""`` (no separator) -- a confirmed, preserved divergence (task-2
+    audit), not an oversight.
+    """
+    return flatten_content(content, sep="")
 
 
 # ---------------------------------------------------------------------------

@@ -12,13 +12,13 @@ registry and scanner treat Codex sessions identically to Claude ones.
 """
 from __future__ import annotations
 
-import datetime as dt
 import itertools
 import json
 import os
 from pathlib import Path
 
 from scripts.core.normalized import SessionMeta
+from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.agents.codex.events import read_rollout_lines
 
 
@@ -43,15 +43,7 @@ def codex_home() -> Path:
 
 def _parse_ts_ms(d: dict) -> int | None:
     """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
-    ts = d.get("timestamp")
-    if not isinstance(ts, str):
-        return None
-    try:
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
+    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def _session_meta_fields(lines: list[str]) -> tuple[str | None, str | None]:

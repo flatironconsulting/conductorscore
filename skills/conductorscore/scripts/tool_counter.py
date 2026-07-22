@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scripts.core.text import flatten_content as _extract_text
+
 # Claude Code wraps every command invocation — built-in/user slash commands
 # AND plugin commands — in a ``<command-name>…</command-name>`` block in the
 # user message (e.g. ``<command-name>/model</command-name>`` or
@@ -176,21 +178,6 @@ def count_compaction_and_tokens(events) -> CompactionAndTokens:
 
 def _is_user(d: dict, msg: dict) -> bool:
     return d.get("type") == "user" or msg.get("role") == "user"
-
-
-def _extract_text(content) -> str:
-    """Concatenate all 'text' fields out of a Claude content block."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts)
-    return ""
 
 
 def count_tools(jsonl_path: Path) -> ToolCounts:

@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 
 from scripts.core.normalized import EventKind
+from scripts.core.shell import SHELL_TOOL_NAMES as _SHELL_TOOLS
+from scripts.core.shell import split_segments
 
 # Shell-family tool names whose ``raw_input["command"]`` carries a command
 # string: ``Bash`` (Claude); ``shell`` / ``exec_command`` (Codex, both arg
@@ -33,9 +35,8 @@ from scripts.core.normalized import EventKind
 # ``approval_counter._SHELL_TOOL_NAMES`` and ``revert_detector``); ``exec``
 # (Codex 0.14x JS cell — the reader extracts literal ``shell(...)`` commands
 # from the JS source and newline-joins them onto ``raw_input["command"]``).
-_SHELL_TOOLS: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
-)
+# This is the CROSS-PROVIDER canonical set (``scripts.core.shell``) — see
+# the task-2 audit.
 
 # A commit-creating ``git`` invocation: the program ``git`` followed (within
 # the same segment, no statement separators between) by the ``commit``
@@ -49,12 +50,6 @@ _GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*?\bcommit\b")
 # Exclusions: amend / dry-run create no new commit; commit-tree is plumbing;
 # -h / --help just print usage.
 _EXCLUDE = re.compile(r"--amend|--dry-run|\bcommit-tree\b|(?<!\S)-h\b|--help")
-
-# Split a shell line into command segments so chained commits each count and
-# so a separator can never bridge ``git`` (one statement) to ``commit``
-# (another).
-_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\n")
-
 
 def count_commits(events) -> int:
     """Count commit-creating ``git commit`` segments across shell events.
@@ -76,7 +71,7 @@ def count_commits(events) -> int:
         cmd = raw.get("command")
         if not isinstance(cmd, str):
             continue
-        for seg in _SEGMENT_SPLIT.split(cmd):
+        for seg in split_segments(cmd):
             if _GIT_COMMIT.search(seg) and not _EXCLUDE.search(seg):
                 n += 1
     return n

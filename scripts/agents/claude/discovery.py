@@ -7,12 +7,12 @@ from here so existing imports keep working unchanged.
 """
 from __future__ import annotations
 
-import datetime as dt
 import json
 import os
 from pathlib import Path
 
 from scripts.core.normalized import SessionMeta
+from scripts.core.timestamps import parse_iso_ts_ms
 
 
 def _parse_ts_ms(line) -> int | None:
@@ -31,15 +31,7 @@ def _parse_ts_ms(line) -> int | None:
         return None
     if not isinstance(d, dict):
         return None
-    ts = d.get("timestamp")
-    if not ts or not isinstance(ts, str):
-        return None
-    try:
-        if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-        return int(dt.datetime.fromisoformat(ts).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
+    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def _project_root_from_dir(dir_name: str) -> str:
