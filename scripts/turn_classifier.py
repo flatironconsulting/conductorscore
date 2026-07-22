@@ -29,6 +29,7 @@ from enum import Enum
 from pathlib import Path
 
 from scripts.agents.codex.taxonomy import multi_agent_action
+from scripts.core.thresholds import K_TURN_SECONDS
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
 from scripts.events import Event, EventKind
 
@@ -44,9 +45,6 @@ class MinuteBucket(str, Enum):
     HITL = "hitl"
     AFK = "afk"
     IDLE = "idle"
-
-# HITL/AFK threshold per the spec. A turn ≤ 5 min is HITL, else AFK.
-K_TURN_SECONDS = 300
 
 # Idle longer than this between same-label turns splits the streak.
 K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AFK streak

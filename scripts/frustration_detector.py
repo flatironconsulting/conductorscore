@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from scripts.core.thresholds import RAGE_QUIT_PRE_ERROR_WINDOW_MS
+
 # Frustration phrases sourced from outline § "rage quit". Case-insensitive.
 # Includes the smart-apostrophe-free variants because Claude transcripts
 # often strip the apostrophe.
@@ -51,7 +53,6 @@ FRUSTRATION_RE = re.compile(
 )
 
 RAGE_QUIT_NO_USER_GAP_MS = 30 * 60 * 1000  # 30 min after
-RAGE_QUIT_PRE_ERROR_WINDOW_MS = 10 * 60 * 1000  # 10 min before
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scripts.core.thresholds import SIGNIFICANT_FILES_FLOOR, SIGNIFICANT_LINES_FLOOR
 from scripts.events import Event, EventKind
 
 # Claude edit tools (Edit/Write/MultiEdit) + the Codex ``apply_patch``
@@ -42,8 +43,6 @@ from scripts.events import Event, EventKind
 EDIT_TOOLS: frozenset[str] = frozenset(
     {"Edit", "Write", "MultiEdit", "apply_patch", "StrReplace", "Delete"}
 )
-SIGNIFICANT_FILES_FLOOR = 5  # files_modified > 5
-SIGNIFICANT_LINES_FLOOR = 200  # total_lines_edited > 200
 
 
 @dataclass(frozen=True)

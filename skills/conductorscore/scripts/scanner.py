@@ -8,6 +8,7 @@ from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
 from scripts.config_scanner import scan_config
 from scripts.core.text import sha16 as _sha16
+from scripts.core.thresholds import WINDOW_MS
 from scripts.edit_counter import count_edits
 from scripts.events import (
     EventKind,
@@ -47,7 +48,6 @@ from scripts.tool_counter import (
     count_tools,
 )
 
-WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
 # Cursor sessions very often carry NO resolved model id: Cursor's on-disk

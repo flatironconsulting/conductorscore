@@ -29,10 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.agents.base import AgentAdapter, AgentId
-
-# 30-day scoring window, mirroring scanner.WINDOW_MS (kept local to avoid an
-# import cycle: scanner imports the registry which imports this module).
-WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+from scripts.core.thresholds import WINDOW_MS
 
 CONSENT_SCHEMA_VERSION = 1
 

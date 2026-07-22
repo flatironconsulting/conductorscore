@@ -54,6 +54,7 @@ import hashlib
 import re
 
 from scripts.core.shell import EDIT_TOOL_NAMES as _EDIT_TOOL_NAMES
+from scripts.core.thresholds import APPROVAL_WAIT_MS
 
 # Shell-family tool names whose ``raw_input["command"]`` yields a Bash-style
 # signature: ``Bash`` (Claude) + Codex shell tools + ``Shell`` (Cursor's
@@ -90,11 +91,6 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # the disclosed key regex ``^(Bash|Edit)::[A-Za-z0-9_.-]*$``.
 _PATH_LIKE_RE = re.compile(r"[/]|^~")
 _PATH_SENTINEL = "path"
-
-# A pause longer than this between a tool dispatch and the next event is
-# treated as "execution waited for a human approval-click." 10s by design
-# (see the module docstring's caveat on execution-time conflation).
-APPROVAL_WAIT_MS = 10_000
 
 
 def signature_for_bash(cmd: str) -> tuple[str, str]:
@@ -262,6 +258,7 @@ def count_redundant_approvals(events) -> dict[str, int]:
 
 
 __all__ = [
+    "APPROVAL_WAIT_MS",
     "count_redundant_approvals",
     "signature_for_bash",
     "signature_for_edit",
