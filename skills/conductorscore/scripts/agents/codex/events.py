@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -527,7 +528,10 @@ class _ReadContext:
 
 
 def _handle_response_item(
-    ctx: _ReadContext, payload: dict, ts_ms: int, is_structured_prompt
+    ctx: _ReadContext,
+    payload: dict,
+    ts_ms: int,
+    is_structured_prompt: Callable[[str, int], bool],
 ) -> None:
     """Handle one ``response_item`` row: messages, tool calls/results."""
     ptype = payload.get("type")
@@ -675,7 +679,10 @@ def _handle_response_item(
 
 
 def _handle_event_msg(
-    ctx: _ReadContext, payload: dict, ts_ms: int, is_structured_prompt
+    ctx: _ReadContext,
+    payload: dict,
+    ts_ms: int,
+    is_structured_prompt: Callable[[str, int], bool],
 ) -> None:
     """Handle one ``event_msg`` row: display fallback, turn/token/tool markers."""
     ptype = payload.get("type")

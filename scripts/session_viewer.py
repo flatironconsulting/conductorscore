@@ -1409,8 +1409,6 @@ class RenderModel:
     aborted_ids: set[str]
     subagent_panels: dict[str, tuple[str, list[TimelineMessage]]]
     per_turn_active: list[float]
-    per_turn_tool: list[float]
-    per_turn_dispatch: list[float]
     time_split: SessionTimeSplit
     streak_id_for_turn: list[int]
     streak_members: dict[int, list[int]]
@@ -1424,7 +1422,7 @@ def _compute_render_model(
     turns: list[Turn],
     messages: list[TimelineMessage],
     aborted_ids: set[str],
-    subagent_spans,
+    subagent_spans: dict[str, tuple[int, int]],
     subagent_panels: dict[str, tuple[str, list[TimelineMessage]]],
     parallel_seconds: float,
     main_plus_sub_seconds: float,
@@ -1575,8 +1573,6 @@ def _compute_render_model(
         aborted_ids=aborted_ids,
         subagent_panels=subagent_panels,
         per_turn_active=per_turn_active,
-        per_turn_tool=per_turn_tool,
-        per_turn_dispatch=per_turn_dispatch,
         time_split=time_split,
         streak_id_for_turn=streak_id_for_turn,
         streak_members=streak_members,

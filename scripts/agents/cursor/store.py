@@ -46,8 +46,10 @@ class _CopyConnection(sqlite3.Connection):
     ``close()``. Every ``open_ro`` call materializes a full copy of the
     store, so without cleanup-on-close a scan or test run fills the temp
     filesystem. Idempotent and never raises on cleanup (``rmtree`` with
-    ``ignore_errors``); an unclosed connection at worst leaks one dir per
-    process, not one per open.
+    ``ignore_errors``). Cleanup happens ONLY on an explicit ``close()``
+    call -- sqlite3's C-level deallocator never calls an overridden Python
+    ``close()``, so an unclosed connection leaks its copy dir; callers must
+    close it (all current callers do, via try/finally).
     """
 
     _copy_dir: str | None = None
