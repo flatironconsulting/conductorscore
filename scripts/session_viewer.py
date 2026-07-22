@@ -1265,78 +1265,71 @@ def _bubble_html(
 # ---------------------------------------------------------------------------
 
 
-def render_session(
-    jsonl_path: Path, output_path: Path, redact: bool = True
-) -> dict:
-    """Render ``jsonl_path`` as a timeline-classifier HTML page at ``output_path``.
+def _place_message(m: TimelineMessage, turns: list[Turn]) -> tuple[str, int]:
+    """Return (\"turn\", idx) if ``m`` falls inside turn ``idx``'s span, else
+    (\"between\", idx) for the gap immediately before turn ``idx`` (or the
+    trailing gap after the last turn, idx == len(turns))."""
+    for idx, t in enumerate(turns):
+        if t.start_ts_ms <= m.ts_ms <= t.end_ts_ms:
+            return ("turn", idx)
+    for idx, t in enumerate(turns):
+        if m.ts_ms < t.start_ts_ms:
+            return ("between", idx)
+    return ("between", len(turns))
 
-    With ``redact=True`` (default) the bubbles show only the wire-equivalent
-    markers (``[<n> tok · <sha16>]`` + tool names) — matching exactly what the
-    uploader would send — so the page is safe to share. Pass ``redact=False``
-    to reveal the real transcript text (safe locally, since the viewer uploads
-    nothing, and most useful for hands-on debugging).
-    """
-    jsonl_path = Path(jsonl_path)
-    output_path = Path(output_path)
 
-    messages = parse_session(jsonl_path)
-    if redact:
-        messages = _redact_messages(messages)
-    if not messages:
-        output_path.write_text(
-            "<html><body>No main-agent messages in this session.</body></html>",
-            encoding="utf-8",
-        )
-        return {"messages": 0}
-
-    # Classifier inputs — privacy-stripped event stream.
-    events = read_events(jsonl_path)
-    aborted_ids = _aborted_call_ids(jsonl_path)
-    turns = segment_turns(events)
-    turns = _inject_continuation_turns(events, turns)
-    # Split turns at internal idle gaps > 5 min (non-tool) so the idle renders
-    # as its own grey break and ends the streak — bars then build to the table.
-    turns = _split_turns_at_idle(turns, events, aborted_ids)
-    hitl_streaks, afk_streaks = derive_streaks(turns)
-
-    # Subagent spans from disk (the route stages them next to the input JSONL).
-    subagent_spans = subagent_spans_from_disk(jsonl_path)
-    parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
-    # Wall-clock single-thread overlap (matches the notebook's "main + subagents").
-    main_plus_sub_seconds = afk_parallel_subagent_seconds(
-        turns, events, extra_spans=subagent_spans
-    )
-
-    subagent_panels = _load_subagent_panels(jsonl_path)
-    if redact:
-        subagent_panels = _redact_panels(subagent_panels)
-
-    # Per-turn message buckets + "between turns" buckets.
+def _bucket_messages(
+    messages: list[TimelineMessage], turns: list[Turn]
+) -> tuple[list[list[TimelineMessage]], list[list[TimelineMessage]]]:
+    """Sort ``messages`` into per-turn buckets + the "between turns" buckets
+    (including before-the-first-turn and after-the-last-turn)."""
     turn_buckets: list[list[TimelineMessage]] = [[] for _ in turns]
     between_buckets: list[list[TimelineMessage]] = [[] for _ in range(len(turns) + 1)]
     for m in messages:
-        placed = False
-        for idx, t in enumerate(turns):
-            if t.start_ts_ms <= m.ts_ms <= t.end_ts_ms:
-                turn_buckets[idx].append(m)
-                placed = True
-                break
-        if not placed:
-            for idx, t in enumerate(turns):
-                if m.ts_ms < t.start_ts_ms:
-                    between_buckets[idx].append(m)
-                    placed = True
-                    break
-            if not placed:
-                between_buckets[len(turns)].append(m)
+        kind, idx = _place_message(m, turns)
+        (turn_buckets if kind == "turn" else between_buckets)[idx].append(m)
+    return turn_buckets, between_buckets
 
+
+@dataclass
+class SessionTimeSplit:
+    """MECE 5-way split of the session: HITL + AFK + Tool:real + Tool:dispatch
+    + Idle = wallclock. See the inline comments in ``_session_time_split`` for
+    the derivation; the ``assert`` there is the invariant check (Table A)."""
+
+    hitl_active: float
+    afk_active: float
+    hitl_tool: float
+    afk_tool: float
+    total_dispatch: float
+    session_start: int
+    session_end: int
+    session_s: float
+    total_hitl_s: float
+    total_afk_s: float
+    total_tool_real_s: float
+    total_tool_dispatch_s: float
+    total_idle_s: float
+    parallel_seconds: float
+    wallclock_leverage: float
+    parallel_leverage: float
+    total_track_seconds: float
+    total_leverage: float
+
+
+def _session_time_split(
+    events: list,
+    turns: list[Turn],
+    per_turn_active: list[float],
+    per_turn_tool: list[float],
+    per_turn_dispatch: list[float],
+    parallel_seconds: float,
+    main_plus_sub_seconds: float,
+) -> SessionTimeSplit:
     # Aggregates. HITL/AFK are ACTIVE (engaged) seconds — gaps cap at
     # K_TURN_SECONDS unless inside a non-aborted tool interval — so a
     # hung/aborted command is NOT counted as engaged AFK time; the uncredited
     # remainder falls into Idle (wallclock − active). This matches the live card.
-    per_turn_active, per_turn_tool, per_turn_dispatch = _active_tool_per_turn(
-        events, turns, aborted_ids
-    )
     # MECE 5-way split of the session: HITL + AFK + Tool:real + Tool:dispatch +
     # Idle = wallclock. Tool (non-aborted tool runtime) is carved OUT of HITL/AFK,
     # then Tool is split into Tool:real (model tools) and Tool:dispatch (Agent/Task
@@ -1380,6 +1373,74 @@ def render_session(
     total_track_seconds = afk_active + main_plus_sub_seconds
     total_leverage = (
         total_track_seconds / hitl_active if hitl_active > 0 else float("inf")
+    )
+    return SessionTimeSplit(
+        hitl_active=hitl_active,
+        afk_active=afk_active,
+        hitl_tool=hitl_tool,
+        afk_tool=afk_tool,
+        total_dispatch=total_dispatch,
+        session_start=session_start,
+        session_end=session_end,
+        session_s=session_s,
+        total_hitl_s=total_hitl_s,
+        total_afk_s=total_afk_s,
+        total_tool_real_s=total_tool_real_s,
+        total_tool_dispatch_s=total_tool_dispatch_s,
+        total_idle_s=total_idle_s,
+        parallel_seconds=parallel_seconds,
+        wallclock_leverage=wallclock_leverage,
+        parallel_leverage=parallel_leverage,
+        total_track_seconds=total_track_seconds,
+        total_leverage=total_leverage,
+    )
+
+
+@dataclass
+class RenderModel:
+    """Everything ``_render_html`` needs to build the page — the output of
+    the aggregation/compute phase, kept separate from HTML assembly so each
+    half can be read (and tested) on its own."""
+
+    jsonl_path: Path
+    turns: list[Turn]
+    turn_buckets: list[list[TimelineMessage]]
+    between_buckets: list[list[TimelineMessage]]
+    aborted_ids: set[str]
+    subagent_panels: dict[str, tuple[str, list[TimelineMessage]]]
+    per_turn_active: list[float]
+    per_turn_tool: list[float]
+    per_turn_dispatch: list[float]
+    time_split: SessionTimeSplit
+    streak_id_for_turn: list[int]
+    streak_members: dict[int, list[int]]
+    streak_table_html: str
+    wire_trace_html: str
+
+
+def _compute_render_model(
+    jsonl_path: Path,
+    events: list,
+    turns: list[Turn],
+    messages: list[TimelineMessage],
+    aborted_ids: set[str],
+    subagent_spans,
+    subagent_panels: dict[str, tuple[str, list[TimelineMessage]]],
+    parallel_seconds: float,
+    main_plus_sub_seconds: float,
+) -> RenderModel:
+    """Aggregation phase: bucket placement, the MECE time split, streak ids,
+    and the two pre-rendered HTML fragments (streak table + wire trace) that
+    only depend on aggregates, not on the page shell."""
+    # Per-turn message buckets + "between turns" buckets.
+    turn_buckets, between_buckets = _bucket_messages(messages, turns)
+
+    per_turn_active, per_turn_tool, per_turn_dispatch = _active_tool_per_turn(
+        events, turns, aborted_ids
+    )
+    time_split = _session_time_split(
+        events, turns, per_turn_active, per_turn_tool, per_turn_dispatch,
+        parallel_seconds, main_plus_sub_seconds,
     )
 
     # Streak ids per turn (consecutive same-label, bridged ≤ K_BRIDGE_IDLE_SECONDS).
@@ -1474,10 +1535,10 @@ def render_session(
     # Wire→card trace (the debugger): this session's wire fields exactly as the
     # business logic computes them, then the two derived card numbers.
     # -----------------------------------------------------------------------
-    hitl_minutes = round(hitl_active / 60)
-    afk_minutes = round(afk_active / 60)          # includes tool + dispatch
-    afk_dispatch_minutes = round(total_dispatch / 60)
-    afk_tool_minutes = round(afk_tool / 60)
+    hitl_minutes = round(time_split.hitl_active / 60)
+    afk_minutes = round(time_split.afk_active / 60)          # includes tool + dispatch
+    afk_dispatch_minutes = round(time_split.total_dispatch / 60)
+    afk_tool_minutes = round(time_split.afk_tool / 60)
     afk_max_streak_min = round(max_engaged / 60)  # longest streak engaged (incl dispatch)
     # The wire field is afk_parallel_minutes_foreground = afk_parallel_subagent_seconds
     # (sum of subagent active ∩ AFK), i.e. main_plus_sub_seconds here — NOT the
@@ -1506,6 +1567,42 @@ def render_session(
         + "</pre></section>"
     )
 
+    return RenderModel(
+        jsonl_path=jsonl_path,
+        turns=turns,
+        turn_buckets=turn_buckets,
+        between_buckets=between_buckets,
+        aborted_ids=aborted_ids,
+        subagent_panels=subagent_panels,
+        per_turn_active=per_turn_active,
+        per_turn_tool=per_turn_tool,
+        per_turn_dispatch=per_turn_dispatch,
+        time_split=time_split,
+        streak_id_for_turn=streak_id_for_turn,
+        streak_members=streak_members,
+        streak_table_html=streak_table_html,
+        wire_trace_html=wire_trace_html,
+    )
+
+
+def _render_html(model: RenderModel) -> str:
+    """Render phase: assemble the self-contained HTML page from a
+    already-computed ``RenderModel``. Pure string-building — no aggregation
+    math happens here."""
+    jsonl_path = model.jsonl_path
+    turns = model.turns
+    turn_buckets = model.turn_buckets
+    between_buckets = model.between_buckets
+    aborted_ids = model.aborted_ids
+    subagent_panels = model.subagent_panels
+    per_turn_active = model.per_turn_active
+    streak_id_for_turn = model.streak_id_for_turn
+    streak_members = model.streak_members
+    ts = model.time_split
+    session_start = ts.session_start
+    session_end = ts.session_end
+    session_s = ts.session_s
+
     parts: list[str] = []
     parts.append(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
@@ -1528,35 +1625,35 @@ def render_session(
     <tbody>
       <tr>
         <th>Wallclock</th>
-        <td>{_fmt_dur(total_hitl_s)}</td>
-        <td>{_fmt_dur(total_afk_s)}</td>
-        <td class="tool">{_fmt_dur(total_tool_real_s)}</td>
-        <td class="tool dispatch">{_fmt_dur(total_tool_dispatch_s)}</td>
-        <td>{_fmt_dur(total_idle_s)}</td>
-        <td class="wallclock_leverage">{_fmt_leverage(wallclock_leverage)}</td>
+        <td>{_fmt_dur(ts.total_hitl_s)}</td>
+        <td>{_fmt_dur(ts.total_afk_s)}</td>
+        <td class="tool">{_fmt_dur(ts.total_tool_real_s)}</td>
+        <td class="tool dispatch">{_fmt_dur(ts.total_tool_dispatch_s)}</td>
+        <td>{_fmt_dur(ts.total_idle_s)}</td>
+        <td class="wallclock_leverage">{_fmt_leverage(ts.wallclock_leverage)}</td>
       </tr>
       <tr>
         <th>Parallel (subagents only)</th>
         <td class="muted">—</td>
-        <td>{_fmt_dur(parallel_seconds)}</td>
+        <td>{_fmt_dur(ts.parallel_seconds)}</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
-        <td class="parallel_leverage">{_fmt_leverage(parallel_leverage)}</td>
+        <td class="parallel_leverage">{_fmt_leverage(ts.parallel_leverage)}</td>
       </tr>
       <tr>
         <th>Total (main + subagents)</th>
         <td class="muted">—</td>
-        <td>{_fmt_dur(total_track_seconds)}</td>
+        <td>{_fmt_dur(ts.total_track_seconds)}</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
         <td class="muted">—</td>
-        <td>{_fmt_leverage(total_leverage)}</td>
+        <td>{_fmt_leverage(ts.total_leverage)}</td>
       </tr>
     </tbody>
   </table>
-  {streak_table_html}
-  {wire_trace_html}
+  {model.streak_table_html}
+  {model.wire_trace_html}
 </header>
 <div class="timeline">
 """)
@@ -1688,14 +1785,75 @@ def render_session(
 """
     )
 
-    output_path.write_text("".join(parts), encoding="utf-8")
+    return "".join(parts)
+
+
+def render_session(
+    jsonl_path: Path, output_path: Path, redact: bool = True
+) -> dict:
+    """Render ``jsonl_path`` as a timeline-classifier HTML page at ``output_path``.
+
+    With ``redact=True`` (default) the bubbles show only the wire-equivalent
+    markers (``[<n> tok · <sha16>]`` + tool names) — matching exactly what the
+    uploader would send — so the page is safe to share. Pass ``redact=False``
+    to reveal the real transcript text (safe locally, since the viewer uploads
+    nothing, and most useful for hands-on debugging).
+    """
+    jsonl_path = Path(jsonl_path)
+    output_path = Path(output_path)
+
+    messages = parse_session(jsonl_path)
+    if redact:
+        messages = _redact_messages(messages)
+    if not messages:
+        output_path.write_text(
+            "<html><body>No main-agent messages in this session.</body></html>",
+            encoding="utf-8",
+        )
+        return {"messages": 0}
+
+    # Classifier inputs — privacy-stripped event stream.
+    events = read_events(jsonl_path)
+    aborted_ids = _aborted_call_ids(jsonl_path)
+    turns = segment_turns(events)
+    turns = _inject_continuation_turns(events, turns)
+    # Split turns at internal idle gaps > 5 min (non-tool) so the idle renders
+    # as its own grey break and ends the streak — bars then build to the table.
+    turns = _split_turns_at_idle(turns, events, aborted_ids)
+    hitl_streaks, afk_streaks = derive_streaks(turns)
+
+    # Subagent spans from disk (the route stages them next to the input JSONL).
+    subagent_spans = subagent_spans_from_disk(jsonl_path)
+    parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
+    # Wall-clock single-thread overlap (matches the notebook's "main + subagents").
+    main_plus_sub_seconds = afk_parallel_subagent_seconds(
+        turns, events, extra_spans=subagent_spans
+    )
+
+    subagent_panels = _load_subagent_panels(jsonl_path)
+    if redact:
+        subagent_panels = _redact_panels(subagent_panels)
+
+    model = _compute_render_model(
+        jsonl_path,
+        events,
+        turns,
+        messages,
+        aborted_ids,
+        subagent_spans,
+        subagent_panels,
+        parallel_seconds,
+        main_plus_sub_seconds,
+    )
+
+    output_path.write_text(_render_html(model), encoding="utf-8")
     return {
         "messages": len(messages),
         "turns": len(turns),
         "hitl_streaks": len(hitl_streaks),
         "afk_streaks": len(afk_streaks),
-        "wallclock_leverage": wallclock_leverage,
-        "parallel_leverage": parallel_leverage,
+        "wallclock_leverage": model.time_split.wallclock_leverage,
+        "parallel_leverage": model.time_split.parallel_leverage,
         "output": str(output_path),
     }
 
