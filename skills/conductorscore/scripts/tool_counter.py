@@ -325,6 +325,105 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
 
 
 # ---------------------------------------------------------------------------
+# Shared ASSISTANT_TOOL-event router — the skeleton ``count_codex_tools`` and
+# ``count_cursor_tools`` both walk (iterate normalized events → filter
+# ``ASSISTANT_TOOL`` → classify the tool name into mcp/builtin/unknown →
+# accumulate distinct sets + invocation counts). Every provider-specific
+# difference the two functions had is expressed as a parameter here rather
+# than dropped:
+#   * ``classify(name)`` — returns ``"mcp"``, ``"builtin"``, or ``"unknown"``;
+#     encodes each provider's own bucket-routing rules AND their check order
+#     (Codex: known-names, then its multi-agent special cases, then the
+#     generic MCP-name test; Cursor: the generic MCP-name test, then its
+#     known-names). The two providers' known-name sets never overlap with
+#     the MCP structural signal, so this order difference is preserved for
+#     fidelity but does not change any result.
+#   * ``is_dispatch(name)`` — True for tool names that count as a subagent
+#     dispatch (Codex: its ``multi_agent_v*__spawn_agent`` action, bucketed
+#     as ``"mcp"``; Cursor: its ``Task`` builtin, bucketed as ``"builtin"``).
+#     Checked in BOTH buckets so either provider's dispatch tool can live in
+#     either bucket.
+#   * ``skills_from_builtin(event)`` — optional; only Codex has a signal
+#     (shell reads of ``.../skills/<name>/SKILL.md``) for inferring skill
+#     usage from a builtin tool call. Cursor has no such signal (omitted).
+#   * ``on_event(event)`` — optional per-event hook run before name routing;
+#     only Codex uses it (multi_agent-plugin-marketplace ``plugin_name``
+#     tally). Cursor has no plugin signal (omitted).
+# ---------------------------------------------------------------------------
+
+
+def _count_tools_from_events(
+    events,
+    *,
+    classify,
+    is_dispatch=None,
+    skills_from_builtin=None,
+    on_event=None,
+) -> dict:
+    """Shared walk: normalized events → mcp/builtin/unknown tool-name router.
+
+    Returns a plain dict of raw accumulators; each public wrapper builds its
+    own ``ToolCounts`` from it (field names/defaults differ per provider —
+    e.g. which ``*_unknown_tool_diagnostics`` field the ``unknown`` bucket
+    belongs in — so that mapping stays in the wrapper, not here).
+    """
+    from scripts.core.normalized import EventKind
+
+    mcp: set[str] = set()
+    builtin: set[str] = set()
+    builtin_invocations = 0
+    agent_dispatches = 0
+    skills: set[str] = set()
+    skill_invocations = 0
+    skills_by_name: dict[str, int] = {}
+    plugin_invocations = 0
+    plugins_by_name: dict[str, int] = {}
+    unknown: dict[str, int] = {}
+
+    for e in events:
+        if e.kind != EventKind.ASSISTANT_TOOL:
+            continue
+        if on_event is not None:
+            plugin = on_event(e)
+            if isinstance(plugin, str) and plugin:
+                plugin_invocations += 1
+                plugins_by_name[plugin] = plugins_by_name.get(plugin, 0) + 1
+        name = e.tool_name
+        if not isinstance(name, str) or not name:
+            continue
+        bucket = classify(name)
+        if bucket == "mcp":
+            mcp.add(name)
+            if is_dispatch is not None and is_dispatch(name):
+                agent_dispatches += 1
+        elif bucket == "builtin":
+            builtin.add(name)
+            builtin_invocations += 1
+            if is_dispatch is not None and is_dispatch(name):
+                agent_dispatches += 1
+            if skills_from_builtin is not None:
+                for skill_name in skills_from_builtin(e):
+                    skills.add(skill_name)
+                    skill_invocations += 1
+                    skills_by_name[skill_name] = skills_by_name.get(skill_name, 0) + 1
+        else:
+            unknown[name] = unknown.get(name, 0) + 1
+
+    return {
+        "skills": sorted(skills),
+        "mcp": sorted(mcp),
+        "builtin": sorted(builtin),
+        "builtin_invocations": builtin_invocations,
+        "agent_dispatches": agent_dispatches,
+        "skill_invocations": skill_invocations,
+        "skills_by_name": skills_by_name,
+        "plugin_invocations": plugin_invocations,
+        "plugins_by_name": plugins_by_name,
+        "unknown": unknown,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Codex built-in tool counting (from NORMALIZED events).
 # ---------------------------------------------------------------------------
 
@@ -361,77 +460,63 @@ def count_codex_tools(events) -> ToolCounts:
     dispatch.
     """
     from scripts.agents.codex.taxonomy import KNOWN_TOOL_NAMES, multi_agent_action, skill_names_from_shell_command
-    from scripts.core.normalized import EventKind
 
-    mcp: set[str] = set()
-    builtin: set[str] = set()
-    builtin_invocations = 0
-    agent_dispatches = 0
-    skills: set[str] = set()
-    skill_invocations = 0
-    skills_by_name: dict[str, int] = {}
-    plugin_invocations = 0
-    plugins_by_name: dict[str, int] = {}
-    diagnostics: dict[str, int] = {}
+    def classify(name: str) -> str:
+        if name in KNOWN_TOOL_NAMES:
+            return "builtin"
+        if multi_agent_action(name) == "spawn_agent":
+            return "mcp"
+        if name.startswith("multi_agent_") and multi_agent_action(name) is None:
+            # Unknown multi-agent shape (future version / action) — surface
+            # it so drift is detected, not silently zero-counted.
+            return "unknown"
+        if is_mcp_tool_name(name):
+            # MCP session invocation. Codex names MCP tools as
+            # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix
+            # is dropped when there's no name collision); both carry the
+            # ``server`` via the ``__`` separator — the shared
+            # :func:`is_mcp_tool_name` predicate (also used by the HITL
+            # counters) is the single source of truth for that rule. (Bare
+            # provider tools that drop the server prefix entirely, e.g.
+            # ``list_deployments``, are unattributable and fall through to
+            # diagnostics.)
+            return "mcp"
+        # Unknown Codex tool kind — local diagnostics only, never uploaded.
+        return "unknown"
 
-    for e in events:
-        if e.kind != EventKind.ASSISTANT_TOOL:
-            continue
+    def skills_from_builtin(e):
+        raw = getattr(e, "raw_input", None) or {}
+        if isinstance(raw, dict):
+            cmd = raw.get("command")
+            if isinstance(cmd, str):
+                return skill_names_from_shell_command(cmd)
+        return ()
+
+    def on_event(e):
         # Marketplace-plugin marker (Codex ``mcp_tool_call_end.plugin_id``,
         # ``<plugin>@<marketplace>``) — RAW name tally, same wire fields
         # Claude's ``<command-name>``-sourced plugin counts use.
-        plugin = getattr(e, "plugin_name", None)
-        if isinstance(plugin, str) and plugin:
-            plugin_invocations += 1
-            plugins_by_name[plugin] = plugins_by_name.get(plugin, 0) + 1
-        name = e.tool_name
-        if not isinstance(name, str) or not name:
-            continue
-        if name in KNOWN_TOOL_NAMES:
-            builtin.add(name)
-            builtin_invocations += 1
-            raw = getattr(e, "raw_input", None) or {}
-            if isinstance(raw, dict):
-                cmd = raw.get("command")
-                if isinstance(cmd, str):
-                    for skill_name in skill_names_from_shell_command(cmd):
-                        skills.add(skill_name)
-                        skill_invocations += 1
-                        skills_by_name[skill_name] = (
-                            skills_by_name.get(skill_name, 0) + 1
-                        )
-        elif multi_agent_action(name) == "spawn_agent":
-            mcp.add(name)
-            agent_dispatches += 1
-        elif name.startswith("multi_agent_") and multi_agent_action(name) is None:
-            # Unknown multi-agent shape (future version / action) — surface it
-            # so drift is detected, not silently zero-counted.
-            diagnostics[name] = diagnostics.get(name, 0) + 1
-        elif is_mcp_tool_name(name):
-            # MCP session invocation. Codex names MCP tools as
-            # ``mcp__server__tool`` OR ``server__tool`` (the ``mcp__`` prefix is
-            # dropped when there's no name collision); both carry the ``server``
-            # via the ``__`` separator — the shared :func:`is_mcp_tool_name`
-            # predicate (also used by the HITL counters) is the single source
-            # of truth for that rule. (Bare provider tools that drop the
-            # server prefix entirely, e.g. ``list_deployments``, are
-            # unattributable and fall through to diagnostics.)
-            mcp.add(name)
-        else:
-            # Unknown Codex tool kind — local diagnostics only, never uploaded.
-            diagnostics[name] = diagnostics.get(name, 0) + 1
+        return getattr(e, "plugin_name", None)
+
+    result = _count_tools_from_events(
+        events,
+        classify=classify,
+        is_dispatch=lambda name: multi_agent_action(name) == "spawn_agent",
+        skills_from_builtin=skills_from_builtin,
+        on_event=on_event,
+    )
 
     return ToolCounts(
-        distinct_skills=sorted(skills),
-        distinct_mcp_tools=sorted(mcp),
-        distinct_builtin_tools=sorted(builtin),
-        builtin_tool_invocations=builtin_invocations,
-        agent_dispatches=agent_dispatches,
-        skill_invocations=skill_invocations,
-        skill_invocations_by_name=skills_by_name,
-        plugin_invocations=plugin_invocations,
-        plugin_invocations_by_name=plugins_by_name,
-        codex_unknown_tool_diagnostics=diagnostics,
+        distinct_skills=result["skills"],
+        distinct_mcp_tools=result["mcp"],
+        distinct_builtin_tools=result["builtin"],
+        builtin_tool_invocations=result["builtin_invocations"],
+        agent_dispatches=result["agent_dispatches"],
+        skill_invocations=result["skill_invocations"],
+        skill_invocations_by_name=result["skills_by_name"],
+        plugin_invocations=result["plugin_invocations"],
+        plugin_invocations_by_name=result["plugins_by_name"],
+        codex_unknown_tool_diagnostics=result["unknown"],
     )
 
 
@@ -474,42 +559,31 @@ def count_cursor_tools(events) -> ToolCounts:
     is reachable here.
     """
     from scripts.agents.cursor.taxonomy import KNOWN_TOOL_NAMES, TASK_TOOL_NAMES
-    from scripts.core.normalized import EventKind
 
-    mcp: set[str] = set()
-    builtin: set[str] = set()
-    builtin_invocations = 0
-    agent_dispatches = 0
-    diagnostics: dict[str, int] = {}
-
-    for e in events:
-        if e.kind != EventKind.ASSISTANT_TOOL:
-            continue
-        name = e.tool_name
-        if not isinstance(name, str) or not name:
-            continue
+    def classify(name: str) -> str:
         if is_mcp_tool_name(name):
             # MCP session invocation — same structural ``__`` signal Codex
             # uses (shared :func:`is_mcp_tool_name` predicate); a bare
             # single-word tool is never guessed as MCP.
-            mcp.add(name)
-        elif name in KNOWN_TOOL_NAMES:
-            builtin.add(name)
-            builtin_invocations += 1
-            if name in TASK_TOOL_NAMES:
-                agent_dispatches += 1
-        else:
-            # Unknown Cursor tool kind — local diagnostics only, never
-            # uploaded.
-            diagnostics[name] = diagnostics.get(name, 0) + 1
+            return "mcp"
+        if name in KNOWN_TOOL_NAMES:
+            return "builtin"
+        # Unknown Cursor tool kind — local diagnostics only, never uploaded.
+        return "unknown"
+
+    result = _count_tools_from_events(
+        events,
+        classify=classify,
+        is_dispatch=lambda name: name in TASK_TOOL_NAMES,
+    )
 
     return ToolCounts(
         distinct_skills=[],
-        distinct_mcp_tools=sorted(mcp),
-        distinct_builtin_tools=sorted(builtin),
-        builtin_tool_invocations=builtin_invocations,
-        agent_dispatches=agent_dispatches,
-        cursor_unknown_tool_diagnostics=diagnostics,
+        distinct_mcp_tools=result["mcp"],
+        distinct_builtin_tools=result["builtin"],
+        builtin_tool_invocations=result["builtin_invocations"],
+        agent_dispatches=result["agent_dispatches"],
+        cursor_unknown_tool_diagnostics=result["unknown"],
     )
 
 
@@ -538,8 +612,9 @@ def is_mcp_tool_name(name: str | None) -> bool:
     return "__" in name
 
 
-def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
-    """Count of MCP tool calls whose timestamp falls in a HITL minute.
+def _iter_hitl_mcp_events(events, hitl_minutes: set[int]):
+    """Yield ``tool_name`` for each ``ASSISTANT_TOOL`` MCP call in a HITL
+    minute — the shared walk both HITL-MCP counters below reduce.
 
     Per the fluency repetition metric: only MCP calls made while the
     user is actively in the loop count. ``hitl_minutes`` is the set of
@@ -549,20 +624,26 @@ def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
 
     Only ``ASSISTANT_TOOL`` events whose tool name passes
     :func:`is_mcp_tool_name` (``mcp__``-prefixed or prefix-dropped
-    ``server__tool``) are counted; non-MCP tools and ``TOOL_RESULT``
+    ``server__tool``) are yielded; non-MCP tools and ``TOOL_RESULT``
     events never contribute.
     """
     if not hitl_minutes:
-        return 0
-    count = 0
+        return
     for e in events:
         if e.kind.name != "ASSISTANT_TOOL":
             continue
         if not is_mcp_tool_name(e.tool_name):
             continue
         if (e.timestamp_ms // 60_000) in hitl_minutes:
-            count += 1
-    return count
+            yield e.tool_name
+
+
+def count_hitl_mcp_invocations(events, hitl_minutes: set[int]) -> int:
+    """Count of MCP tool calls whose timestamp falls in a HITL minute.
+
+    See :func:`_iter_hitl_mcp_events` for the underlying selection rule.
+    """
+    return sum(1 for _ in _iter_hitl_mcp_events(events, hitl_minutes))
 
 
 def count_hitl_mcp_invocations_by_name(
@@ -575,14 +656,7 @@ def count_hitl_mcp_invocations_by_name(
     :func:`count_hitl_mcp_invocations` for the same inputs — the per-name
     breakdown for the Customization "Top by invocations" table (v0.11).
     """
-    if not hitl_minutes:
-        return {}
     counts: dict[str, int] = {}
-    for e in events:
-        if e.kind.name != "ASSISTANT_TOOL":
-            continue
-        if not is_mcp_tool_name(e.tool_name):
-            continue
-        if (e.timestamp_ms // 60_000) in hitl_minutes:
-            counts[e.tool_name] = counts.get(e.tool_name, 0) + 1
+    for name in _iter_hitl_mcp_events(events, hitl_minutes):
+        counts[name] = counts.get(name, 0) + 1
     return counts

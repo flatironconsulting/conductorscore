@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 
+from scripts.agents.base import preflight_from
 from scripts.core.normalized import SessionMeta
 from scripts.core.timestamps import parse_iso_ts_ms
 
@@ -32,6 +33,29 @@ def _parse_ts_ms(line) -> int | None:
     if not isinstance(d, dict):
         return None
     return parse_iso_ts_ms(d.get("timestamp"))
+
+
+def _last_ts_ms_from_lines(lines: list[str]) -> int | None:
+    """Last parseable timestamp in a transcript, scanning from the end.
+
+    Shared by ``preflight`` (only needs the last timestamp, cheaply, to
+    bound the session against the consent window) and ``find_sessions``
+    (needs both bounds) — same reversed-scan-until-first-hit semantics.
+    """
+    for line in reversed(lines):
+        ts = _parse_ts_ms(line)
+        if ts is not None:
+            return ts
+    return None
+
+
+def _first_ts_ms_from_lines(lines: list[str]) -> int | None:
+    """First parseable timestamp in a transcript, scanning from the start."""
+    for line in lines:
+        ts = _parse_ts_ms(line)
+        if ts is not None:
+            return ts
+    return None
 
 
 def _project_root_from_dir(dir_name: str) -> str:
@@ -71,39 +95,26 @@ def preflight(now_ms: int, window_ms: int) -> dict:
       * ``sessions_per_day`` — approximate sessions/day across the window.
     """
     home = claude_home()
-    out = {
-        "home_exists": home.is_dir(),
-        "config_exists": (home / "settings.json").is_file(),
-        "sessions_in_window": 0,
-        "sessions_per_day": 0.0,
-    }
-    projects_dir = home / "projects"
-    if not projects_dir.is_dir():
-        return out
-    cutoff = now_ms - window_ms
-    count = 0
-    for proj_dir in projects_dir.iterdir():
-        if not proj_dir.is_dir():
-            continue
-        for jsonl in proj_dir.glob("*.jsonl"):
-            try:
-                lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
+
+    def _last_ts_iter():
+        projects_dir = home / "projects"
+        if not projects_dir.is_dir():
+            return
+        for proj_dir in projects_dir.iterdir():
+            if not proj_dir.is_dir():
                 continue
-            if not lines:
-                continue
-            last: int | None = None
-            for line in reversed(lines):
-                last = _parse_ts_ms(line)
-                if last is not None:
-                    break
-            if last is None or last < cutoff:
-                continue
-            count += 1
-    out["sessions_in_window"] = count
-    days = max(1.0, window_ms / (24 * 60 * 60 * 1000))
-    out["sessions_per_day"] = round(count / days, 3)
-    return out
+            for jsonl in proj_dir.glob("*.jsonl"):
+                try:
+                    lines = jsonl.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                except OSError:
+                    continue
+                if not lines:
+                    continue
+                yield _last_ts_ms_from_lines(lines)
+
+    return preflight_from(home, "settings.json", _last_ts_iter(), now_ms, window_ms)
 
 
 def find_sessions() -> list[SessionMeta]:
@@ -124,16 +135,8 @@ def find_sessions() -> list[SessionMeta]:
                 continue
             if not lines:
                 continue
-            first: int | None = None
-            for line in lines:
-                first = _parse_ts_ms(line)
-                if first is not None:
-                    break
-            last: int | None = None
-            for line in reversed(lines):
-                last = _parse_ts_ms(line)
-                if last is not None:
-                    break
+            first = _first_ts_ms_from_lines(lines)
+            last = _last_ts_ms_from_lines(lines)
             if first is None or last is None:
                 continue
             out.append(

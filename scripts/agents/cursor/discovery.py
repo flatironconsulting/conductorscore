@@ -61,10 +61,9 @@ import os
 import sqlite3
 from pathlib import Path
 
+from scripts.agents.base import preflight_from
 from scripts.agents.cursor.store import kv_get_json, make_locator, open_ro
 from scripts.core.normalized import SessionMeta
-
-_MS_PER_DAY = 24 * 60 * 60 * 1000
 
 
 def cursor_home() -> Path:
@@ -342,31 +341,31 @@ def preflight(now_ms: int, window_ms: int) -> dict:
       * ``sessions_per_day`` -- approximate sessions/day across the window,
         rounded to 3 decimals.
     """
-    cutoff = now_ms - window_ms
-    count = 0
-    for db in ide_store_paths():
-        con = open_ro(db)
-        if con is None:
-            continue
-        try:
-            for _composer_id, _first, last, _header_doc in _iter_composer_headers(con):
-                if last >= cutoff:
-                    count += 1
-        finally:
-            con.close()
-
-    for _session_id, _first, last, _db in _iter_cli_sessions():
-        if last >= cutoff:
-            count += 1
-
     home = cursor_home()
-    days = max(1.0, window_ms / _MS_PER_DAY)
-    return {
-        "home_exists": home.is_dir() or bool(ide_store_paths()) or bool(cli_store_paths()),
-        "config_exists": (home / "mcp.json").is_file(),
-        "sessions_in_window": count,
-        "sessions_per_day": round(count / days, 3),
-    }
+
+    def _last_ts_iter():
+        for db in ide_store_paths():
+            con = open_ro(db)
+            if con is None:
+                continue
+            try:
+                for _composer_id, _first, last, _header_doc in _iter_composer_headers(con):
+                    yield last
+            finally:
+                con.close()
+
+        for _session_id, _first, last, _db in _iter_cli_sessions():
+            yield last
+
+    out = preflight_from(home, "mcp.json", _last_ts_iter(), now_ms, window_ms)
+    # Cursor's ``home_exists`` is richer than a plain dir check: an existing
+    # IDE/CLI store also counts (covers the case where only the global
+    # store is present, e.g. a fresh/WSL-only setup with no ``~/.cursor``
+    # dir populated yet) — override the plain ``home.is_dir()`` default.
+    out["home_exists"] = (
+        home.is_dir() or bool(ide_store_paths()) or bool(cli_store_paths())
+    )
+    return out
 
 
 __all__ = [

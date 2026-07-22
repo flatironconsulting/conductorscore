@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 
+from scripts.agents.base import preflight_from
 from scripts.core.normalized import SessionMeta
 from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.agents.codex.events import read_rollout_lines
@@ -101,40 +102,30 @@ def preflight(now_ms: int, window_ms: int) -> dict:
       * ``sessions_per_day`` — approximate sessions/day across the window.
     """
     home = codex_home()
-    out = {
-        "home_exists": home.is_dir(),
-        "config_exists": (home / "config.toml").is_file(),
-        "sessions_in_window": 0,
-        "sessions_per_day": 0.0,
-    }
-    sessions_dir = home / "sessions"
-    if not sessions_dir.is_dir():
-        return out
-    cutoff = now_ms - window_ms
-    count = 0
-    for jsonl in _rollout_files(sessions_dir):
-        if not jsonl.is_file():
-            continue
-        lines = read_rollout_lines(jsonl)
-        if not lines:
-            continue
-        last: int | None = None
-        for line in reversed(lines):
-            try:
-                d = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
+
+    def _last_ts_iter():
+        sessions_dir = home / "sessions"
+        if not sessions_dir.is_dir():
+            return
+        for jsonl in _rollout_files(sessions_dir):
+            if not jsonl.is_file():
                 continue
-            if isinstance(d, dict):
-                last = _parse_ts_ms(d)
-                if last is not None:
-                    break
-        if last is None or last < cutoff:
-            continue
-        count += 1
-    out["sessions_in_window"] = count
-    days = max(1.0, window_ms / (24 * 60 * 60 * 1000))
-    out["sessions_per_day"] = round(count / days, 3)
-    return out
+            lines = read_rollout_lines(jsonl)
+            if not lines:
+                continue
+            last: int | None = None
+            for line in reversed(lines):
+                try:
+                    d = json.loads(line.strip())
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(d, dict):
+                    last = _parse_ts_ms(d)
+                    if last is not None:
+                        break
+            yield last
+
+    return preflight_from(home, "config.toml", _last_ts_iter(), now_ms, window_ms)
 
 
 def find_sessions() -> list[SessionMeta]:
