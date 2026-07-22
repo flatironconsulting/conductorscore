@@ -40,6 +40,8 @@ from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
 from scripts.tool_counter import (
+    SessionToolFields,
+    ToolCounts,
     count_codex_tools,
     count_compaction_and_tokens,
     count_cursor_tools,
@@ -115,6 +117,289 @@ def _had_plan_artifact_prior_24h(
         if floor <= ts_ms < session_start_ms:
             return True
     return False
+
+
+def _aggregate_msgs_by_model(events, provider: str) -> dict[str, int]:
+    """Count assistant messages per raw model id.
+
+    A single transcript message may emit multiple Events (text + tool_use +
+    thinking) sharing one timestamp_ms — dedupe on that pair so one line is
+    one message. ``model`` is only set on assistant-side events; the reader
+    leaves it None elsewhere. For Cursor, a model-less assistant event is
+    attributed to the Cursor-family placeholder (``_CURSOR_UNRESOLVED_MODEL``)
+    so unresolved-model sessions still count their turns instead of
+    vanishing from the message bar.
+    """
+    seen_assistant_msgs: set[tuple[int, str]] = set()
+    assistant_msgs_by_model: dict[str, int] = {}
+    for e in events:
+        if e.kind not in (
+            EventKind.ASSISTANT_TEXT,
+            EventKind.ASSISTANT_TOOL,
+            EventKind.ASSISTANT_THINKING,
+        ):
+            continue
+        model = e.model or (
+            _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
+        )
+        if not model:
+            continue
+        key = (e.timestamp_ms, model)
+        if key in seen_assistant_msgs:
+            continue
+        seen_assistant_msgs.add(key)
+        assistant_msgs_by_model[model] = assistant_msgs_by_model.get(model, 0) + 1
+    return assistant_msgs_by_model
+
+
+def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int]]:
+    """Precise per-model token split.
+
+    Only assistant events carry a model id and usage counts; the reader
+    only sets input_tokens on the FIRST text event of a message so the per-
+    model sum here doesn't double-count multi-block assistant messages.
+    Skip events without a model — those are user/system events that don't
+    carry token counts anyway. Invariants by construction:
+      Σ tokens_by_model[m].input_miss  == cache_creation_input_tokens
+      Σ tokens_by_model[m].input_hit   == cache_input_tokens
+      Σ tokens_by_model[m].output      == total_output_tokens
+    """
+    tokens_by_model: dict[str, dict[str, int]] = {}
+    for e in events:
+        model = e.model or (
+            _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
+        )
+        if not model:
+            continue
+        in_miss = int(getattr(e, "cache_creation_input_tokens", 0) or 0)
+        in_hit = int(getattr(e, "cache_input_tokens", 0) or 0)
+        out = int(getattr(e, "output_tokens", 0) or 0)
+        if in_miss == 0 and in_hit == 0 and out == 0:
+            continue
+        slot = tokens_by_model.setdefault(
+            model, {"input_miss": 0, "input_hit": 0, "output": 0}
+        )
+        slot["input_miss"] += in_miss
+        slot["input_hit"] += in_hit
+        slot["output"] += out
+    return tokens_by_model
+
+
+def _build_per_session(
+    s,
+    provider: str,
+    events: list,
+    text_map: dict,
+    tc: "ToolCounts | None",
+    artifact_times_by_project: dict[str, list[tuple[str, int]]],
+) -> PerSession:
+    """Score one loaded session into its wire-shaped ``PerSession``.
+
+    Args:
+        s: the session's ``SessionMeta`` (from Pass 1).
+        provider: the adapter's ``agent_id`` that discovered this session.
+        events, text_map: the normalized events + user-text map read in
+            Pass 1 for this session.
+        tc: this session's ``ToolCounts`` (``None`` when ``s.jsonl_path`` was
+            ``None`` — nothing to parse).
+        artifact_times_by_project: cross-session (session_id, ts_ms) plan-
+            artifact history keyed by project_root, built once in Pass 1.
+    """
+    stf = SessionToolFields.from_tool_counts(tc)
+
+    # v0.4 — turn-based time partition (replaces v0.3 minute rule).
+    # Foreground sessions get a window so we know whether to compute
+    # turns; Cron-only sessions skip turn segmentation entirely.
+    window = compute_window(events)
+    hitl_minutes = 0
+    afk_minutes = 0
+    idle_minutes = 0
+    hitl_tool_minutes = 0
+    afk_tool_minutes = 0
+    afk_dispatch_minutes = 0
+    afk_parallel_fg = 0
+    afk_max_streak = 0
+    intervals: list[AfkInterval] = []
+    top_streaks: list[AfkStreakWire] = []
+    hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
+
+    if window is not None:
+        agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
+        hitl_minutes = agg.hitl_minutes
+        afk_minutes = agg.afk_minutes
+        hitl_tool_minutes = agg.hitl_tool_minutes
+        afk_tool_minutes = agg.afk_tool_minutes
+        afk_dispatch_minutes = agg.afk_dispatch_minutes
+        afk_parallel_fg = agg.afk_parallel_minutes_foreground
+        afk_max_streak = agg.afk_max_streak_minutes
+        window_minutes = max(0, window[1] - window[0])
+        idle_minutes = max(0, window_minutes - hitl_minutes - afk_minutes)
+        hitl_minute_set = _hitl_minute_set_from_turns(agg.turns)
+        for start, end_excl in afk_intervals(agg.turns):
+            intervals.append(
+                AfkInterval(
+                    start_minute=start,
+                    end_minute_exclusive=end_excl,
+                    is_cron=False,
+                )
+            )
+        for st in agg.top_afk_streaks:
+            top_streaks.append(
+                AfkStreakWire(
+                    start_ts_ms=st.start_ts_ms,
+                    end_ts_ms=st.end_ts_ms,
+                    active_minutes=round(st.active_seconds / 60),
+                    turn_count=st.turn_count,
+                )
+            )
+
+    cron_parallel = cron_parallel_minutes(events)
+    for start, end_excl in cron_intervals(events):
+        intervals.append(
+            AfkInterval(
+                start_minute=start,
+                end_minute_exclusive=end_excl,
+                is_cron=True,
+            )
+        )
+
+    # v0.4 — plan signals + edit footprint.
+    had_prior = _had_plan_artifact_prior_24h(
+        artifact_times_by_project,
+        s.project_root,
+        s.session_id,
+        s.first_ts_ms,
+    )
+    plan = detect_plan_signals(
+        events, project_had_plan_artifact_prior_24h=had_prior
+    )
+    edits = count_edits(events)
+
+    # v0.5 — anti-pattern cluster (Feature 7).
+    revert_count = count_reverts(events)
+    # Build the list of user texts in event order for the Jaccard
+    # similarity detector. The map is keyed by id(); look up each
+    # USER event in order.
+    user_texts = [
+        text_map.get(id(e), "")
+        for e in events
+        if e.kind == EventKind.USER
+    ]
+    rep = jaccard_repetitive_rate(user_texts)
+    rage = detect_rage_quit(events, text_map)
+    # tool_error_count: number of events with is_error=True (covers
+    # TOOL_RESULT errored blocks). The reader populates is_error on
+    # TOOL_RESULT events.
+    tool_error_count = sum(1 for e in events if getattr(e, "is_error", False))
+    compaction = count_compaction_and_tokens(events)
+    approvals = count_redundant_approvals(events)
+
+    # v0.6 — Feature 8 (fluency + informational).
+    assistant_msgs_by_model = _aggregate_msgs_by_model(events, provider)
+
+    # Skill invocation counts (total + per-name) come from `tc` above —
+    # sourced from structured <command-name> markers in count_tools, never
+    # from scanning free-prose user text.
+    hitl_mcp_invocations = count_hitl_mcp_invocations(events, hitl_minute_set)
+    # v0.11 — per-name MCP counter (skill + plugin maps come from `tc`).
+    # Each sums to its scalar counterpart.
+    mcp_invocations_by_name = count_hitl_mcp_invocations_by_name(
+        events, hitl_minute_set
+    )
+
+    # v0.8 — precise per-model token split.
+    tokens_by_model = _aggregate_tokens_by_model(events, provider)
+
+    # Slice 3 — Cursor-only: flag sessions whose assistant turns recorded
+    # zero token usage everywhere (tool-call ASSISTANT_TOOL events are
+    # structurally always zero for Cursor; only ASSISTANT_TEXT bubbles
+    # carry its tokenCount, and that's 0/0 at a very high rate per
+    # recon). Gated on provider == "cursor" so Claude/Codex sessions
+    # NEVER set this — their PerSession.token_data_missing stays the
+    # dataclass default (False), which output_schema.py suppresses on
+    # the wire, so those payloads are byte-identical to before this
+    # field existed.
+    assistant_events = [
+        e for e in events
+        if e.kind in (EventKind.ASSISTANT_TEXT, EventKind.ASSISTANT_TOOL)
+    ]
+    token_data_missing = (
+        provider == "cursor"
+        and bool(assistant_events)
+        and all(
+            e.input_tokens == 0
+            and e.output_tokens == 0
+            and e.cache_input_tokens == 0
+            for e in assistant_events
+        )
+    )
+
+    # Namespace the session hash by provider to avoid cross-provider
+    # collisions. Claude stays UNPREFIXED so the v0.11 Claude payload is
+    # byte-identical; only non-default providers (codex) get the
+    # ``<provider>:`` prefix. Same for the project hash, since two agents
+    # in the same cwd would otherwise collapse to one project bucket.
+    if provider == "claude":
+        session_hash = _sha16(s.session_id)
+        project_hash = _sha16(s.project_root)
+    else:
+        session_hash = _sha16(f"{provider}:{s.session_id}")
+        project_hash = _sha16(f"{provider}:{s.project_root}")
+
+    return PerSession(
+        session_hash=session_hash,
+        project_hash=project_hash,
+        started_at_ms=s.first_ts_ms,
+        ended_at_ms=s.last_ts_ms,
+        provider=provider,
+        token_data_missing=token_data_missing,
+        distinct_skills=stf.distinct_skills,
+        distinct_mcp_tools=stf.distinct_mcp_tools,
+        distinct_builtin_tools=stf.distinct_builtin_tools,
+        hitl_minutes=hitl_minutes,
+        afk_minutes=afk_minutes,
+        idle_minutes=idle_minutes,
+        hitl_tool_minutes=hitl_tool_minutes,
+        afk_tool_minutes=afk_tool_minutes,
+        afk_dispatch_minutes=afk_dispatch_minutes,
+        afk_parallel_minutes_foreground=afk_parallel_fg,
+        cron_parallel_minutes=cron_parallel,
+        afk_max_streak_minutes=afk_max_streak,
+        afk_intervals=tuple(intervals),
+        top_afk_streaks=tuple(top_streaks),
+        strong_plan_signals=plan.strong,
+        weak_plan_signals=plan.weak,
+        is_planned=plan.is_planned,
+        files_modified=edits.files_modified,
+        total_lines_edited=edits.total_lines_edited,
+        commit_count=count_commits(events),
+        is_significant_edit_session=edits.is_significant,
+        revert_count=revert_count,
+        qualifying_pairs=rep.qualifying_pairs,
+        repetitive_pairs=rep.repetitive_pairs,
+        rage_quit_event=rage.rage_quit_event,
+        tool_error_count=tool_error_count,
+        auto_compaction_events=compaction.auto_compaction_events,
+        total_input_tokens=compaction.total_input_tokens,
+        total_output_tokens=compaction.total_output_tokens,
+        redundant_approvals_per_signature=approvals,
+        assistant_msgs_by_model=assistant_msgs_by_model,
+        user_skill_invocations=stf.user_skill_invocations,
+        hitl_mcp_invocations=hitl_mcp_invocations,
+        # v0.7 — cache split + invocations + plugins + dispatches.
+        cache_input_tokens=compaction.cache_input_tokens,
+        cache_creation_input_tokens=compaction.cache_creation_input_tokens,
+        builtin_tool_invocations=stf.builtin_tool_invocations,
+        plugin_invocations=stf.plugin_invocations,
+        agent_dispatches=stf.agent_dispatches,
+        # v0.8 — precise per-(model, leg) token split.
+        tokens_by_model=tokens_by_model,
+        # v0.11 — per-name invocation maps for the Top by
+        # invocations table.
+        skill_invocations_by_name=stf.skill_invocations_by_name,
+        mcp_invocations_by_name=mcp_invocations_by_name,
+        plugin_invocations_by_name=stf.plugin_invocations_by_name,
+    )
 
 
 def extract(
@@ -229,282 +514,10 @@ def extract(
         other = scan()
         config = _merge_config_counts(config, other)
 
-    sessions: list[PerSession] = []
-    for s, provider, events, text_map, tc in loaded:
-        if tc is not None:
-            distinct_skills = tuple(tc.distinct_skills)
-            distinct_mcp_tools = tuple(tc.distinct_mcp_tools)
-            distinct_builtin_tools = tuple(tc.distinct_builtin_tools)
-            builtin_tool_invocations = tc.builtin_tool_invocations
-            agent_dispatches = tc.agent_dispatches
-            plugin_invocations = tc.plugin_invocations
-            plugin_invocations_by_name = dict(tc.plugin_invocations_by_name)
-            user_skill_invocations = tc.skill_invocations
-            skill_invocations_by_name = dict(tc.skill_invocations_by_name)
-        else:
-            distinct_skills = ()
-            distinct_mcp_tools = ()
-            distinct_builtin_tools = ()
-            builtin_tool_invocations = 0
-            agent_dispatches = 0
-            plugin_invocations = 0
-            plugin_invocations_by_name = {}
-            user_skill_invocations = 0
-            skill_invocations_by_name = {}
-
-        # v0.4 — turn-based time partition (replaces v0.3 minute rule).
-        # Foreground sessions get a window so we know whether to compute
-        # turns; Cron-only sessions skip turn segmentation entirely.
-        window = compute_window(events)
-        hitl_minutes = 0
-        afk_minutes = 0
-        idle_minutes = 0
-        hitl_tool_minutes = 0
-        afk_tool_minutes = 0
-        afk_dispatch_minutes = 0
-        afk_parallel_fg = 0
-        afk_max_streak = 0
-        intervals: list[AfkInterval] = []
-        top_streaks: list[AfkStreakWire] = []
-        hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
-
-        if window is not None:
-            agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
-            hitl_minutes = agg.hitl_minutes
-            afk_minutes = agg.afk_minutes
-            hitl_tool_minutes = agg.hitl_tool_minutes
-            afk_tool_minutes = agg.afk_tool_minutes
-            afk_dispatch_minutes = agg.afk_dispatch_minutes
-            afk_parallel_fg = agg.afk_parallel_minutes_foreground
-            afk_max_streak = agg.afk_max_streak_minutes
-            window_minutes = max(0, window[1] - window[0])
-            idle_minutes = max(0, window_minutes - hitl_minutes - afk_minutes)
-            hitl_minute_set = _hitl_minute_set_from_turns(agg.turns)
-            for start, end_excl in afk_intervals(agg.turns):
-                intervals.append(
-                    AfkInterval(
-                        start_minute=start,
-                        end_minute_exclusive=end_excl,
-                        is_cron=False,
-                    )
-                )
-            for st in agg.top_afk_streaks:
-                top_streaks.append(
-                    AfkStreakWire(
-                        start_ts_ms=st.start_ts_ms,
-                        end_ts_ms=st.end_ts_ms,
-                        active_minutes=round(st.active_seconds / 60),
-                        turn_count=st.turn_count,
-                    )
-                )
-
-        cron_parallel = cron_parallel_minutes(events)
-        for start, end_excl in cron_intervals(events):
-            intervals.append(
-                AfkInterval(
-                    start_minute=start,
-                    end_minute_exclusive=end_excl,
-                    is_cron=True,
-                )
-            )
-
-        # v0.4 — plan signals + edit footprint.
-        had_prior = _had_plan_artifact_prior_24h(
-            artifact_times_by_project,
-            s.project_root,
-            s.session_id,
-            s.first_ts_ms,
-        )
-        plan = detect_plan_signals(
-            events, project_had_plan_artifact_prior_24h=had_prior
-        )
-        edits = count_edits(events)
-
-        # v0.5 — anti-pattern cluster (Feature 7).
-        revert_count = count_reverts(events)
-        # Build the list of user texts in event order for the Jaccard
-        # similarity detector. The map is keyed by id(); look up each
-        # USER event in order.
-        user_texts = [
-            text_map.get(id(e), "")
-            for e in events
-            if e.kind == EventKind.USER
-        ]
-        rep = jaccard_repetitive_rate(user_texts)
-        rage = detect_rage_quit(events, text_map)
-        # tool_error_count: number of events with is_error=True (covers
-        # TOOL_RESULT errored blocks). The reader populates is_error on
-        # TOOL_RESULT events.
-        tool_error_count = sum(
-            1 for e in events if getattr(e, "is_error", False)
-        )
-        compaction = count_compaction_and_tokens(events)
-        approvals = count_redundant_approvals(events)
-
-        # v0.6 — Feature 8 (fluency + informational).
-        # Count assistant messages per raw model id. A single transcript
-        # message may emit multiple Events (text + tool_use + thinking)
-        # sharing one timestamp_ms — dedupe on that pair so one line is
-        # one message. ``model`` is only set on assistant-side events;
-        # the reader leaves it None elsewhere. For Cursor, a model-less
-        # assistant event is attributed to the Cursor-family placeholder
-        # (``_CURSOR_UNRESOLVED_MODEL``) so unresolved-model sessions still
-        # count their turns instead of vanishing from the message bar.
-        seen_assistant_msgs: set[tuple[int, str]] = set()
-        assistant_msgs_by_model: dict[str, int] = {}
-        for e in events:
-            if e.kind not in (
-                EventKind.ASSISTANT_TEXT,
-                EventKind.ASSISTANT_TOOL,
-                EventKind.ASSISTANT_THINKING,
-            ):
-                continue
-            model = e.model or (
-                _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
-            )
-            if not model:
-                continue
-            key = (e.timestamp_ms, model)
-            if key in seen_assistant_msgs:
-                continue
-            seen_assistant_msgs.add(key)
-            assistant_msgs_by_model[model] = (
-                assistant_msgs_by_model.get(model, 0) + 1
-            )
-
-        # Skill invocation counts (total + per-name) come from `tc` above —
-        # sourced from structured <command-name> markers in count_tools, never
-        # from scanning free-prose user text.
-        hitl_mcp_invocations = count_hitl_mcp_invocations(
-            events, hitl_minute_set
-        )
-        # v0.11 — per-name MCP counter (skill + plugin maps come from `tc`).
-        # Each sums to its scalar counterpart.
-        mcp_invocations_by_name = count_hitl_mcp_invocations_by_name(
-            events, hitl_minute_set
-        )
-
-        # v0.8 — precise per-model token split. Only assistant events
-        # carry a model id and usage counts; the reader only sets
-        # input_tokens on the FIRST text event of a message so the per-
-        # model sum here doesn't double-count multi-block assistant
-        # messages. Skip events without a model — those are user/system
-        # events that don't carry token counts anyway. Invariants by
-        # construction:
-        #   Σ tokens_by_model[m].input_miss  == cache_creation_input_tokens
-        #   Σ tokens_by_model[m].input_hit   == cache_input_tokens
-        #   Σ tokens_by_model[m].output      == total_output_tokens
-        tokens_by_model: dict[str, dict[str, int]] = {}
-        for e in events:
-            model = e.model or (
-                _CURSOR_UNRESOLVED_MODEL if provider == "cursor" else None
-            )
-            if not model:
-                continue
-            in_miss = int(getattr(e, "cache_creation_input_tokens", 0) or 0)
-            in_hit = int(getattr(e, "cache_input_tokens", 0) or 0)
-            out = int(getattr(e, "output_tokens", 0) or 0)
-            if in_miss == 0 and in_hit == 0 and out == 0:
-                continue
-            slot = tokens_by_model.setdefault(
-                model, {"input_miss": 0, "input_hit": 0, "output": 0}
-            )
-            slot["input_miss"] += in_miss
-            slot["input_hit"] += in_hit
-            slot["output"] += out
-
-        # Slice 3 — Cursor-only: flag sessions whose assistant turns recorded
-        # zero token usage everywhere (tool-call ASSISTANT_TOOL events are
-        # structurally always zero for Cursor; only ASSISTANT_TEXT bubbles
-        # carry its tokenCount, and that's 0/0 at a very high rate per
-        # recon). Gated on provider == "cursor" so Claude/Codex sessions
-        # NEVER set this — their PerSession.token_data_missing stays the
-        # dataclass default (False), which output_schema.py suppresses on
-        # the wire, so those payloads are byte-identical to before this
-        # field existed.
-        assistant_events = [
-            e for e in events
-            if e.kind in (EventKind.ASSISTANT_TEXT, EventKind.ASSISTANT_TOOL)
-        ]
-        token_data_missing = (
-            provider == "cursor"
-            and bool(assistant_events)
-            and all(
-                e.input_tokens == 0
-                and e.output_tokens == 0
-                and e.cache_input_tokens == 0
-                for e in assistant_events
-            )
-        )
-
-        # Namespace the session hash by provider to avoid cross-provider
-        # collisions. Claude stays UNPREFIXED so the v0.11 Claude payload is
-        # byte-identical; only non-default providers (codex) get the
-        # ``<provider>:`` prefix. Same for the project hash, since two agents
-        # in the same cwd would otherwise collapse to one project bucket.
-        if provider == "claude":
-            session_hash = _sha16(s.session_id)
-            project_hash = _sha16(s.project_root)
-        else:
-            session_hash = _sha16(f"{provider}:{s.session_id}")
-            project_hash = _sha16(f"{provider}:{s.project_root}")
-
-        sessions.append(
-            PerSession(
-                session_hash=session_hash,
-                project_hash=project_hash,
-                started_at_ms=s.first_ts_ms,
-                ended_at_ms=s.last_ts_ms,
-                provider=provider,
-                token_data_missing=token_data_missing,
-                distinct_skills=distinct_skills,
-                distinct_mcp_tools=distinct_mcp_tools,
-                distinct_builtin_tools=distinct_builtin_tools,
-                hitl_minutes=hitl_minutes,
-                afk_minutes=afk_minutes,
-                idle_minutes=idle_minutes,
-                hitl_tool_minutes=hitl_tool_minutes,
-                afk_tool_minutes=afk_tool_minutes,
-                afk_dispatch_minutes=afk_dispatch_minutes,
-                afk_parallel_minutes_foreground=afk_parallel_fg,
-                cron_parallel_minutes=cron_parallel,
-                afk_max_streak_minutes=afk_max_streak,
-                afk_intervals=tuple(intervals),
-                top_afk_streaks=tuple(top_streaks),
-                strong_plan_signals=plan.strong,
-                weak_plan_signals=plan.weak,
-                is_planned=plan.is_planned,
-                files_modified=edits.files_modified,
-                total_lines_edited=edits.total_lines_edited,
-                commit_count=count_commits(events),
-                is_significant_edit_session=edits.is_significant,
-                revert_count=revert_count,
-                qualifying_pairs=rep.qualifying_pairs,
-                repetitive_pairs=rep.repetitive_pairs,
-                rage_quit_event=rage.rage_quit_event,
-                tool_error_count=tool_error_count,
-                auto_compaction_events=compaction.auto_compaction_events,
-                total_input_tokens=compaction.total_input_tokens,
-                total_output_tokens=compaction.total_output_tokens,
-                redundant_approvals_per_signature=approvals,
-                assistant_msgs_by_model=assistant_msgs_by_model,
-                user_skill_invocations=user_skill_invocations,
-                hitl_mcp_invocations=hitl_mcp_invocations,
-                # v0.7 — cache split + invocations + plugins + dispatches.
-                cache_input_tokens=compaction.cache_input_tokens,
-                cache_creation_input_tokens=compaction.cache_creation_input_tokens,
-                builtin_tool_invocations=builtin_tool_invocations,
-                plugin_invocations=plugin_invocations,
-                agent_dispatches=agent_dispatches,
-                # v0.8 — precise per-(model, leg) token split.
-                tokens_by_model=tokens_by_model,
-                # v0.11 — per-name invocation maps for the Top by
-                # invocations table.
-                skill_invocations_by_name=skill_invocations_by_name,
-                mcp_invocations_by_name=mcp_invocations_by_name,
-                plugin_invocations_by_name=plugin_invocations_by_name,
-            )
-        )
+    sessions: list[PerSession] = [
+        _build_per_session(s, provider, events, text_map, tc, artifact_times_by_project)
+        for s, provider, events, text_map, tc in loaded
+    ]
     # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
     # byte-equivalent to v0.11 (output_schema omits the key in that case).
     # Empty scans (no sessions) also report the default Claude-only set.

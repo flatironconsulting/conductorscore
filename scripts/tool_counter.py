@@ -121,6 +121,44 @@ class ToolCounts:
 
 
 @dataclass(frozen=True)
+class SessionToolFields:
+    """The subset of ``ToolCounts`` the scanner copies onto ``PerSession``.
+
+    A session with no ``jsonl_path`` (nothing to parse) never gets a
+    ``ToolCounts`` — its tool-related ``PerSession`` fields fall back to the
+    empty/zero defaults below. ``from_tool_counts(None)`` returns exactly
+    those defaults, so callers can use one code path regardless of whether
+    ``tc`` is present.
+    """
+
+    distinct_skills: tuple[str, ...] = ()
+    distinct_mcp_tools: tuple[str, ...] = ()
+    distinct_builtin_tools: tuple[str, ...] = ()
+    builtin_tool_invocations: int = 0
+    agent_dispatches: int = 0
+    plugin_invocations: int = 0
+    plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    user_skill_invocations: int = 0
+    skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_tool_counts(cls, tc: "ToolCounts | None") -> "SessionToolFields":
+        if tc is None:
+            return cls()
+        return cls(
+            distinct_skills=tuple(tc.distinct_skills),
+            distinct_mcp_tools=tuple(tc.distinct_mcp_tools),
+            distinct_builtin_tools=tuple(tc.distinct_builtin_tools),
+            builtin_tool_invocations=tc.builtin_tool_invocations,
+            agent_dispatches=tc.agent_dispatches,
+            plugin_invocations=tc.plugin_invocations,
+            plugin_invocations_by_name=dict(tc.plugin_invocations_by_name),
+            user_skill_invocations=tc.skill_invocations,
+            skill_invocations_by_name=dict(tc.skill_invocations_by_name),
+        )
+
+
+@dataclass(frozen=True)
 class CompactionAndTokens:
     """Auto-compaction event count + per-session token totals (v0.5).
 
