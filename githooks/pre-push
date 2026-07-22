@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Pre-push gate: the client test suite must pass before any push.
+#
+# Enable once per clone:   git config core.hooksPath githooks
+# Emergency bypass:        git push --no-verify
+#
+# Scope: unit + integration (~20s, stdlib-only; e2e is excluded — it shells
+# out to real agent CLIs and auto-skips or slows depending on the machine).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+echo "pre-push: pytest unit + integration…"
+( cd "$ROOT" && python3 -m pytest tests/unit tests/integration -q )
+
+echo "pre-push: OK"
