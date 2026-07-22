@@ -84,8 +84,8 @@ def test_open_ro_copies_wal_and_shm_sidecars(tmp_path):
     assert con is not None
     row = con.execute("PRAGMA database_list").fetchone()
     opened_path = Path(row[2])
-    con.close()
 
+    # Inspect the copy while the connection is open -- close() deletes it.
     assert Path(str(opened_path) + "-wal").is_file()
     assert Path(str(opened_path) + "-wal").read_bytes() == b"fake-wal-sidecar"
     # -shm is a wal-index that sqlite itself rebuilds on open (even mode=ro)
@@ -94,6 +94,7 @@ def test_open_ro_copies_wal_and_shm_sidecars(tmp_path):
     # not that its bytes are untouched (unlike the original db, see
     # test_open_ro_never_writes).
     assert Path(str(opened_path) + "-shm").is_file()
+    con.close()
     # the ORIGINAL sidecars must be completely untouched -- only the copy's
     # -shm may be rebuilt by sqlite.
     assert wal.read_bytes() == b"fake-wal-sidecar"
@@ -104,6 +105,66 @@ def test_open_ro_corrupt_file_returns_none(tmp_path):
     bad = tmp_path / "corrupt.vscdb"
     bad.write_bytes(b"this is not a sqlite database")
     assert open_ro(bad) is None
+
+
+def test_close_removes_temp_copy_dir(tmp_path):
+    """Closing the connection must delete the temp copy dir -- open_ro
+    copies the whole DB per call, so anything short of cleanup-on-close
+    fills the temp filesystem on large scans/test runs. Double-close must
+    stay safe (never raises).
+    """
+    con = open_ro(_db(tmp_path))
+    assert con is not None
+    row = con.execute("PRAGMA database_list").fetchone()
+    copy_dir = Path(row[2]).parent
+    assert copy_dir.is_dir()
+    con.close()
+    assert not copy_dir.exists()
+    con.close()  # idempotent
+
+
+def test_open_ro_corrupt_file_cleans_up_temp_copy(tmp_path, monkeypatch):
+    """The soft-fail-to-None path must not leak the copy it already made."""
+    import scripts.agents.cursor.store as store_mod
+
+    made = []
+    real_mkdtemp = store_mod.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        d = real_mkdtemp(*args, **kwargs)
+        made.append(Path(d))
+        return d
+
+    monkeypatch.setattr(store_mod.tempfile, "mkdtemp", recording_mkdtemp)
+    bad = tmp_path / "corrupt.vscdb"
+    bad.write_bytes(b"this is not a sqlite database")
+    assert open_ro(bad) is None
+    assert made, "expected open_ro to have copied via mkdtemp"
+    assert not any(d.exists() for d in made)
+
+
+def test_copy_failure_cleans_up_temp_dir(tmp_path, monkeypatch):
+    """If the copy itself fails mid-way (OSError), the fresh temp dir must
+    not be left behind either.
+    """
+    import scripts.agents.cursor.store as store_mod
+
+    made = []
+    real_mkdtemp = store_mod.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        d = real_mkdtemp(*args, **kwargs)
+        made.append(Path(d))
+        return d
+
+    def failing_copy2(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store_mod.tempfile, "mkdtemp", recording_mkdtemp)
+    monkeypatch.setattr(store_mod.shutil, "copy2", failing_copy2)
+    assert open_ro(_db(tmp_path)) is None
+    assert made, "expected open_ro to have created a temp dir"
+    assert not any(d.exists() for d in made)
 
 
 def test_kv_get_json_missing_key_returns_none(tmp_path):

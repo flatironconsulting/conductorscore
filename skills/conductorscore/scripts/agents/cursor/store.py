@@ -41,13 +41,31 @@ from pathlib import Path
 _TABLES = frozenset({"cursorDiskKV", "ItemTable", "meta", "blobs"})
 
 
+class _CopyConnection(sqlite3.Connection):
+    """Connection to a temp COPY that deletes the copy's directory on
+    ``close()``. Every ``open_ro`` call materializes a full copy of the
+    store, so without cleanup-on-close a scan or test run fills the temp
+    filesystem. Idempotent and never raises on cleanup (``rmtree`` with
+    ``ignore_errors``); an unclosed connection at worst leaks one dir per
+    process, not one per open.
+    """
+
+    _copy_dir: str | None = None
+
+    def close(self) -> None:
+        super().close()
+        copy_dir, self._copy_dir = self._copy_dir, None
+        if copy_dir is not None:
+            shutil.rmtree(copy_dir, ignore_errors=True)
+
+
 def open_ro(db_path: Path) -> sqlite3.Connection | None:
     """Open a read-only connection to a COPY of ``db_path``.
 
     Always copies first (see module docstring); never opens the original
     file directly, for reading or otherwise. Returns ``None`` on any
     failure: missing file, copy failure, or an unopenable/corrupt database.
-    Never raises.
+    Never raises. Closing the returned connection deletes the temp copy.
     """
     if not db_path.is_file():
         return None
@@ -55,7 +73,14 @@ def open_ro(db_path: Path) -> sqlite3.Connection | None:
     if copy_path is None:
         return None
     try:
-        con = sqlite3.connect(f"file:{copy_path}?mode=ro", uri=True)
+        con = sqlite3.connect(
+            f"file:{copy_path}?mode=ro", uri=True, factory=_CopyConnection
+        )
+    except sqlite3.Error:
+        shutil.rmtree(copy_path.parent, ignore_errors=True)
+        return None
+    con._copy_dir = str(copy_path.parent)
+    try:
         # Force a header/schema read so a corrupt or non-SQLite file is
         # rejected here (-> None), not lazily on first real query. `SELECT 1`
         # is a constant that never touches the DB file, so on some SQLite
@@ -64,14 +89,16 @@ def open_ro(db_path: Path) -> sqlite3.Connection | None:
         con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
         return con
     except sqlite3.Error:
+        con.close()
         return None
 
 
 def _copy_to_temp(db_path: Path) -> Path | None:
     """Copy ``db_path`` and its ``-wal``/``-shm`` sidecars (if present) into
     a fresh temp directory. Returns the copy's path, or ``None`` on any
-    ``OSError`` (never raises).
+    ``OSError`` (never raises; the temp dir is removed on failure).
     """
+    tmp = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="conductorscore-cursor-"))
         dest = tmp / db_path.name
@@ -82,6 +109,8 @@ def _copy_to_temp(db_path: Path) -> Path | None:
                 shutil.copy2(src, Path(str(dest) + suffix))
         return dest
     except OSError:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
         return None
 
 
