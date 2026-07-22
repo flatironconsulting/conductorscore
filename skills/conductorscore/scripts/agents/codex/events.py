@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
@@ -164,6 +164,22 @@ _EXIT_CODE_RE = re.compile(r"(?:Process exited with code|Exit code:)\s*(\d+)")
 _ABORTED_RE = re.compile(r"aborted by user", re.IGNORECASE)
 
 
+def _output_text(output: object) -> str | None:
+    """Unwrap a Codex tool output to its text, or ``None`` when there is none.
+
+    Accepts a plain string, or a dict wrapping content under an ``output``
+    key (``{"output": "...", ...}``) — the shape some Codex tool outputs use.
+    Returns ``None`` for anything else, INCLUDING an empty/falsy string, so
+    callers can early-return uniformly on ``is None`` without a separate
+    truthiness check.
+    """
+    text = output if isinstance(output, str) else None
+    if text is None and isinstance(output, dict):
+        inner = output.get("output")
+        text = inner if isinstance(inner, str) else None
+    return text if text else None
+
+
 def _output_is_aborted(output: object) -> bool:
     """True when a Codex tool output indicates a user-aborted/interrupted call.
 
@@ -172,11 +188,8 @@ def _output_is_aborted(output: object) -> bool:
     raw output text. Used to exclude the call→result interval from tool-runtime
     crediting so a hung-then-killed command doesn't count as active runtime.
     """
-    text = output if isinstance(output, str) else None
-    if text is None and isinstance(output, dict):
-        inner = output.get("output")
-        text = inner if isinstance(inner, str) else None
-    if not text:
+    text = _output_text(output)
+    if text is None:
         return False
     return bool(_ABORTED_RE.search(text))
 
@@ -191,11 +204,8 @@ def _output_is_denied(output: object) -> bool:
     ``DENIAL_MARKER``). Only a boolean crosses out of here — never the raw
     output text.
     """
-    text = output if isinstance(output, str) else None
-    if text is None and isinstance(output, dict):
-        inner = output.get("output")
-        text = inner if isinstance(inner, str) else None
-    if not text:
+    text = _output_text(output)
+    if text is None:
         return False
     return DENIAL_MARKER in text
 
@@ -224,12 +234,8 @@ def _output_is_error(output: object) -> bool:
     for outputs with no exit-code marker (e.g. apply_patch success). Only a
     boolean crosses out of here — never the raw output text.
     """
-    text = output if isinstance(output, str) else None
-    if text is None and isinstance(output, dict):
-        # Some outputs wrap content in {"output": "...", ...}.
-        inner = output.get("output")
-        text = inner if isinstance(inner, str) else None
-    if not text:
+    text = _output_text(output)
+    if text is None:
         return False
     m = _EXIT_CODE_RE.search(text)
     return bool(m) and m.group(1) != "0"
@@ -363,6 +369,45 @@ def _multi_agent_result_input(name: str | None, output: object) -> dict | None:
     return out
 
 
+def _edit_craft_from_files(files: list[tuple[str, int]]) -> dict:
+    """Build the shared edit-craft fields from parsed ``(path, line_count)``
+    pairs (an ``apply_patch`` V4A body or a ``patch_apply_end.changes`` map,
+    both already reduced to this shape by the taxonomy parsers).
+
+    Hashes each path IMMEDIATELY (``sha256[:16]``, reusing the Claude edit
+    path-hash) — the raw path is never stored. Multi-file edits land in
+    ``edit_files``; the scalar ``edit_file_path_hash`` / ``edit_line_count`` /
+    ``is_excluded_edit_path`` mirror the first file for single-file
+    consumers. A plan-shaped ``.md`` target fires ``is_plan_file_write``.
+    Returns ``{}`` when ``files`` is empty.
+    """
+    # Late import to avoid a cycle: claude events imports plan_signals which
+    # imports Event from core.normalized.
+    from scripts.agents.claude.events import (
+        _is_excluded_edit_path,
+        _sha16 as _edit_sha16,
+    )
+    from scripts.plan_signals import is_plan_shaped_path
+
+    if not files:
+        return {}
+    edit_files: list[tuple[str, int, bool]] = []
+    is_plan_write = False
+    for path, lines in files:
+        edit_files.append(
+            (_edit_sha16(path), lines, _is_excluded_edit_path(path))
+        )
+        if path.lower().endswith(".md") and is_plan_shaped_path(path):
+            is_plan_write = True
+    return {
+        "edit_files": tuple(edit_files),
+        "edit_file_path_hash": edit_files[0][0],
+        "edit_line_count": edit_files[0][1],
+        "is_excluded_edit_path": edit_files[0][2],
+        "is_plan_file_write": is_plan_write,
+    }
+
+
 def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
     """Compute the SHARED structural craft fields for a Codex tool call.
 
@@ -384,14 +429,6 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
     serialized (``raw_input`` is never written to the wire — see the
     privacy-invariant test).
     """
-    # Late import to avoid a cycle: claude events imports plan_signals which
-    # imports Event from core.normalized.
-    from scripts.agents.claude.events import (
-        _is_excluded_edit_path,
-        _sha16 as _edit_sha16,
-    )
-    from scripts.plan_signals import is_plan_shaped_path
-
     craft: dict = {}
     if name in EDIT_TOOL_NAMES:
         # apply_patch carries its V4A body under ``input`` (custom tool call).
@@ -399,22 +436,7 @@ def _build_codex_tool_craft(name: str | None, payload: dict) -> dict:
         if not isinstance(body, str):
             body = ""
         files = parse_apply_patch_files(body)
-        if files:
-            edit_files: list[tuple[str, int, bool]] = []
-            is_plan_write = False
-            for path, lines in files:
-                edit_files.append(
-                    (_edit_sha16(path), lines, _is_excluded_edit_path(path))
-                )
-                if path.lower().endswith(".md") and is_plan_shaped_path(path):
-                    is_plan_write = True
-            craft["edit_files"] = tuple(edit_files)
-            # Mirror the first file into the scalar fields so single-file
-            # consumers / debug renders still see a hash.
-            craft["edit_file_path_hash"] = edit_files[0][0]
-            craft["edit_line_count"] = edit_files[0][1]
-            craft["is_excluded_edit_path"] = edit_files[0][2]
-            craft["is_plan_file_write"] = is_plan_write
+        craft.update(_edit_craft_from_files(files))
     elif name in SHELL_TOOL_NAMES:
         cmd = normalize_shell_command(payload.get("arguments"))
         if cmd:
@@ -469,6 +491,376 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
     return _read(jsonl_path, want_text=True)
 
 
+@dataclass
+class _ReadContext:
+    """Mutable state threaded across ``_read``'s row loop.
+
+    One instance per ``_read`` call. ``events`` / ``text_map`` are the
+    accumulating output; the rest are the ladder's carry-state, formerly
+    separate local variables mutated in place across iterations:
+
+      * ``call_names`` / ``call_indices``: tool ``call_id`` -> tool name /
+        index into ``events``, so a later output row attaches as
+        TOOL_RESULT (never a new call) and multi-agent results can promote
+        an earlier ASSISTANT_TOOL in place.
+      * ``current_model``: the most recent ``turn_context`` (or, absent
+        that, ``session_meta``) model id, stamped onto assistant events.
+      * ``last_assistant_idx``: index of the most recent assistant text
+        event, so the next ``token_count`` row can attach its usage.
+      * ``turn_close_idx``: index of the most recent assistant text/tool
+        event in the CURRENT turn; ``task_complete`` promotes it to
+        ``end_turn`` (see ``_handle_event_msg``).
+    """
+
+    session_id: str
+    want_text: bool
+    # Decide the turn source once: response_item messages win; event_msg is
+    # a fallback only when there are no response_item messages at all.
+    use_response_items: bool
+    events: list[Event] = field(default_factory=list)
+    text_map: dict[int, str] = field(default_factory=dict)
+    call_names: dict[str, str] = field(default_factory=dict)
+    call_indices: dict[str, int] = field(default_factory=dict)
+    current_model: str | None = None
+    last_assistant_idx: int | None = None
+    turn_close_idx: int | None = None
+
+
+def _handle_response_item(
+    ctx: _ReadContext, payload: dict, ts_ms: int, is_structured_prompt
+) -> None:
+    """Handle one ``response_item`` row: messages, tool calls/results."""
+    ptype = payload.get("type")
+
+    # --- Messages (primary turn source) ---------------------------
+    if ptype == "message" and ctx.use_response_items:
+        role = payload.get("role")
+        if role == "user":
+            text = _message_text(payload)
+            if not text:
+                return
+            token_count = _approx_token_count(text)
+            structured = is_structured_prompt(text, token_count)
+            ev = Event(
+                kind=EventKind.USER,
+                session_id=ctx.session_id,
+                timestamp_ms=ts_ms,
+                user_text_hash=_sha16(text),
+                user_text_token_count=token_count,
+                is_structured_prompt=structured,
+            )
+            ctx.events.append(ev)
+            if ctx.want_text:
+                ctx.text_map[id(ev)] = text
+            # New turn opens: any pending closer belonged to a turn
+            # that ended without a task_complete marker.
+            ctx.turn_close_idx = None
+        elif role == "assistant":
+            # NOT end_turn — Codex emits many assistant messages per
+            # turn. task_complete marks the real boundary (see below).
+            ctx.events.append(
+                Event(
+                    kind=EventKind.ASSISTANT_TEXT,
+                    session_id=ctx.session_id,
+                    timestamp_ms=ts_ms,
+                    stop_reason="tool_use",
+                    model=ctx.current_model,
+                )
+            )
+            ctx.last_assistant_idx = len(ctx.events) - 1
+            ctx.turn_close_idx = len(ctx.events) - 1
+        return
+
+    # --- Tool calls -----------------------------------------------
+    if ptype in ("function_call", "custom_tool_call"):
+        name = payload.get("name")
+        name = name if isinstance(name, str) and name else None
+        # MCP tools carry a ``namespace`` (e.g. "mcp__playwright") even
+        # when ``name`` is bare ("browser_navigate"). Fold it into the
+        # canonical ``mcp__server__tool`` name so the shared tool
+        # counter recognizes the MCP session invocation. Without this
+        # the bare name looks like an unknown built-in and MCP usage
+        # reads as zero. Only categorical names are kept — never args.
+        namespace = payload.get("namespace")
+        if isinstance(namespace, str) and namespace and name:
+            name = f"{namespace}__{name}"
+        call_id = payload.get("call_id")
+        call_id = call_id if isinstance(call_id, str) else None
+        if name and call_id:
+            ctx.call_names[call_id] = name
+        craft = _build_codex_tool_craft(name, payload)
+        ctx.events.append(
+            Event(
+                kind=EventKind.ASSISTANT_TOOL,
+                session_id=ctx.session_id,
+                timestamp_ms=ts_ms,
+                tool_name=name,
+                tool_use_id=call_id,
+                stop_reason="tool_use",
+                **craft,
+            )
+        )
+        if call_id:
+            ctx.call_indices[call_id] = len(ctx.events) - 1
+        ctx.turn_close_idx = len(ctx.events) - 1
+        return
+
+    # --- Web search call (its own response_item kind) -------------
+    # A ``web_search_call`` row IS the tool invocation; its tool
+    # name is the built-in ``web_search`` (no ``name`` field on the
+    # payload). Counts as one ASSISTANT_TOOL like any other call.
+    if ptype == "web_search_call":
+        call_id = payload.get("call_id")
+        call_id = call_id if isinstance(call_id, str) else None
+        if call_id:
+            ctx.call_names[call_id] = "web_search"
+        ctx.events.append(
+            Event(
+                kind=EventKind.ASSISTANT_TOOL,
+                session_id=ctx.session_id,
+                timestamp_ms=ts_ms,
+                tool_name="web_search",
+                tool_use_id=call_id,
+                stop_reason="tool_use",
+            )
+        )
+        if call_id:
+            ctx.call_indices[call_id] = len(ctx.events) - 1
+        ctx.turn_close_idx = len(ctx.events) - 1
+        return
+
+    # --- Tool outputs → results (NOT new calls) -------------------
+    if ptype in ("function_call_output", "custom_tool_call_output"):
+        call_id = payload.get("call_id")
+        call_id = call_id if isinstance(call_id, str) else None
+        tool_name = ctx.call_names.get(call_id) if call_id else None
+        output = payload.get("output")
+        raw_result = _multi_agent_result_input(tool_name, output)
+        subagent_id = None
+        if raw_result:
+            agent_id = raw_result.get("agent_id")
+            if isinstance(agent_id, str):
+                subagent_id = agent_id
+                idx = ctx.call_indices.get(call_id) if call_id else None
+                if idx is not None:
+                    prev = ctx.events[idx]
+                    ctx.events[idx] = replace(prev, subagent_id=agent_id)
+        ctx.events.append(
+            Event(
+                kind=EventKind.TOOL_RESULT,
+                session_id=ctx.session_id,
+                timestamp_ms=ts_ms,
+                tool_name=tool_name,
+                tool_use_id=call_id,
+                subagent_id=subagent_id,
+                raw_input=raw_result,
+                # Non-zero shell/exec exit code → tool error (feeds
+                # tool_error_count). Boolean only; output not stored.
+                is_error=_output_is_error(output),
+                # User aborted/killed the call mid-run → exclude its
+                # call→result span from tool-runtime crediting.
+                is_aborted=_output_is_aborted(output),
+                # User DECLINED the call at the approval prompt —
+                # "… rejected by user" synthesized output (the
+                # approval-request events themselves are transient
+                # and never persisted). Feeds the approval-friction
+                # (denial) metrics like Claude's DENIAL_MARKERS.
+                is_denied=_output_is_denied(output),
+            )
+        )
+        return
+
+    # Other response_item kinds (reasoning, etc.) are ignored.
+    return
+
+
+def _handle_event_msg(
+    ctx: _ReadContext, payload: dict, ts_ms: int, is_structured_prompt
+) -> None:
+    """Handle one ``event_msg`` row: display fallback, turn/token/tool markers."""
+    ptype = payload.get("type")
+    # Fallback ONLY when there are no response_item messages.
+    if not ctx.use_response_items:
+        if ptype == "user_message":
+            msg = payload.get("message")
+            text = msg if isinstance(msg, str) else ""
+            if not text:
+                return
+            token_count = _approx_token_count(text)
+            structured = is_structured_prompt(text, token_count)
+            ev = Event(
+                kind=EventKind.USER,
+                session_id=ctx.session_id,
+                timestamp_ms=ts_ms,
+                user_text_hash=_sha16(text),
+                user_text_token_count=token_count,
+                is_structured_prompt=structured,
+            )
+            ctx.events.append(ev)
+            if ctx.want_text:
+                ctx.text_map[id(ev)] = text
+            ctx.turn_close_idx = None
+            return
+        if ptype == "agent_message":
+            msg = payload.get("message")
+            if isinstance(msg, str) and msg:
+                ctx.events.append(
+                    Event(
+                        kind=EventKind.ASSISTANT_TEXT,
+                        session_id=ctx.session_id,
+                        timestamp_ms=ts_ms,
+                        stop_reason="tool_use",
+                        model=ctx.current_model,
+                    )
+                )
+                ctx.last_assistant_idx = len(ctx.events) - 1
+                ctx.turn_close_idx = len(ctx.events) - 1
+            return
+
+    # task_complete marks the REAL end of a Codex agent turn. Promote
+    # the latest assistant event of the turn to ``end_turn`` so the
+    # shared turn classifier closes the turn here — capturing all the
+    # autonomous tool work since the user's message as ONE turn (which
+    # becomes AFK when its active time exceeds the HITL threshold).
+    if ptype == "task_complete":
+        if ctx.turn_close_idx is not None:
+            prev = ctx.events[ctx.turn_close_idx]
+            ctx.events[ctx.turn_close_idx] = replace(prev, stop_reason="end_turn")
+            ctx.turn_close_idx = None
+        return
+
+    # token_count: attach the per-turn usage to the most recent
+    # assistant text event so the scanner's token metrics are
+    # non-zero. The row carries no timeline event of its own.
+    #   payload.info.last_token_usage =
+    #     {input_tokens, cached_input_tokens, output_tokens, total_tokens}
+    # The split mirrors the scanner invariants:
+    #   cache_input_tokens          = cached_input_tokens (HIT)
+    #   cache_creation_input_tokens = input_tokens - cached (MISS)
+    #   input_tokens                = input_tokens
+    #   output_tokens               = output_tokens
+    if ptype == "token_count" and ctx.last_assistant_idx is not None:
+        usage = _last_token_usage(payload)
+        if usage is not None:
+            in_total, cached, out = usage
+            miss = max(0, in_total - cached)
+            prev = ctx.events[ctx.last_assistant_idx]
+            ctx.events[ctx.last_assistant_idx] = replace(
+                prev,
+                input_tokens=in_total,
+                output_tokens=out,
+                cache_input_tokens=cached,
+                cache_creation_input_tokens=miss,
+            )
+        # Only the first token_count after an assistant turn applies;
+        # clear so a later turn's usage doesn't re-attach here.
+        ctx.last_assistant_idx = None
+        return
+    if ptype == "mcp_tool_call_end":
+        _handle_mcp_tool_call_end(ctx, payload, ts_ms)
+        return
+
+    if ptype == "patch_apply_end":
+        _handle_patch_apply_end(ctx, payload, ts_ms)
+        return
+
+    # context_compacted: legacy-mode duplicate of the top-level
+    # ``compacted`` row handled in ``_read`` — deliberately ignored so one
+    # compaction never counts twice.
+    # Other event_msg payloads: must not crash, no event emitted.
+    return
+
+
+def _handle_mcp_tool_call_end(ctx: _ReadContext, payload: dict, ts_ms: int) -> None:
+    """mcp_tool_call_end is the ONLY persisted MCP record in modern (0.14x)
+    rollouts — MCP/connector tools are invoked from the JS ``exec`` runtime
+    and never appear as function_call rows. Fold ``invocation.{server,tool}``
+    into the canonical ``mcp__server__tool`` name (same shape the old
+    namespace fold produced) and emit a call+result pair so MCP counting,
+    HITL MCP invocations, and tool errors all work. ``result`` is a Rust
+    Result: {"Err": …} or {"Ok": {isError: bool}}. The payload's
+    ``plugin_id`` (marketplace plugins) is not yet counted — no Event field
+    carries it today.
+    """
+    invocation = payload.get("invocation")
+    server = tool = None
+    if isinstance(invocation, dict):
+        server = invocation.get("server")
+        tool = invocation.get("tool")
+    if not (isinstance(server, str) and server and isinstance(tool, str) and tool):
+        return
+    name = f"mcp__{server}__{tool}"
+    call_id = payload.get("call_id")
+    call_id = call_id if isinstance(call_id, str) else None
+    # Marketplace-plugin marker (``<plugin>@<marketplace>``, protocol.rs
+    # McpToolCallEndEvent.plugin_id) — absent on plain connector/app calls.
+    plugin_id = payload.get("plugin_id")
+    plugin_id = plugin_id if isinstance(plugin_id, str) and plugin_id else None
+    ctx.events.append(
+        Event(
+            kind=EventKind.ASSISTANT_TOOL,
+            session_id=ctx.session_id,
+            timestamp_ms=ts_ms,
+            tool_name=name,
+            tool_use_id=call_id,
+            stop_reason="tool_use",
+            plugin_name=plugin_id,
+        )
+    )
+    ctx.turn_close_idx = len(ctx.events) - 1
+    ctx.events.append(
+        Event(
+            kind=EventKind.TOOL_RESULT,
+            session_id=ctx.session_id,
+            timestamp_ms=ts_ms,
+            tool_name=name,
+            tool_use_id=call_id,
+            is_error=_mcp_result_is_error(payload.get("result")),
+        )
+    )
+
+
+def _handle_patch_apply_end(ctx: _ReadContext, payload: dict, ts_ms: int) -> None:
+    """patch_apply_end carries the file-edit footprint in modern (0.14x)
+    rollouts — no ``apply_patch`` custom_tool_call exists there. Emit an
+    apply_patch call+result pair with hashed paths + line counts (``changes``
+    parsed by taxonomy.parse_patch_changes; raw paths hashed IMMEDIATELY,
+    never stored) and surface ``success: false`` as a tool error. Guarded on
+    call_id NOT already seen as a custom_tool_call so a rollout that carries
+    BOTH shapes never double-counts the edit.
+    """
+    call_id = payload.get("call_id")
+    call_id = call_id if isinstance(call_id, str) else None
+    if call_id and call_id in ctx.call_names:
+        return
+    files = parse_patch_changes(payload.get("changes"))
+    craft = _edit_craft_from_files(files)
+    if call_id:
+        ctx.call_names[call_id] = "apply_patch"
+    ctx.events.append(
+        Event(
+            kind=EventKind.ASSISTANT_TOOL,
+            session_id=ctx.session_id,
+            timestamp_ms=ts_ms,
+            tool_name="apply_patch",
+            tool_use_id=call_id,
+            stop_reason="tool_use",
+            **craft,
+        )
+    )
+    ctx.turn_close_idx = len(ctx.events) - 1
+    ctx.events.append(
+        Event(
+            kind=EventKind.TOOL_RESULT,
+            session_id=ctx.session_id,
+            timestamp_ms=ts_ms,
+            tool_name="apply_patch",
+            tool_use_id=call_id,
+            is_error=payload.get("success") is False,
+        )
+    )
+
+
 def _read(
     jsonl_path: Path, *, want_text: bool
 ) -> tuple[list[Event], dict[int, str]]:
@@ -476,36 +868,13 @@ def _read(
     from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
 
     session_id = jsonl_path.stem
-    events: list[Event] = []
-    text_map: dict[int, str] = {}
-
-    # Decide the turn source once: response_item messages win; event_msg is
-    # a fallback only when there are no response_item messages at all.
-    use_response_items = _has_response_item_messages(jsonl_path)
-
-    # Map tool call_id -> tool_name so outputs can attach as TOOL_RESULT.
-    call_names: dict[str, str] = {}
-    call_indices: dict[str, int] = {}
-
-    # The active model id from the most recent ``turn_context`` row. Codex
-    # carries the model per-turn there (e.g. "gpt-5-codex"); we stamp it
-    # onto assistant events so the per-model token rollups have a key.
-    current_model: str | None = None
-    # Index into ``events`` of the most recent assistant text event, so a
-    # following per-turn ``token_count`` row can attach its usage to it.
-    last_assistant_idx: int | None = None
-    # Index of the most recent assistant text/tool event in the CURRENT turn,
-    # used to mark the real turn boundary. Codex interleaves many assistant
-    # commentary messages between tool calls, so an individual assistant
-    # message is NOT a turn end (marking each one end_turn would shatter a
-    # long autonomous turn into seconds-long micro-turns and erase all AFK
-    # time). The true boundary is ``event_msg.task_complete``: when we see it
-    # we promote the latest assistant event of the turn to ``end_turn``. If a
-    # session has no task_complete, the turn naturally closes at the next USER
-    # or session end — still one turn, so AFK is preserved. Unlike
-    # ``last_assistant_idx`` this is NOT cleared by token_count (which precedes
-    # task_complete in the row order).
-    turn_close_idx: int | None = None
+    ctx = _ReadContext(
+        session_id=session_id,
+        want_text=want_text,
+        # Decide the turn source once: response_item messages win; event_msg
+        # is a fallback only when there are no response_item messages at all.
+        use_response_items=_has_response_item_messages(jsonl_path),
+    )
 
     for d, ts_ms in _iter_rows(jsonl_path):
         top = d.get("type")
@@ -514,7 +883,7 @@ def _read(
         if top == "turn_context":
             m = payload.get("model")
             if isinstance(m, str) and m:
-                current_model = m
+                ctx.current_model = m
             continue
 
         if top == "compacted":
@@ -524,7 +893,7 @@ def _read(
             # signal. The legacy-mode ``event_msg.context_compacted`` that
             # follows a few rows later describes the SAME compaction and is
             # deliberately ignored below to avoid double-counting.
-            events.append(
+            ctx.events.append(
                 Event(
                     kind=EventKind.SYSTEM,
                     session_id=session_id,
@@ -537,365 +906,24 @@ def _read(
         if top == "session_meta":
             # The session-level model_provider can seed a model label when no
             # turn_context model is present; turn_context overrides it.
-            if current_model is None:
+            if ctx.current_model is None:
                 prov = payload.get("model_provider")
                 if isinstance(prov, str) and prov:
-                    current_model = prov
+                    ctx.current_model = prov
             continue
 
         if top == "response_item":
-            ptype = payload.get("type")
-
-            # --- Messages (primary turn source) ---------------------------
-            if ptype == "message" and use_response_items:
-                role = payload.get("role")
-                if role == "user":
-                    text = _message_text(payload)
-                    if not text:
-                        continue
-                    token_count = _approx_token_count(text)
-                    structured = _is_structured_prompt(text, token_count)
-                    ev = Event(
-                        kind=EventKind.USER,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        user_text_hash=_sha16(text),
-                        user_text_token_count=token_count,
-                        is_structured_prompt=structured,
-                    )
-                    events.append(ev)
-                    if want_text:
-                        text_map[id(ev)] = text
-                    # New turn opens: any pending closer belonged to a turn
-                    # that ended without a task_complete marker.
-                    turn_close_idx = None
-                elif role == "assistant":
-                    # NOT end_turn — Codex emits many assistant messages per
-                    # turn. task_complete marks the real boundary (see below).
-                    events.append(
-                        Event(
-                            kind=EventKind.ASSISTANT_TEXT,
-                            session_id=session_id,
-                            timestamp_ms=ts_ms,
-                            stop_reason="tool_use",
-                            model=current_model,
-                        )
-                    )
-                    last_assistant_idx = len(events) - 1
-                    turn_close_idx = len(events) - 1
-                continue
-
-            # --- Tool calls -----------------------------------------------
-            if ptype in ("function_call", "custom_tool_call"):
-                name = payload.get("name")
-                name = name if isinstance(name, str) and name else None
-                # MCP tools carry a ``namespace`` (e.g. "mcp__playwright") even
-                # when ``name`` is bare ("browser_navigate"). Fold it into the
-                # canonical ``mcp__server__tool`` name so the shared tool
-                # counter recognizes the MCP session invocation. Without this
-                # the bare name looks like an unknown built-in and MCP usage
-                # reads as zero. Only categorical names are kept — never args.
-                namespace = payload.get("namespace")
-                if isinstance(namespace, str) and namespace and name:
-                    name = f"{namespace}__{name}"
-                call_id = payload.get("call_id")
-                call_id = call_id if isinstance(call_id, str) else None
-                if name and call_id:
-                    call_names[call_id] = name
-                craft = _build_codex_tool_craft(name, payload)
-                events.append(
-                    Event(
-                        kind=EventKind.ASSISTANT_TOOL,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_name=name,
-                        tool_use_id=call_id,
-                        stop_reason="tool_use",
-                        **craft,
-                    )
-                )
-                if call_id:
-                    call_indices[call_id] = len(events) - 1
-                turn_close_idx = len(events) - 1
-                continue
-
-            # --- Web search call (its own response_item kind) -------------
-            # A ``web_search_call`` row IS the tool invocation; its tool
-            # name is the built-in ``web_search`` (no ``name`` field on the
-            # payload). Counts as one ASSISTANT_TOOL like any other call.
-            if ptype == "web_search_call":
-                call_id = payload.get("call_id")
-                call_id = call_id if isinstance(call_id, str) else None
-                if call_id:
-                    call_names[call_id] = "web_search"
-                events.append(
-                    Event(
-                        kind=EventKind.ASSISTANT_TOOL,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_name="web_search",
-                        tool_use_id=call_id,
-                        stop_reason="tool_use",
-                    )
-                )
-                if call_id:
-                    call_indices[call_id] = len(events) - 1
-                turn_close_idx = len(events) - 1
-                continue
-
-            # --- Tool outputs → results (NOT new calls) -------------------
-            if ptype in ("function_call_output", "custom_tool_call_output"):
-                call_id = payload.get("call_id")
-                call_id = call_id if isinstance(call_id, str) else None
-                tool_name = call_names.get(call_id) if call_id else None
-                raw_result = _multi_agent_result_input(tool_name, payload.get("output"))
-                subagent_id = None
-                if raw_result:
-                    agent_id = raw_result.get("agent_id")
-                    if isinstance(agent_id, str):
-                        subagent_id = agent_id
-                        idx = call_indices.get(call_id) if call_id else None
-                        if idx is not None:
-                            prev = events[idx]
-                            events[idx] = replace(prev, subagent_id=agent_id)
-                events.append(
-                    Event(
-                        kind=EventKind.TOOL_RESULT,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_name=tool_name,
-                        tool_use_id=call_id,
-                        subagent_id=subagent_id,
-                        raw_input=raw_result,
-                        # Non-zero shell/exec exit code → tool error (feeds
-                        # tool_error_count). Boolean only; output not stored.
-                        is_error=_output_is_error(payload.get("output")),
-                        # User aborted/killed the call mid-run → exclude its
-                        # call→result span from tool-runtime crediting.
-                        is_aborted=_output_is_aborted(payload.get("output")),
-                        # User DECLINED the call at the approval prompt —
-                        # "… rejected by user" synthesized output (the
-                        # approval-request events themselves are transient
-                        # and never persisted). Feeds the approval-friction
-                        # (denial) metrics like Claude's DENIAL_MARKERS.
-                        is_denied=_output_is_denied(payload.get("output")),
-                    )
-                )
-                continue
-
-            # Other response_item kinds (reasoning, etc.) are ignored.
+            _handle_response_item(ctx, payload, ts_ms, _is_structured_prompt)
             continue
 
         if top == "event_msg":
-            ptype = payload.get("type")
-            # Fallback ONLY when there are no response_item messages.
-            if not use_response_items:
-                if ptype == "user_message":
-                    msg = payload.get("message")
-                    text = msg if isinstance(msg, str) else ""
-                    if not text:
-                        continue
-                    token_count = _approx_token_count(text)
-                    structured = _is_structured_prompt(text, token_count)
-                    ev = Event(
-                        kind=EventKind.USER,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        user_text_hash=_sha16(text),
-                        user_text_token_count=token_count,
-                        is_structured_prompt=structured,
-                    )
-                    events.append(ev)
-                    if want_text:
-                        text_map[id(ev)] = text
-                    turn_close_idx = None
-                    continue
-                if ptype == "agent_message":
-                    msg = payload.get("message")
-                    if isinstance(msg, str) and msg:
-                        events.append(
-                            Event(
-                                kind=EventKind.ASSISTANT_TEXT,
-                                session_id=session_id,
-                                timestamp_ms=ts_ms,
-                                stop_reason="tool_use",
-                                model=current_model,
-                            )
-                        )
-                        last_assistant_idx = len(events) - 1
-                        turn_close_idx = len(events) - 1
-                    continue
-
-            # task_complete marks the REAL end of a Codex agent turn. Promote
-            # the latest assistant event of the turn to ``end_turn`` so the
-            # shared turn classifier closes the turn here — capturing all the
-            # autonomous tool work since the user's message as ONE turn (which
-            # becomes AFK when its active time exceeds the HITL threshold).
-            if ptype == "task_complete":
-                if turn_close_idx is not None:
-                    prev = events[turn_close_idx]
-                    events[turn_close_idx] = replace(prev, stop_reason="end_turn")
-                    turn_close_idx = None
-                continue
-
-            # token_count: attach the per-turn usage to the most recent
-            # assistant text event so the scanner's token metrics are
-            # non-zero. The row carries no timeline event of its own.
-            #   payload.info.last_token_usage =
-            #     {input_tokens, cached_input_tokens, output_tokens, total_tokens}
-            # The split mirrors the scanner invariants:
-            #   cache_input_tokens          = cached_input_tokens (HIT)
-            #   cache_creation_input_tokens = input_tokens - cached (MISS)
-            #   input_tokens                = input_tokens
-            #   output_tokens               = output_tokens
-            if ptype == "token_count" and last_assistant_idx is not None:
-                usage = _last_token_usage(payload)
-                if usage is not None:
-                    in_total, cached, out = usage
-                    miss = max(0, in_total - cached)
-                    prev = events[last_assistant_idx]
-                    events[last_assistant_idx] = replace(
-                        prev,
-                        input_tokens=in_total,
-                        output_tokens=out,
-                        cache_input_tokens=cached,
-                        cache_creation_input_tokens=miss,
-                    )
-                # Only the first token_count after an assistant turn applies;
-                # clear so a later turn's usage doesn't re-attach here.
-                last_assistant_idx = None
-                continue
-            # mcp_tool_call_end is the ONLY persisted MCP record in modern
-            # (0.14x) rollouts — MCP/connector tools are invoked from the JS
-            # ``exec`` runtime and never appear as function_call rows. Fold
-            # ``invocation.{server,tool}`` into the canonical
-            # ``mcp__server__tool`` name (same shape the old namespace fold
-            # produced) and emit a call+result pair so MCP counting, HITL MCP
-            # invocations, and tool errors all work. ``result`` is a Rust
-            # Result: {"Err": …} or {"Ok": {isError: bool}}. The payload's
-            # ``plugin_id`` (marketplace plugins) is not yet counted — no
-            # Event field carries it today.
-            if ptype == "mcp_tool_call_end":
-                invocation = payload.get("invocation")
-                server = tool = None
-                if isinstance(invocation, dict):
-                    server = invocation.get("server")
-                    tool = invocation.get("tool")
-                if (
-                    isinstance(server, str)
-                    and server
-                    and isinstance(tool, str)
-                    and tool
-                ):
-                    name = f"mcp__{server}__{tool}"
-                    call_id = payload.get("call_id")
-                    call_id = call_id if isinstance(call_id, str) else None
-                    # Marketplace-plugin marker (``<plugin>@<marketplace>``,
-                    # protocol.rs McpToolCallEndEvent.plugin_id) — absent on
-                    # plain connector/app calls.
-                    plugin_id = payload.get("plugin_id")
-                    plugin_id = (
-                        plugin_id
-                        if isinstance(plugin_id, str) and plugin_id
-                        else None
-                    )
-                    events.append(
-                        Event(
-                            kind=EventKind.ASSISTANT_TOOL,
-                            session_id=session_id,
-                            timestamp_ms=ts_ms,
-                            tool_name=name,
-                            tool_use_id=call_id,
-                            stop_reason="tool_use",
-                            plugin_name=plugin_id,
-                        )
-                    )
-                    turn_close_idx = len(events) - 1
-                    events.append(
-                        Event(
-                            kind=EventKind.TOOL_RESULT,
-                            session_id=session_id,
-                            timestamp_ms=ts_ms,
-                            tool_name=name,
-                            tool_use_id=call_id,
-                            is_error=_mcp_result_is_error(payload.get("result")),
-                        )
-                    )
-                continue
-
-            # patch_apply_end carries the file-edit footprint in modern
-            # (0.14x) rollouts — no ``apply_patch`` custom_tool_call exists
-            # there. Emit an apply_patch call+result pair with hashed paths +
-            # line counts (``changes`` parsed by taxonomy.parse_patch_changes;
-            # raw paths hashed IMMEDIATELY, never stored) and surface
-            # ``success: false`` as a tool error. Guarded on call_id NOT
-            # already seen as a custom_tool_call so a rollout that carries
-            # BOTH shapes never double-counts the edit.
-            if ptype == "patch_apply_end":
-                call_id = payload.get("call_id")
-                call_id = call_id if isinstance(call_id, str) else None
-                if call_id and call_id in call_names:
-                    continue
-                files = parse_patch_changes(payload.get("changes"))
-                craft: dict = {}
-                if files:
-                    from scripts.agents.claude.events import (
-                        _is_excluded_edit_path,
-                        _sha16 as _edit_sha16,
-                    )
-                    from scripts.plan_signals import is_plan_shaped_path
-
-                    edit_files = []
-                    is_plan_write = False
-                    for path, lines in files:
-                        edit_files.append(
-                            (_edit_sha16(path), lines, _is_excluded_edit_path(path))
-                        )
-                        if path.lower().endswith(".md") and is_plan_shaped_path(path):
-                            is_plan_write = True
-                    craft = {
-                        "edit_files": tuple(edit_files),
-                        "edit_file_path_hash": edit_files[0][0],
-                        "edit_line_count": edit_files[0][1],
-                        "is_excluded_edit_path": edit_files[0][2],
-                        "is_plan_file_write": is_plan_write,
-                    }
-                if call_id:
-                    call_names[call_id] = "apply_patch"
-                events.append(
-                    Event(
-                        kind=EventKind.ASSISTANT_TOOL,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_name="apply_patch",
-                        tool_use_id=call_id,
-                        stop_reason="tool_use",
-                        **craft,
-                    )
-                )
-                turn_close_idx = len(events) - 1
-                events.append(
-                    Event(
-                        kind=EventKind.TOOL_RESULT,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_name="apply_patch",
-                        tool_use_id=call_id,
-                        is_error=payload.get("success") is False,
-                    )
-                )
-                continue
-
-            # context_compacted: legacy-mode duplicate of the top-level
-            # ``compacted`` row handled above — deliberately ignored so one
-            # compaction never counts twice.
-            # Other event_msg payloads: must not crash, no event emitted.
+            _handle_event_msg(ctx, payload, ts_ms, _is_structured_prompt)
             continue
 
         # session_meta / turn_context carry no timeline event.
         continue
 
-    return events, text_map
+    return ctx.events, ctx.text_map
 
 
 __all__ = ["is_codex_jsonl", "read_events", "read_events_and_text"]
