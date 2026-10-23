@@ -33,6 +33,24 @@ SHELL_TOOL_NAMES: frozenset[str] = frozenset(
     {"shell", "exec_command", "shell_command"}
 )
 
+# Context Codex injects as user-role ``response_item`` messages, carrying no
+# flag that tells them apart from typed prompts — only these openers do.
+# A message STARTING with one is not human input; a typed prompt that merely
+# mentions a tag mid-sentence still is. ``<user_instructions>`` is the
+# pre-0.14x wrapper for AGENTS.md.
+INJECTED_CONTEXT_PREFIXES: tuple[str, ...] = (
+    "<environment_context>",
+    "<recommended_plugins>",
+    "<external_codex_apps_open_page>",
+    "<codex_internal_context",
+    "<user_instructions>",
+    "# AGENTS.md instructions for ",
+)
+
+
+def is_injected_context(text: str) -> bool:
+    return text.lstrip().startswith(INJECTED_CONTEXT_PREFIXES)
+
 # ---------------------------------------------------------------------------
 # apply_patch structural header parsing.
 # ---------------------------------------------------------------------------
@@ -360,10 +378,12 @@ __all__ = [
     "CODEX_SKILL_MD_RE",
     "DENIAL_MARKER",
     "EDIT_TOOL_NAMES",
+    "INJECTED_CONTEXT_PREFIXES",
     "KNOWN_TOOL_NAMES",
     "PLAN_TOOL_NAMES",
     "RAW_INPUT_TOOLS",
     "SHELL_TOOL_NAMES",
+    "is_injected_context",
     "multi_agent_action",
     "normalize_shell_command",
     "parse_apply_patch_files",

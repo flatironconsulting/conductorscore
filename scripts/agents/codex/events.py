@@ -44,6 +44,7 @@ from scripts.agents.codex.taxonomy import (
     EDIT_TOOL_NAMES,
     SHELL_TOOL_NAMES,
     extract_shell_commands_from_exec_js,
+    is_injected_context,
     multi_agent_action,
     normalize_shell_command,
     parse_apply_patch_files,
@@ -525,9 +526,10 @@ class _ReadContext:
     current_model: str | None = None
     last_assistant_idx: int | None = None
     turn_close_idx: int | None = None
-    # ``codex exec`` session (from ``session_meta``): every prompt was sent
-    # by a script, so USER events are stamped ``is_scripted_prompt``.
-    is_exec: bool = False
+    # ``codex exec`` or subagent session (from ``session_meta``): every
+    # prompt was sent by a script / Codex / a parent agent, so USER events
+    # are stamped ``is_scripted_prompt``.
+    is_scripted_session: bool = False
 
 
 def _handle_response_item(
@@ -544,7 +546,7 @@ def _handle_response_item(
         role = payload.get("role")
         if role == "user":
             text = _message_text(payload)
-            if not text:
+            if not text or is_injected_context(text):
                 return
             token_count = _approx_token_count(text)
             structured = is_structured_prompt(text, token_count)
@@ -555,7 +557,7 @@ def _handle_response_item(
                 user_text_hash=_sha16(text),
                 user_text_token_count=token_count,
                 is_structured_prompt=structured,
-                is_scripted_prompt=ctx.is_exec,
+                is_scripted_prompt=ctx.is_scripted_session,
             )
             ctx.events.append(ev)
             if ctx.want_text:
@@ -706,7 +708,7 @@ def _handle_event_msg(
                 user_text_hash=_sha16(text),
                 user_text_token_count=token_count,
                 is_structured_prompt=structured,
-                is_scripted_prompt=ctx.is_exec,
+                is_scripted_prompt=ctx.is_scripted_session,
             )
             ctx.events.append(ev)
             if ctx.want_text:
@@ -923,12 +925,15 @@ def _read(
                 if isinstance(prov, str) and prov:
                     ctx.current_model = prov
             # Older rollouts carry only originator="codex_exec"; newer ones
-            # also set source="exec".
+            # also set source="exec". Subagent sessions (guardian approval
+            # reviewer, thread_spawn children) have source={"subagent": ...}.
+            source = payload.get("source")
             if (
-                payload.get("source") == "exec"
+                source == "exec"
                 or payload.get("originator") == "codex_exec"
+                or (isinstance(source, dict) and "subagent" in source)
             ):
-                ctx.is_exec = True
+                ctx.is_scripted_session = True
             continue
 
         if top == "response_item":
