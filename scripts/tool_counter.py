@@ -55,6 +55,35 @@ def _commands_in_text(text: str) -> tuple[list[str], list[str]]:
             skills.append(lm.group(1).lower())
     return skills, plugins
 
+
+def _skill_tool_target(block: dict) -> tuple[str | None, str | None]:
+    """Route a Claude ``Skill`` tool_use block to ``(skill_token, plugin_name)``.
+
+    When Claude loads a skill on its own it emits ``tool_use`` named
+    ``Skill`` with input ``{"skill": "<name>"}`` (older shape: ``{"name": ...}``).
+    The name is routed by the SAME shape rule :func:`_commands_in_text` applies
+    to typed ``<command-name>`` markers, so a skill counts under one key no
+    matter who triggered it: a ``:``-qualified name (``superpowers:brainstorming``)
+    is a plugin skill kept as-is; a colon-free name is a skill token,
+    lowercased. A leading ``/`` is stripped. At most one of the pair is set.
+    Only the categorical name is read — never ``args`` or any other input."""
+    inp = block.get("input")
+    if not isinstance(inp, dict):
+        return None, None
+    raw = inp.get("skill") or inp.get("name")
+    if not isinstance(raw, str):
+        return None, None
+    raw = raw.strip().lstrip("/")
+    if not raw or any(ch.isspace() for ch in raw):
+        return None, None
+    if ":" in raw:
+        return None, raw
+    return raw.lower(), None
+
+
+# Name of the Claude tool that loads a skill (model-initiated invocation).
+_SKILL_TOOL_NAME = "Skill"
+
 # Marker that Claude Code prepends to a user message when the previous
 # session ran out of context and was auto-compacted. Public so the event
 # reader and the tests both reference the same constant.
@@ -86,9 +115,16 @@ class ToolCounts:
         ``<command-name>`` blocks in user messages.
 
     Slash-command (skill) counts are sourced from the SAME ``<command-name>``
-    markers (the colon-free names): ``skill_invocations`` totals them and
-    ``skill_invocations_by_name`` breaks them down, so each sums to the other
-    by construction.
+    markers (the colon-free names): ``skill_invocations`` totals them.
+
+    Claude ``Skill`` tool calls (the model loading a skill itself, issue #11)
+    are counted SEPARATELY in ``model_skill_invocations`` (colon-free names)
+    and ``model_plugin_invocations`` (``plugin:skill`` names) so the
+    user-typed totals keep their meaning. The per-name maps and
+    ``distinct_skills`` cover BOTH sources, so:
+    ``sum(skill_invocations_by_name) == skill_invocations + model_skill_invocations``
+    and
+    ``sum(plugin_invocations_by_name) == plugin_invocations + model_plugin_invocations``.
     """
 
     distinct_skills: list[str]
@@ -104,10 +140,15 @@ class ToolCounts:
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
     # Slash-command (skill) invocation totals, sourced from ``<command-name>``
     # markers (never free prose). ``skill_invocations`` is the total count;
-    # ``skill_invocations_by_name`` is the per-token breakdown. By construction
-    # ``sum(skill_invocations_by_name.values()) == skill_invocations``.
+    # ``skill_invocations_by_name`` is the per-token breakdown across typed AND
+    # model-initiated invocations, so
+    # ``sum(skill_invocations_by_name.values()) == skill_invocations + model_skill_invocations``.
     skill_invocations: int = 0
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    # Claude ``Skill`` tool_use blocks (model-initiated skill loads), split by
+    # the same colon rule as typed commands. Always 0 for Codex/Cursor.
+    model_skill_invocations: int = 0
+    model_plugin_invocations: int = 0
     # LOCAL diagnostics only — unrecognized Codex tool names seen while
     # counting (``{name: count}``). Never serialized to the wire; the
     # ``ExtractorOutput`` builder never reads this field. Lets the scanner
@@ -140,6 +181,8 @@ class SessionToolFields:
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
     user_skill_invocations: int = 0
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    model_skill_invocations: int = 0
+    model_plugin_invocations: int = 0
 
     @classmethod
     def from_tool_counts(cls, tc: "ToolCounts | None") -> "SessionToolFields":
@@ -155,6 +198,8 @@ class SessionToolFields:
             plugin_invocations_by_name=dict(tc.plugin_invocations_by_name),
             user_skill_invocations=tc.skill_invocations,
             skill_invocations_by_name=dict(tc.skill_invocations_by_name),
+            model_skill_invocations=tc.model_skill_invocations,
+            model_plugin_invocations=tc.model_plugin_invocations,
         )
 
 
@@ -236,6 +281,13 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
       ``<command-name>…</command-name>`` markers in user-message text (plugin
       = name with ``:``, skill = colon-free slash command). Command names are
       categorical identifiers and cross the wire in plaintext.
+    - ``model_skill_invocations`` / ``model_plugin_invocations``: ``Skill``
+      tool_use blocks (Claude loading a skill on its own), routed by the same
+      colon rule and ALSO tallied into ``distinct_skills`` /
+      ``skill_invocations_by_name`` / ``plugin_invocations_by_name``. The
+      ``Skill`` call still counts as built-in tool "Skill" too. Typed
+      ``/name`` invocations do not emit a ``Skill`` tool_use in real Claude
+      Code transcripts (verified 2026-10), so the two sources don't overlap.
 
     Returns empty lists on missing/unreadable files. Malformed JSONL lines are
     skipped. Privacy: only tool names and command names (from structured
@@ -251,6 +303,8 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     plugins_by_name: dict[str, int] = {}
     skill_invocations = 0
     skills_by_name: dict[str, int] = {}
+    model_skill_invocations = 0
+    model_plugin_invocations = 0
     try:
         raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -294,6 +348,19 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                 else:
                     builtin.add(name)
                     builtin_invocations += 1
+                    if name == _SKILL_TOOL_NAME:
+                        skill_tok, plugin_name = _skill_tool_target(block)
+                        if skill_tok:
+                            skills.add(skill_tok)
+                            model_skill_invocations += 1
+                            skills_by_name[skill_tok] = (
+                                skills_by_name.get(skill_tok, 0) + 1
+                            )
+                        elif plugin_name:
+                            model_plugin_invocations += 1
+                            plugins_by_name[plugin_name] = (
+                                plugins_by_name.get(plugin_name, 0) + 1
+                            )
 
         # Slash-command (skill) + plugin invocations in user messages only,
         # read from structured <command-name> markers (never free prose).
@@ -321,6 +388,8 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         plugin_invocations_by_name=plugins_by_name,
         skill_invocations=skill_invocations,
         skill_invocations_by_name=skills_by_name,
+        model_skill_invocations=model_skill_invocations,
+        model_plugin_invocations=model_plugin_invocations,
     )
 
 

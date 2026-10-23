@@ -10,6 +10,7 @@ to the pre-refactor ``scripts.config_scanner``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from scripts.output_schema import ConfigCounts
@@ -144,6 +145,49 @@ def _count_custom_commands(home: Path) -> int:
     return len(list(cmds_dir.glob("*.md")))
 
 
+def _skill_roots(home: Path, project_roots: list[str] | None) -> list[Path]:
+    """Directories Claude Code loads skills from: user-level
+    ``~/.claude/skills`` and ``~/.agents/skills``, plus the project-level
+    ``.claude/skills`` / ``.agents/skills`` of every scanned project root."""
+    roots = [home / ".claude" / "skills", home / ".agents" / "skills"]
+    for root in project_roots or ():
+        base = Path(root)
+        roots += [base / ".claude" / "skills", base / ".agents" / "skills"]
+    return roots
+
+
+def _count_skill_dirs(home: Path, project_roots: list[str] | None) -> int:
+    """Count installed skills: one per first-level, non-hidden directory under
+    each skill root (same rule as the Codex/Cursor scans).
+
+    Skills are commonly symlinked between these roots (e.g.
+    ``~/.claude/skills/x -> ~/.agents/skills/x``), and a project root can
+    itself be ``home``, so each skill dir is de-duplicated by its resolved
+    real path. Only the count leaves this function — never a name or path.
+    """
+    seen_roots: set[str] = set()
+    seen_skills: set[str] = set()
+    for root in _skill_roots(home, project_roots):
+        try:
+            if not root.is_dir():
+                continue
+            real_root = os.path.realpath(root)
+            if real_root in seen_roots:
+                continue
+            seen_roots.add(real_root)
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.name.startswith(".") or not child.is_dir():
+                    continue
+                seen_skills.add(os.path.realpath(child))
+            except OSError:
+                continue
+    return len(seen_skills)
+
+
 def scan_config(
     home: Path,
     project_roots: list[str] | None = None,
@@ -175,7 +219,11 @@ def scan_config(
     return ConfigCounts(
         mcp_servers=_count_mcp_servers(home),
         hooks=_count_hooks(home),
-        custom_commands=_count_custom_commands(home),
+        # Provider-neutral "installed skills / custom commands" field (the
+        # Codex/Cursor scans fill it the same way): legacy command files
+        # plus skill directories (issue #11).
+        custom_commands=_count_custom_commands(home)
+        + _count_skill_dirs(home, project_roots),
         global_claude_md_lines=global_md,
         project_claude_md_lines_avg=project_avg,
         plugin_count=len(installed_plugins),

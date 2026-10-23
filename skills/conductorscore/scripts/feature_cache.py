@@ -34,7 +34,7 @@ from scripts.core.text import sha16
 from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 
 # Bump when the entry layout changes (independent of the client version).
-CACHE_FORMAT = 1
+CACHE_FORMAT = 2  # 2: PerSession gained model_skill/plugin_invocations (issue #11)
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 
