@@ -253,3 +253,22 @@ def test_one_session_still_uploads(tmp_path, monkeypatch):
 
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["phase"] == "done"
+
+
+def test_scan_uses_feature_cache_in_cache_dir(tmp_path, monkeypatch):
+    # Re-runs reuse unchanged sessions' features from <cache>/features.json.
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(scan, "_load_auth", _fake_auth)
+    monkeypatch.setattr(scan.auth_store, "load_or_create_device_id", lambda: "dev1")
+    monkeypatch.setattr(scan.consent_mod, "decide", lambda: _fake_decision(["claude"]))
+
+    seen = {}
+    empty_output = ExtractorOutput(
+        device=DeviceMeta(device_id="dev1", client_version="0.0.0", extracted_at_ms=0),
+        sessions=(),
+    )
+    monkeypatch.setattr(scan, "extract", lambda **kwargs: seen.update(kwargs) or empty_output)
+
+    scan.main()
+
+    assert seen["feature_cache_path"] == tmp_path / "features.json"

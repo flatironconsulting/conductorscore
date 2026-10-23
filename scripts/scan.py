@@ -199,6 +199,7 @@ def main() -> int:
             on_progress=on_progress,
             consent_decision=decision,
             on_stage=on_stage,
+            feature_cache_path=_cache_dir() / "features.json",
         )
     except Exception as e:
         sw.write(phase="error", message=f"scan_failed: {e}")

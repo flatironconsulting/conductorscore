@@ -10,6 +10,7 @@ from scripts.config_scanner import scan_config
 from scripts.core.text import sha16 as _sha16
 from scripts.core.thresholds import WINDOW_MS
 from scripts.edit_counter import count_edits
+from scripts.feature_cache import FeatureCache, entry_key, file_fingerprint
 from scripts.events import (
     EventKind,
     claude_home,
@@ -402,6 +403,29 @@ def _build_per_session(
     )
 
 
+def _read_session(agent, s) -> tuple[list, dict, "ToolCounts | None"]:
+    """Parse one session's transcript into ``(events, text_map, tool_counts)``.
+
+    Each adapter parses its own transcript format into the shared normalized
+    Event model. ``count_tools`` is Claude-JSONL-specific (it reads Claude
+    ``tool_use`` blocks + ``<command-name>`` markers). Codex/Cursor tool usage
+    is counted from the NORMALIZED events instead (``count_codex_tools`` /
+    ``count_cursor_tools``): the same wire fields (distinct_builtin_tools /
+    builtin_tool_invocations / distinct_mcp_tools) drive the Customization +
+    Tools surfaces.
+    """
+    if s.jsonl_path is None:
+        return [], {}, None
+    events, text_map = agent.read_events_and_text(s.jsonl_path)
+    if agent.agent_id == "claude":
+        tc = count_tools(s.jsonl_path)
+    elif agent.agent_id == "cursor":
+        tc = count_cursor_tools(events)
+    else:
+        tc = count_codex_tools(events)
+    return events, text_map, tc
+
+
 def extract(
     device_id: str,
     client_version: str,
@@ -409,6 +433,7 @@ def extract(
     on_progress=None,
     consent_decision: "consent_mod.ConsentDecision | None" = None,
     on_stage=None,
+    feature_cache_path: "Path | None" = None,
 ) -> ExtractorOutput:
     """Scan + score the user's session transcripts.
 
@@ -427,6 +452,10 @@ def extract(
             stages ``on_progress`` doesn't cover — ``"discover"`` (once per
             provider whose sessions have been listed) and ``"score"`` (once per
             session scored in Pass 2) — so callers can report overall progress.
+        feature_cache_path: optional JSON file holding the previous scan's
+            per-session features (see ``feature_cache``). Unchanged sessions
+            are reused from it instead of re-parsed; the output is identical
+            either way. ``None`` disables the cache.
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
@@ -470,34 +499,26 @@ def extract(
     # for sessions that produced a plan artifact, so the weak
     # "prior-24h plan artifact in same project" signal can be answered
     # without re-parsing.
-    loaded: list[tuple] = []  # (SessionMeta, provider, events, text_map, tool_counts)
+    # A session whose transcript is unchanged since the last scan is not
+    # re-read: its cached features (and plan-artifact flag, for the map below)
+    # stand in for the parse. See ``feature_cache``.
+    cache = FeatureCache(feature_cache_path, client_version)
+    loaded: list[tuple] = []  # (SessionMeta, agent, fingerprint, cached, parsed, produced_artifact)
     artifact_times_by_project: dict[str, list[tuple[str, int]]] = {}
     project_roots: set[str] = set()
     for i, (agent, s) in enumerate(in_window):
         provider = agent.agent_id
-        if s.jsonl_path is not None:
-            # Each adapter parses its own transcript format into the shared
-            # normalized Event model. ``count_tools`` is Claude-JSONL-specific
-            # (it reads Claude ``tool_use`` blocks + ``<command-name>``
-            # markers). Codex/Cursor tool usage is counted from the
-            # NORMALIZED events instead (``count_codex_tools`` /
-            # ``count_cursor_tools``): the same wire fields
-            # (distinct_builtin_tools / builtin_tool_invocations /
-            # distinct_mcp_tools) drive the Customization + Tools surfaces.
-            events, text_map = agent.read_events_and_text(s.jsonl_path)
-            if provider == "claude":
-                tc = count_tools(s.jsonl_path)
-            elif provider == "cursor":
-                tc = count_cursor_tools(events)
-            else:
-                tc = count_codex_tools(events)
+        fp = file_fingerprint(s, provider)
+        cached = cache.lookup(entry_key(provider, s.session_id), fp)
+        if cached is not None:
+            parsed = None
+            produced_artifact = cached["plan_artifact"]
         else:
-            tc = None
-            events = []
-            text_map = {}
-        loaded.append((s, provider, events, text_map, tc))
+            parsed = _read_session(agent, s)
+            produced_artifact = bool(parsed[0]) and session_produced_plan_artifact(parsed[0])
+        loaded.append((s, agent, fp, cached, parsed, produced_artifact))
         project_roots.add(s.project_root)
-        if events and session_produced_plan_artifact(events):
+        if produced_artifact:
             artifact_times_by_project.setdefault(s.project_root, []).append(
                 (s.session_id, s.first_ts_ms)
             )
@@ -522,12 +543,30 @@ def extract(
         config = _merge_config_counts(config, other)
 
     sessions: list[PerSession] = []
-    for i, (s, provider, events, text_map, tc) in enumerate(loaded):
-        sessions.append(
-            _build_per_session(s, provider, events, text_map, tc, artifact_times_by_project)
+    for i, (s, agent, fp, cached, parsed, produced_artifact) in enumerate(loaded):
+        provider = agent.agent_id
+        had_prior = _had_plan_artifact_prior_24h(
+            artifact_times_by_project, s.project_root, s.session_id, s.first_ts_ms
         )
+        if cached is not None and cached["prior_artifact"] == had_prior:
+            per_session = cached["session"]
+        else:
+            # Cache miss, or a hit whose transcript is unchanged but a sibling
+            # session's plan artifact entered/left the 24h lookback — the
+            # latter wasn't parsed in Pass 1, so read it now.
+            if parsed is None:
+                parsed = _read_session(agent, s)
+            events, text_map, tc = parsed
+            per_session = _build_per_session(
+                s, provider, events, text_map, tc, artifact_times_by_project
+            )
+        cache.store(
+            entry_key(provider, s.session_id), fp, produced_artifact, had_prior, per_session
+        )
+        sessions.append(per_session)
         if on_stage is not None:
             on_stage("score", i + 1, total)
+    cache.save()
     # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
     # byte-equivalent to v0.11 (output_schema omits the key in that case).
     # Empty scans (no sessions) also report the default Claude-only set.
