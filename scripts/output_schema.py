@@ -170,6 +170,10 @@ class PerSession:
     qualifying_pairs: int = 0
     repetitive_pairs: int = 0
     rage_quit_event: bool = False
+    # Every prompt in the session was machine-sent (script, scheduler,
+    # notification, parent agent). The server leaves such sessions out of the
+    # per-session rates that judge the human (rage-quit, redundant approvals).
+    is_scripted_session: bool = False
     tool_error_count: int = 0
     auto_compaction_events: int = 0
     total_input_tokens: int = 0
@@ -292,6 +296,7 @@ class ExtractorOutput:
                     "qualifying_pairs": s.qualifying_pairs,
                     "repetitive_pairs": s.repetitive_pairs,
                     "rage_quit_event": s.rage_quit_event,
+                    "is_scripted_session": s.is_scripted_session,
                     "tool_error_count": s.tool_error_count,
                     "auto_compaction_events": s.auto_compaction_events,
                     "total_input_tokens": s.total_input_tokens,

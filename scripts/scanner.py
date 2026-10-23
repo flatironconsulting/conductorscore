@@ -294,6 +294,12 @@ def _build_per_session(
     ]
     rep = jaccard_repetitive_rate(user_texts)
     rage = detect_rage_quit(human_events, text_map)
+    main_prompts = [
+        e for e in events if e.kind == EventKind.USER and not e.is_sidechain
+    ]
+    is_scripted_session = bool(main_prompts) and all(
+        e.is_scripted_prompt for e in main_prompts
+    )
     # tool_error_count: number of events with is_error=True (covers
     # TOOL_RESULT errored blocks). The reader populates is_error on
     # TOOL_RESULT events.
@@ -385,6 +391,7 @@ def _build_per_session(
         qualifying_pairs=rep.qualifying_pairs,
         repetitive_pairs=rep.repetitive_pairs,
         rage_quit_event=rage.rage_quit_event,
+        is_scripted_session=is_scripted_session,
         tool_error_count=tool_error_count,
         auto_compaction_events=compaction.auto_compaction_events,
         total_input_tokens=compaction.total_input_tokens,
