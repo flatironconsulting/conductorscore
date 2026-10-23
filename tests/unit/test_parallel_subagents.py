@@ -1,6 +1,6 @@
 """Subagent leverage (#12): Workflow dispatches count, and agent time is
-credited as the union of unattended agent activity — also outside turns,
-clipped at the next human event, idle gaps and HITL turns excluded."""
+credited as the union of agent active time — also outside turns and while
+the human is typing; only the agent's own idle gaps are excluded."""
 from __future__ import annotations
 
 import datetime as dt
@@ -72,15 +72,36 @@ def test_workflow_is_a_dispatch_tool(tmp_path):
     assert count_tools(p).agent_dispatches == 2
 
 
-def test_agent_outliving_its_turn_credited_until_next_human_event():
+def test_agent_outliving_its_turn_and_a_human_prompt_credited_in_full():
     evs = _short_hitl_dispatch_session() + [_user(40 * MIN), _end(41 * MIN)]
     turns = segment_turns(evs)
     assert [t.label for t in turns] == ["HITL", "HITL"]
     act = {"a": _agent(15_000, 60 * MIN)}  # runs past the next human prompt
     secs = afk_parallel_subagent_seconds(turns, evs, extra_activity=act)
-    # Credited from the end of the dispatching HITL turn (1 min) to the human
-    # prompt at 40 min — the HITL turn itself is not double-labeled.
-    assert secs == (40 * MIN - MIN) / 1000
+    # Whole active span: not clipped at the human prompt, HITL not excluded.
+    assert secs == act["a"].end_ts_ms / 1000 - 15
+
+
+def test_user_example_agent_beside_typing_human_gets_full_credit():
+    # Main session A (human) and subagent B both run 100 min; the human
+    # types in A at the halfway point. B gets the full 100 min.
+    evs = [_user(0)] + [
+        Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=m * MIN, tool_name="Read")
+        for m in range(1, 50)
+    ] + [_user(50 * MIN)] + [
+        Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=m * MIN, tool_name="Read")
+        for m in range(51, 100)
+    ] + [_end(100 * MIN)]
+    act = {"B": _agent(0, 100 * MIN)}
+    secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
+    assert secs == 100 * MIN / 1000
+
+
+def test_two_fully_concurrent_agents_count_once():
+    evs = _short_hitl_dispatch_session()
+    act = {"a": _agent(2 * MIN, 42 * MIN), "b": _agent(2 * MIN, 42 * MIN)}
+    secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
+    assert secs == 40 * MIN / 1000
 
 
 def test_scripted_prompt_does_not_clip_agent_credit():
@@ -121,9 +142,9 @@ def test_long_tool_call_inside_agent_is_not_idle(tmp_path):
     assert act["agent-x"].intervals == ((MIN, 22 * MIN),)
 
 
-def test_agent_during_afk_turn_not_double_counted_with_hitl():
+def test_agent_during_afk_turn_credited_as_parallel_track():
     # AFK turn (10 min of main-thread work) with an agent inside it: credited
-    # as a parallel track; a later HITL turn overlapping the agent is removed.
+    # as a parallel track for its active span.
     evs = [_user(0)] + [
         Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=m * MIN, tool_name="Read")
         for m in range(1, 10)

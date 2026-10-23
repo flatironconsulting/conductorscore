@@ -1540,7 +1540,7 @@ def _compute_render_model(
     afk_tool_minutes = round(time_split.afk_tool / 60)
     afk_max_streak_min = round(max_engaged / 60)  # longest streak engaged (incl dispatch)
     # The wire field is afk_parallel_minutes_foreground = afk_parallel_subagent_seconds
-    # (union of unattended subagent activity), i.e. main_plus_sub_seconds here — NOT the
+    # (union of subagent active time, HITL included), i.e. main_plus_sub_seconds here — NOT the
     # ≥2-concurrent `parallel_seconds` shown in the summary table's Parallel row.
     parallel_min = round(main_plus_sub_seconds / 60)
     if hitl_minutes > 0:
@@ -1823,7 +1823,7 @@ def render_session(
     activity = subagent_activity_from_disk(jsonl_path)
     subagent_spans = {sid: (a.start_ts_ms, a.end_ts_ms) for sid, a in activity.items()}
     parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
-    # The wire's subagent credit (union of unattended agent activity, see
+    # The wire's subagent credit (union of agent active time, see
     # turn_classifier.parallel_subagent_intervals) — same function, same turns.
     parallel_intervals = parallel_subagent_intervals(
         turns, events, extra_activity=activity
