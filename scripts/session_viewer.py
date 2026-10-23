@@ -43,6 +43,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
+from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
@@ -737,22 +738,18 @@ def _load_subagent_panels(
     ``toolUseId`` and the subagent's ``description``, then parses the
     matching ``.jsonl``.
     """
-    session_id = jsonl_path.stem
-    subagents_dir = jsonl_path.parent / session_id / "subagents"
-    if not subagents_dir.is_dir():
-        return {}
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
-    for meta_path in subagents_dir.glob("agent-*.meta.json"):
+    for sub_jsonl in subagent_transcripts(jsonl_path):
+        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(meta, dict):
+            continue
         tool_use_id = meta.get("toolUseId")
         description = meta.get("description") or meta.get("agentType") or "subagent"
         if not isinstance(tool_use_id, str):
-            continue
-        sub_jsonl = subagents_dir / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-        if not sub_jsonl.exists():
             continue
         msgs = _parse_subagent_messages(sub_jsonl)
         panels[tool_use_id] = (description, msgs)

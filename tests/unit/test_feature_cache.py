@@ -134,6 +134,38 @@ def test_changed_subagent_transcript_is_reparsed(home, tmp_path, parse_calls):
     assert warm == _scan(None).to_json()
 
 
+def test_changed_nested_workflow_transcript_is_reparsed(home, tmp_path, parse_calls):
+    # Workflow agents live one level deeper (subagents/workflows/wf_*/); a
+    # change there must also invalidate the session's cache entry (#12/#13).
+    cache = tmp_path / "features.json"
+    sub = (home / "projects" / "-foo" / "today" / "subagents" / "workflows"
+           / "wf_r1" / "agent-w1.jsonl")
+    _write_jsonl(sub, [{"timestamp": _iso(BASE_MS + 30_000),
+                        "message": {"role": "assistant", "content": []}}])
+    _scan(cache)
+    parse_calls.clear()
+    _write_jsonl(sub, [{"timestamp": _iso(BASE_MS + 30_000),
+                        "message": {"role": "assistant", "content": []}},
+                       {"timestamp": _iso(BASE_MS + 50 * 60_000),
+                        "message": {"role": "assistant", "content": []}}])
+    warm = _scan(cache).to_json()
+    assert parse_calls == ["today"]
+    assert warm == _scan(None).to_json()
+
+
+def test_fingerprint_covers_nested_subagent_files(tmp_path):
+    main = tmp_path / "s1.jsonl"
+    _write_jsonl(main, [{"timestamp": _iso(BASE_MS)}])
+    meta = SessionMeta(session_id="s1", project_root="/p", first_ts_ms=BASE_MS,
+                       last_ts_ms=BASE_MS, jsonl_path=main)
+    before = feature_cache.file_fingerprint(meta)
+    nested = tmp_path / "s1" / "subagents" / "workflows" / "wf_x" / "agent-a.jsonl"
+    _write_jsonl(nested, [{"timestamp": _iso(BASE_MS)}])
+    after = feature_cache.file_fingerprint(meta)
+    assert before != after
+    assert len(after[-1]) == 1
+
+
 def test_unchanged_session_recomputed_when_prior_plan_artifact_disappears(home, tmp_path):
     cache = tmp_path / "features.json"
     first = _scan(cache)

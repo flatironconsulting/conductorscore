@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.codex.taxonomy import multi_agent_action
 from scripts.core.thresholds import K_TURN_SECONDS
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
@@ -408,22 +409,20 @@ def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:
     """Load subagent activity intervals from the per-session subagents dir.
 
     Claude Code writes subagent (sidechain) transcripts to a sibling
-    directory next to the main JSONL::
+    directory next to the main JSONL, Workflow agents one level deeper
+    (``discovery.subagent_transcripts`` owns the layout)::
 
         <projects>/<encoded-cwd>/<session_id>.jsonl
         <projects>/<encoded-cwd>/<session_id>/subagents/agent-<sid>.jsonl
+        <projects>/<encoded-cwd>/<session_id>/subagents/workflows/wf_<run>/agent-<sid>.jsonl
 
     The main JSONL itself usually carries no sidechain lines, so the
     scanner cannot recover parallel-AFK time from it alone. Mirrors
     the megarun's ``_load_subagent_tracks`` so the live card sees the
     same subagent activity the megarun does.
     """
-    session_id = jsonl_path.stem
-    subagents_dir = jsonl_path.parent / session_id / "subagents"
-    if not subagents_dir.is_dir():
-        return {}
     spans: dict[str, tuple[int, int]] = {}
-    for sub_jsonl in subagents_dir.glob("agent-*.jsonl"):
+    for sub_jsonl in subagent_transcripts(jsonl_path):
         sid = sub_jsonl.stem  # 'agent-...'
         first: int | None = None
         last: int | None = None

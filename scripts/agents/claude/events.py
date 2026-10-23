@@ -18,7 +18,7 @@ from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content as _flatten_text
 from scripts.core.text import sha16 as _sha16
-from scripts.agents.claude.discovery import _parse_ts_ms
+from scripts.agents.claude.discovery import _parse_ts_ms, subagent_transcripts
 from scripts.agents.claude.taxonomy import (
     AUTO_COMPACT_BANNER,
     DENIAL_MARKERS,
@@ -659,29 +659,28 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
     """Return ``{parent_tool_use_id: (description, sub_jsonl_path)}``.
 
     Subagent transcripts live alongside the parent JSONL at
-    ``<jsonl_path.stem>/subagents/agent-<sid>.jsonl`` with a sibling
+    ``<jsonl_path.stem>/subagents/**/agent-<sid>.jsonl`` (see
+    ``discovery.subagent_transcripts``) with a sibling
     ``agent-<sid>.meta.json`` whose ``toolUseId`` field links back to the
     parent's ``Agent`` tool_use call.
 
     Returns an empty dict if the ``subagents/`` directory doesn't exist.
+    Workflow agents carry no ``toolUseId`` and are skipped.
 
     The caller parses the sub_jsonl_path on demand.
     """
-    sub_dir = Path(jsonl_path).parent / Path(jsonl_path).stem / "subagents"
-    if not sub_dir.is_dir():
-        return {}
     panels: dict[str, tuple[str, Path]] = {}
-    for meta_path in sub_dir.glob("agent-*.meta.json"):
+    for sub_jsonl in subagent_transcripts(Path(jsonl_path)):
+        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(meta, dict):
+            continue
         tool_use_id = meta.get("toolUseId")
         description = meta.get("description") or meta.get("agentType") or "subagent"
         if not isinstance(tool_use_id, str):
-            continue
-        sub_jsonl = sub_dir / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-        if not sub_jsonl.exists():
             continue
         panels[tool_use_id] = (description, sub_jsonl)
     return panels
