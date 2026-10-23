@@ -184,3 +184,17 @@ def test_dead_pid_with_stale_status_is_not_running(tmp_path):
     (cache / "status.json").write_text(json.dumps({"phase": "scanning", "percent": 40}))
     step = {"pid": 999999, "cache": str(cache), "started_at": time.time()}
     assert run._step_running(step) is False
+
+
+@pytest.mark.parametrize("argv,hook", [
+    (["--session-start"], None),
+    ([], {"hook_event_name": "SessionStart", "transcript_path": "/x.jsonl"}),  # pre-flag hooks
+])
+def test_session_start_invocation_hands_off_to_daily(monkeypatch, argv, hook):
+    import scripts.daily as daily
+
+    monkeypatch.setattr(run, "_capture_transcript_from_stdin", lambda: hook)
+    monkeypatch.setattr(daily, "main", lambda: 42)
+    monkeypatch.setattr(run, "_spawn_scan", lambda *a, **k: pytest.fail("foreground scan from a SessionStart hook"))
+    monkeypatch.setattr(sys, "argv", ["run.py", *argv])
+    assert run.main() == 42

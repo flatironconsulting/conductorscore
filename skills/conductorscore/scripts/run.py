@@ -38,6 +38,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.auth_store as auth_store
+import scripts.version_check as version_check
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
@@ -81,47 +82,18 @@ def _make_output_live() -> None:
             pass
 
 
-def _skill_version() -> str | None:
-    """The installed skill's version, from the VERSION file beside scripts/."""
-    try:
-        return (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-
-
-def _is_outdated(local: str, latest: str) -> bool:
-    def parts(v: str) -> list[int]:
-        out = []
-        for p in v.strip().split("."):
-            try:
-                out.append(int(p))
-            except ValueError:
-                out.append(0)
-        return out
-
-    return parts(local) < parts(latest)
-
-
 def _version_banner() -> None:
     """Print the version and, only when behind the server's published version, a
     one-line update notice. Silent on any network/parse failure; skippable with
     CONDUCTORSCORE_NO_VERSION_CHECK=1 (used by tests)."""
-    local = _skill_version()
+    local = version_check.skill_version()
     if local:
         print(f"Version {local}")
     if not local or os.environ.get("CONDUCTORSCORE_NO_VERSION_CHECK"):
         return
-    try:
-        from scripts._http import get_json
-
-        status, body = get_json(f"{API_BASE}/api/skill-config")
-        latest = body.get("latest_skill_version") if status == 200 else None
-    except Exception:
-        latest = None
-    if isinstance(latest, str) and _is_outdated(local, latest):
-        print(
-            f"↑ v{latest} available — run: gh skill update conductorscore --force"
-        )
+    latest = version_check.latest_version(API_BASE)
+    if latest and version_check.is_outdated(local, latest):
+        print(version_check.notice(latest))
 
 
 def _cache_dir() -> Path:
@@ -173,27 +145,31 @@ def _persist_transcript_path(raw_stdin: str) -> Path | None:
     return out
 
 
-def _capture_transcript_from_stdin() -> None:
+def _capture_transcript_from_stdin() -> dict | None:
     """When invoked as a SessionStart hook, Claude Code pipes hook JSON on
-    stdin. Read it non-blockingly and persist ``transcript_path``. Never reads
-    a TTY (interactive run) and never blocks the scan — every later stdin read
-    in this module is already TTY-gated, so consuming a piped stdin here is safe.
+    stdin. Read it non-blockingly, persist ``transcript_path``, and return the
+    parsed hook input (None when there is none). Never reads a TTY (interactive
+    run) and never blocks the scan — every later stdin read in this module is
+    already TTY-gated, so consuming a piped stdin here is safe.
     """
     try:
         if sys.stdin is None or sys.stdin.isatty():
-            return
+            return None
         try:
             import select
 
             if not select.select([sys.stdin], [], [], 0)[0]:
-                return
+                return None
         except Exception:
             pass  # select unsupported (e.g. Windows pipe) — fall through to read
         raw = sys.stdin.read()
-        if raw:
-            _persist_transcript_path(raw)
+        if not raw:
+            return None
+        _persist_transcript_path(raw)
+        hook = json.loads(raw)
+        return hook if isinstance(hook, dict) else None
     except Exception:
-        return
+        return None
 
 
 def _scan_cmd() -> list[str]:
@@ -806,9 +782,18 @@ def main() -> int:
     _make_output_live()
     # If invoked as a SessionStart hook, capture this session's transcript path
     # for the session viewer ("visualize this session"). No-op otherwise.
-    _capture_transcript_from_stdin()
-    auth_store.ensure_migrated()
+    hook = _capture_transcript_from_stdin()
     argv = sys.argv[1:]
+    # The daily SessionStart hook (daily.enable_daily) must not run a full
+    # foreground scan at every session start: hand off to daily.main(), which
+    # throttles to once per ~20h, scans detached, and shows any recorded
+    # update notice. Hooks written before --session-start existed are
+    # recognised by their hook input instead.
+    if "--session-start" in argv or (hook or {}).get("hook_event_name") == "SessionStart":
+        import scripts.daily as daily
+
+        return daily.main()
+    auth_store.ensure_migrated()
     if argv and argv[0] == "login":
         return _login(argv[1:])
 

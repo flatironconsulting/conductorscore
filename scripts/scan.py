@@ -35,6 +35,7 @@ from scripts.agents import consent as consent_mod
 from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
+import scripts.version_check as version_check
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
@@ -298,6 +299,12 @@ def main() -> int:
         permission_needed=decision.permission_needed,
         permission_sessions_30d=decision.permission_sessions_30d,
     )
+    # A headless (daily) scan's output reaches no one, so record a newer
+    # published version for the next session start to show (daily.py).
+    if os.environ.get("CONDUCTORSCORE_HEADLESS"):
+        version_check.record_pending(
+            _cache_dir(), version_check.skill_version(), version_check.latest_version(API_BASE)
+        )
     return 0
 
 

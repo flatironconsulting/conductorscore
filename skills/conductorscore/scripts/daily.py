@@ -23,6 +23,15 @@ import json, os, sys, subprocess, time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Self-bootstrap so `python3 /path/to/scripts/daily.py` (the plugin's
+# SessionStart hook) can import `scripts.*`, as scan.py/run.py do.
+if __package__ in (None, ""):
+    _parent = Path(__file__).resolve().parent.parent
+    if str(_parent) not in sys.path:
+        sys.path.insert(0, str(_parent))
+
+import scripts.version_check as version_check
+
 THROTTLE_SECONDS = 20 * 3600
 
 
@@ -68,7 +77,7 @@ def enable_daily(provider: str) -> DailyResult:
     hook = {
         "type": "command",
         "command": "python3",
-        "args": [run_py],
+        "args": [run_py, "--session-start"],
     }
     try:
         path = _settings_path("claude")
@@ -125,13 +134,27 @@ def _recent(stamp: Path) -> bool:
     except OSError:
         return False
 
+def _show_pending_update(data_dir: Path) -> None:
+    """A headless daily scan prints nowhere, so it records a newer published
+    version (version_check.record_pending); show that here, where Claude Code
+    displays a SessionStart hook's ``systemMessage`` to the user."""
+    local = version_check.skill_version()
+    latest = version_check.pending(data_dir, local)
+    if latest:
+        print(json.dumps({"systemMessage": f"ConductorScore v{latest} is available (you have v{local}) — "
+                          f"run: {version_check.UPDATE_CMD}"}))
+
+
 def main() -> int:
     if os.environ.get("CONDUCTORSCORE_NO_AUTO") == "1":
         return 0
     try:
-        stamp = _data_dir() / "last_daily"
+        data_dir = _data_dir()
+        stamp = data_dir / "last_daily"
         if _recent(stamp):
             return 0
+        # Once per throttle window, like the scan, so it never nags every session.
+        _show_pending_update(data_dir)
         # Resolve scan.py as a sibling of THIS file (scripts/scan.py) — a fixed,
         # in-package path, never from an env var — so the spawned command line can't
         # be influenced by the environment.
@@ -148,7 +171,9 @@ def main() -> int:
         # because there is no session UI to render it; the foreground run.py path logs
         # to a file instead.
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                      env={**os.environ, "CONDUCTORSCORE_HEADLESS": "1"})
+                      env={**os.environ, "CONDUCTORSCORE_HEADLESS": "1",
+                           # scan.py records the update notice where _show_pending_update reads it.
+                           "CONDUCTORSCORE_CACHE_DIR": str(data_dir)})
         if os.name == "posix":
             kwargs["start_new_session"] = True
         else:

@@ -25,8 +25,9 @@ python3 <this-skill-dir>/scripts/run.py --step
 On Windows, if `python3` isn't found, use `python` or `py -3` instead. Always
 pass `--step` when running `run.py` for a scan, including the re-runs below.
 
-If the script prints `↑ vX.Y.Z available — run: gh skill update …`, relay that
-line so the user can update; then continue normally.
+If the script prints `↑ vX.Y.Z available — run: <command>`, note the version
+and command and continue the scan normally; offer the update after the final
+report (see "Update offer").
 
 The script drives the flow. Don't narrate the steps. Your jobs are: (a) run the
 script, (b) relay its progress (below), (c) handle the `CONDUCTORSCORE_ASK`
@@ -77,6 +78,18 @@ user a final report in exactly this shape (keep the ✓ and 📊 and the bullets
 - <Daily auto-refresh enabled — your score updates once per day | Daily auto-refresh not enabled>
 - Only your score (the numbers) was uploaded — never any transcript text
 ```
+
+## Update offer
+
+Only if this run printed a `↑ vX.Y.Z available — run: <command>` line: after
+the final report, ask with EXACTLY two choices, **Update now** and **Not now**:
+"ConductorScore vX.Y.Z is available (you have the version shown above). Update
+and re-score?" On **Update now**, run `<command>` exactly as printed, then run
+`run.py --step` again (relaying progress as above) and present the new final
+report. If that re-run asks the `daily` question again, don't ask the user:
+re-run with the answer they already gave. If the update command fails, show its
+error and stop. On **Not now**,
+stop.
 
 ## Debug / visualize a session — `/conductorscore debug`
 
