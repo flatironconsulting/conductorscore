@@ -64,11 +64,12 @@ AUTO_COMPACT_BANNER = (
 )
 
 # Subagent-dispatch tool names. Claude Code historically used "Task"; newer
-# releases dispatch via "Agent". Pinned as a set so a single change
+# releases dispatch via "Agent" (and "Workflow" for scripted multi-agent
+# runs). Pinned as a set so a single change
 # updates both the counter and any future tests that pin the contract.
 # See docs/debugging/metric-verification.md anti-pattern
 # "trusting a hard-coded tool name across Claude Code versions."
-_SUBAGENT_DISPATCH_NAMES: frozenset[str] = frozenset({"Task", "Agent"})
+_SUBAGENT_DISPATCH_NAMES: frozenset[str] = frozenset({"Task", "Agent", "Workflow"})
 
 
 @dataclass(frozen=True)

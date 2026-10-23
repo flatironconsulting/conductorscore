@@ -9,6 +9,16 @@ from scripts.core.text import sha16 as _sha16
 
 SCHEMA_VERSION = "0.13"
 
+# Per-session ``token_accounting_version``: bumped when the MEANING of the
+# token totals changes, so the server can tell old totals from new ones
+# without a wire-schema bump. 1 (absent): Claude usage read only from the
+# first text block of each JSONL line, main transcript only. 2: usage once per
+# API message (``message.id`` + ``requestId``, max per field across its
+# lines) whatever the block type, plus non-``message`` ``usage.iterations``
+# entries, plus subagent / Workflow transcripts attributed to the parent
+# session (issue #13).
+TOKEN_ACCOUNTING_VERSION = 2
+
 
 def compute_session_chain(sessions: list[dict]) -> str:
     """Fold a deterministic per-session digest (over the numeric fields the
@@ -235,6 +245,9 @@ class PerSession:
     # folded into ``compute_session_chain``, which only covers the fields
     # the server integrity-checks.
     token_data_missing: bool = False
+    # See TOKEN_ACCOUNTING_VERSION. Always emitted. Not in
+    # ``compute_session_chain`` (it only covers integrity-checked counts).
+    token_accounting_version: int = TOKEN_ACCOUNTING_VERSION
 
 
 @dataclass(frozen=True)
@@ -330,6 +343,7 @@ class ExtractorOutput:
             # data, never carries this key).
             if s.token_data_missing:
                 d["token_data_missing"] = True
+            d["token_accounting_version"] = s.token_accounting_version
             # Emit ``provider`` only for non-default (codex) sessions so the
             # Claude-only payload is byte-identical to v0.11.
             if s.provider != _DEFAULT_PROVIDER:

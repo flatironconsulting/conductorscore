@@ -815,7 +815,9 @@ def test_codex_skill_multi_agent_and_runtime_gap_metrics(codex_home):
         "report-quality-review": 1,
     }
     assert s.agent_dispatches == 2
-    assert s.afk_parallel_minutes_foreground >= 11
+    # Two concurrent agents (~11s..360s and ~21s..360s): credited as the UNION
+    # of agent time (~5.8 min), not the per-agent sum (~11.5 min) — #12.
+    assert s.afk_parallel_minutes_foreground == 6
     # The long tool-call-to-result gap is counted as active runtime instead
     # of being capped at five minutes.
     assert s.afk_max_streak_minutes >= 6

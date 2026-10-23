@@ -43,6 +43,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
+from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
@@ -58,9 +59,9 @@ from scripts.turn_classifier import (
     K_BRIDGE_IDLE_SECONDS,
     K_TURN_SECONDS,
     Turn,
-    afk_parallel_subagent_seconds,
+    parallel_subagent_intervals,
     segment_turns,
-    subagent_spans_from_disk,
+    subagent_activity_from_disk,
 )
 
 
@@ -193,7 +194,7 @@ TRUNCATE_CHARS = 100
 # toward the longest run), but it is split out as ``Tool:dispatch`` so the
 # leverage numerator can subtract it (the subagent work is already counted via
 # the parallel-subagent term — see TIME_CLASSIFICATION.md §7).
-DISPATCH_TOOLS = frozenset({"Agent", "Task"})
+DISPATCH_TOOLS = frozenset({"Agent", "Task", "Workflow"})
 
 _AUTO_COMPACT_BANNER = (
     "This session is being continued from a previous conversation that "
@@ -737,22 +738,18 @@ def _load_subagent_panels(
     ``toolUseId`` and the subagent's ``description``, then parses the
     matching ``.jsonl``.
     """
-    session_id = jsonl_path.stem
-    subagents_dir = jsonl_path.parent / session_id / "subagents"
-    if not subagents_dir.is_dir():
-        return {}
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
-    for meta_path in subagents_dir.glob("agent-*.meta.json"):
+    for sub_jsonl in subagent_transcripts(jsonl_path):
+        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if not isinstance(meta, dict):
+            continue
         tool_use_id = meta.get("toolUseId")
         description = meta.get("description") or meta.get("agentType") or "subagent"
         if not isinstance(tool_use_id, str):
-            continue
-        sub_jsonl = subagents_dir / (meta_path.stem.removesuffix(".meta") + ".jsonl")
-        if not sub_jsonl.exists():
             continue
         msgs = _parse_subagent_messages(sub_jsonl)
         panels[tool_use_id] = (description, msgs)
@@ -1426,10 +1423,12 @@ def _compute_render_model(
     subagent_panels: dict[str, tuple[str, list[TimelineMessage]]],
     parallel_seconds: float,
     main_plus_sub_seconds: float,
+    parallel_intervals: list[tuple[int, int]] | None = None,
 ) -> RenderModel:
     """Aggregation phase: bucket placement, the MECE time split, streak ids,
     and the two pre-rendered HTML fragments (streak table + wire trace) that
     only depend on aggregates, not on the page shell."""
+    parallel_intervals = parallel_intervals or []
     # Per-turn message buckets + "between turns" buckets.
     turn_buckets, between_buckets = _bucket_messages(messages, turns)
 
@@ -1478,9 +1477,11 @@ def _compute_render_model(
         dispatch = sum(per_turn_dispatch[i] for i in members)    # Tool:dispatch
         tool = sum(per_turn_tool[i] for i in members)            # all tool (real+dispatch)
         # Concurrent subagent work during this streak (separate threads) — the
-        # wire's afk_parallel_subagent_seconds restricted to the streak's turns.
-        parallel = afk_parallel_subagent_seconds(
-            [turns[i] for i in members], events, extra_spans=subagent_spans
+        # wire's credited subagent intervals restricted to the streak's span.
+        s_lo, s_hi = turns[members[0]].start_ts_ms, turns[members[-1]].end_ts_ms
+        parallel = sum(
+            max(0, min(hi, s_hi) - max(lo, s_lo)) / 1000.0
+            for lo, hi in parallel_intervals
         )
         afk_streak_rows.append((sid, engaged, dispatch, tool, parallel, members))
     afk_streak_rows.sort(key=lambda r: r[1], reverse=True)
@@ -1539,7 +1540,7 @@ def _compute_render_model(
     afk_tool_minutes = round(time_split.afk_tool / 60)
     afk_max_streak_min = round(max_engaged / 60)  # longest streak engaged (incl dispatch)
     # The wire field is afk_parallel_minutes_foreground = afk_parallel_subagent_seconds
-    # (sum of subagent active ∩ AFK), i.e. main_plus_sub_seconds here — NOT the
+    # (union of unattended subagent activity), i.e. main_plus_sub_seconds here — NOT the
     # ≥2-concurrent `parallel_seconds` shown in the summary table's Parallel row.
     parallel_min = round(main_plus_sub_seconds / 60)
     if hitl_minutes > 0:
@@ -1819,12 +1820,15 @@ def render_session(
     hitl_streaks, afk_streaks = derive_streaks(turns)
 
     # Subagent spans from disk (the route stages them next to the input JSONL).
-    subagent_spans = subagent_spans_from_disk(jsonl_path)
+    activity = subagent_activity_from_disk(jsonl_path)
+    subagent_spans = {sid: (a.start_ts_ms, a.end_ts_ms) for sid, a in activity.items()}
     parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
-    # Wall-clock single-thread overlap (matches the notebook's "main + subagents").
-    main_plus_sub_seconds = afk_parallel_subagent_seconds(
-        turns, events, extra_spans=subagent_spans
+    # The wire's subagent credit (union of unattended agent activity, see
+    # turn_classifier.parallel_subagent_intervals) — same function, same turns.
+    parallel_intervals = parallel_subagent_intervals(
+        turns, events, extra_activity=activity
     )
+    main_plus_sub_seconds = sum((hi - lo) / 1000.0 for lo, hi in parallel_intervals)
 
     subagent_panels = _load_subagent_panels(jsonl_path)
     if redact:
@@ -1840,6 +1844,7 @@ def render_session(
         subagent_panels,
         parallel_seconds,
         main_plus_sub_seconds,
+        parallel_intervals,
     )
 
     output_path.write_text(_render_html(model), encoding="utf-8")

@@ -53,6 +53,31 @@ def _project_root_from_dir(dir_name: str) -> str:
     return "/" + dir_name.lstrip("-").replace("-", "/")
 
 
+def subagent_transcripts(jsonl_path: Path) -> list[Path]:
+    """Every subagent transcript belonging to a Claude session, recursively.
+
+    Claude Code writes a session's subagent (sidechain) transcripts next to
+    its main JSONL, and Workflow agents one level deeper::
+
+        <project>/<session_id>.jsonl
+        <project>/<session_id>/subagents/agent-<id>.jsonl
+        <project>/<session_id>/subagents/workflows/wf_<run>/agent-<id>.jsonl
+
+    Returns them sorted (deterministic), or ``[]`` when the session has no
+    ``subagents/`` directory. The single place that knows this layout: the
+    token reader, the turn aggregate, the subagent panels and the feature
+    cache fingerprint all go through it.
+    """
+    jsonl_path = Path(jsonl_path)
+    root = jsonl_path.parent / jsonl_path.stem / "subagents"
+    if not root.is_dir():
+        return []
+    try:
+        return sorted(p for p in root.rglob("agent-*.jsonl") if p.is_file())
+    except OSError:
+        return []
+
+
 def claude_home() -> Path:
     return Path(
         os.environ.get("CONDUCTORSCORE_CLAUDE_HOME", str(Path.home() / ".claude"))
@@ -126,4 +151,4 @@ def find_sessions() -> list[SessionMeta]:
     return out
 
 
-__all__ = ["claude_home", "find_sessions"]
+__all__ = ["claude_home", "find_sessions", "subagent_transcripts"]
