@@ -38,8 +38,10 @@ from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 # recomputed without a client-version change (independent of the client
 # version). 3: nested Workflow subagent transcripts + per-message token
 # accounting (#12/#13); true min/max session bounds (#10); PerSession
-# gained model_skill/plugin_invocations (#11).
-CACHE_FORMAT = 3
+# gained model_skill/plugin_invocations (#11). 4: Skill-tool calls moved out
+# of distinct_skills / the typed by-name maps into
+# model_skill_invocations_by_name (#11 follow-up).
+CACHE_FORMAT = 4
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 

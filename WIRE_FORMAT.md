@@ -150,7 +150,7 @@ All v0.1 fields (`session_hash`, `project_hash`, `started_at_ms`,
 
 | Field                    | Type             | Nullable | Notes                                                                                  |
 |--------------------------|------------------|----------|----------------------------------------------------------------------------------------|
-| `distinct_skills`        | array of strings | no       | **These are slash-command names** (the field is named `distinct_skills` for historical reasons). Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`). Read from Claude Code's structured `<command-name>…</command-name>` markers (colon-bearing names like `my-plugin:deploy` are routed to the plugin counters instead); a leading slash command at the very start of a user message is accepted as a legacy fallback. Free-prose `/word` tokens and path fragments are **never** matched. Slash-command arguments are dropped. Also includes colon-free skill names Claude loaded itself via a `Skill` tool call (see `model_skill_invocations`). |
+| `distinct_skills`        | array of strings | no       | **These are slash-command names** (the field is named `distinct_skills` for historical reasons). Sorted, de-duplicated lowercase slash-command tokens (`["plan", "ultrareview"]`). Read from Claude Code's structured `<command-name>…</command-name>` markers (colon-bearing names like `my-plugin:deploy` are routed to the plugin counters instead); a leading slash command at the very start of a user message is accepted as a legacy fallback. Free-prose `/word` tokens and path fragments are **never** matched. Slash-command arguments are dropped. User-typed only: skills Claude loaded itself via a `Skill` tool call are **not** included (they go to `model_skill_invocations_by_name`). |
 | `distinct_mcp_tools`     | array of strings | no       | Sorted, de-duplicated `tool_use` block names whose name begins with `mcp__`. Tool inputs/outputs are NOT included. |
 | `distinct_builtin_tools` | array of strings | no       | Sorted, de-duplicated `tool_use` block names that do NOT begin with `mcp__` (e.g. `Read`, `Edit`, `Bash`). |
 
@@ -802,10 +802,12 @@ Each streak object:
 
 Adds three per-session maps on top of v0.10, driving the Customization
 "Top by invocations" table. Each map sums to its scalar total(s)
-(`skill_invocations_by_name` → `user_skill_invocations + model_skill_invocations`,
+(`skill_invocations_by_name` → `user_skill_invocations`,
 `mcp_invocations_by_name` → `hitl_mcp_invocations`,
-`plugin_invocations_by_name` → `plugin_invocations + model_plugin_invocations`;
-the `model_*` terms are 0 on payloads from clients before issue #11).
+`plugin_invocations_by_name` → `plugin_invocations`). These maps are
+user-typed only; skills Claude loads itself (issue #11) are reported
+separately in `model_skill_invocations_by_name`, which sums to
+`model_skill_invocations + model_plugin_invocations`.
 
 **Plaintext names.** MCP and plugin keys are **raw names**, emitted in
 plaintext — consistent with `distinct_mcp_tools` (plaintext since v0.2).
@@ -820,11 +822,12 @@ tokens already emitted in `distinct_skills` / counted in
 
 | Field                        | Type                | Default | Notes                                                                                                                       |
 |------------------------------|---------------------|---------|-----------------------------------------------------------------------------------------------------------------------------|
-| `skill_invocations_by_name`  | object<string,int>  | `{}`    | `{ "<skill_name>": count }`. Sums to `user_skill_invocations + model_skill_invocations`. Keys are slash-command / skill tokens (e.g. `"plan"`).               |
+| `skill_invocations_by_name`  | object<string,int>  | `{}`    | `{ "<skill_name>": count }`. Sums to `user_skill_invocations`. Keys are slash-command / skill tokens (e.g. `"plan"`).               |
 | `mcp_invocations_by_name`    | object<string,int>  | `{}`    | `{ "<mcp_tool_name>": count }`. Sums to `hitl_mcp_invocations`. Keys are **raw plaintext** MCP names (e.g. `"mcp__github__create_issue"`). |
-| `plugin_invocations_by_name` | object<string,int>  | `{}`    | `{ "<plugin_command_name>": count }`. Sums to `plugin_invocations + model_plugin_invocations`. Keys are **raw plaintext** plugin command names (e.g. `"my-plugin:deploy"`), parsed from `<command-name>` markers and from `plugin:skill` names in `Skill` tool calls. |
+| `plugin_invocations_by_name` | object<string,int>  | `{}`    | `{ "<plugin_command_name>": count }`. Sums to `plugin_invocations`. Keys are **raw plaintext** plugin command names (e.g. `"my-plugin:deploy"`), parsed from `<command-name>` markers in user messages. |
 | `model_skill_invocations`    | integer             | `0`     | Count of Claude `Skill` tool_use blocks (the model loading a skill on its own) whose `input.skill` (or `input.name`) is colon-free. Kept separate from the user-typed `user_skill_invocations`. Emitted only when non-zero. |
-| `model_plugin_invocations`   | integer             | `0`     | Same as `model_skill_invocations` for `plugin:skill` names (e.g. `superpowers:brainstorming`), which route to the plugin map like typed plugin commands. Emitted only when non-zero. |
+| `model_plugin_invocations`   | integer             | `0`     | Same as `model_skill_invocations` for `plugin:skill` names (e.g. `superpowers:brainstorming`). Emitted only when non-zero. |
+| `model_skill_invocations_by_name` | object<string,int> | `{}` | `{ "<skill_or_plugin:skill>": count }` for Claude `Skill` tool calls, holding both colon-free and `plugin:skill` names. Sums to `model_skill_invocations + model_plugin_invocations`. Display-only (shown in "Top by invocations" tagged as loaded by Claude); never counted in `distinct_skills` or the typed maps, so it does not affect the score. Emitted only when non-empty. |
 
 ### Example session fragment
 

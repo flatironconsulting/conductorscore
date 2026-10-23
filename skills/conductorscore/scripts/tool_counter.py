@@ -120,12 +120,15 @@ class ToolCounts:
 
     Claude ``Skill`` tool calls (the model loading a skill itself, issue #11)
     are counted SEPARATELY in ``model_skill_invocations`` (colon-free names)
-    and ``model_plugin_invocations`` (``plugin:skill`` names) so the
-    user-typed totals keep their meaning. The per-name maps and
-    ``distinct_skills`` cover BOTH sources, so:
-    ``sum(skill_invocations_by_name) == skill_invocations + model_skill_invocations``
-    and
-    ``sum(plugin_invocations_by_name) == plugin_invocations + model_plugin_invocations``.
+    and ``model_plugin_invocations`` (``plugin:skill`` names), with a
+    per-name breakdown in ``model_skill_invocations_by_name`` (both kinds of
+    name). They are display-only: ``distinct_skills`` and the typed per-name
+    maps stay user-typed only, so the server's Customization depth
+    (invocations / distinct) is unaffected:
+    ``sum(skill_invocations_by_name) == skill_invocations`` and
+    ``sum(plugin_invocations_by_name) == plugin_invocations``, while
+    ``sum(model_skill_invocations_by_name) ==
+    model_skill_invocations + model_plugin_invocations``.
     """
 
     distinct_skills: list[str]
@@ -141,15 +144,20 @@ class ToolCounts:
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
     # Slash-command (skill) invocation totals, sourced from ``<command-name>``
     # markers (never free prose). ``skill_invocations`` is the total count;
-    # ``skill_invocations_by_name`` is the per-token breakdown across typed AND
-    # model-initiated invocations, so
-    # ``sum(skill_invocations_by_name.values()) == skill_invocations + model_skill_invocations``.
+    # ``skill_invocations_by_name`` is the per-token breakdown of TYPED
+    # invocations only, so
+    # ``sum(skill_invocations_by_name.values()) == skill_invocations``.
     skill_invocations: int = 0
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     # Claude ``Skill`` tool_use blocks (model-initiated skill loads), split by
     # the same colon rule as typed commands. Always 0 for Codex/Cursor.
+    # Display-only: never folded into distinct_skills or the typed maps.
     model_skill_invocations: int = 0
     model_plugin_invocations: int = 0
+    # Per-name breakdown of the two counts above (colon-free AND
+    # ``plugin:skill`` names). Sums to
+    # ``model_skill_invocations + model_plugin_invocations``.
+    model_skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     # LOCAL diagnostics only — unrecognized Codex tool names seen while
     # counting (``{name: count}``). Never serialized to the wire; the
     # ``ExtractorOutput`` builder never reads this field. Lets the scanner
@@ -184,6 +192,7 @@ class SessionToolFields:
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     model_skill_invocations: int = 0
     model_plugin_invocations: int = 0
+    model_skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_tool_counts(cls, tc: "ToolCounts | None") -> "SessionToolFields":
@@ -201,6 +210,9 @@ class SessionToolFields:
             skill_invocations_by_name=dict(tc.skill_invocations_by_name),
             model_skill_invocations=tc.model_skill_invocations,
             model_plugin_invocations=tc.model_plugin_invocations,
+            model_skill_invocations_by_name=dict(
+                tc.model_skill_invocations_by_name
+            ),
         )
 
 
@@ -284,9 +296,11 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
       categorical identifiers and cross the wire in plaintext.
     - ``model_skill_invocations`` / ``model_plugin_invocations``: ``Skill``
       tool_use blocks (Claude loading a skill on its own), routed by the same
-      colon rule and ALSO tallied into ``distinct_skills`` /
-      ``skill_invocations_by_name`` / ``plugin_invocations_by_name``. The
-      ``Skill`` call still counts as built-in tool "Skill" too. Typed
+      colon rule, with a per-name breakdown in
+      ``model_skill_invocations_by_name``. Display-only: they are NOT added
+      to ``distinct_skills`` / ``skill_invocations_by_name`` /
+      ``plugin_invocations_by_name`` (keeping Customization depth = typed
+      invocations / typed distinct unchanged). The ``Skill`` call still counts as built-in tool "Skill" too. Typed
       ``/name`` invocations do not emit a ``Skill`` tool_use in real Claude
       Code transcripts (verified 2026-10), so the two sources don't overlap.
 
@@ -306,6 +320,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
     skills_by_name: dict[str, int] = {}
     model_skill_invocations = 0
     model_plugin_invocations = 0
+    model_by_name: dict[str, int] = {}
     try:
         raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -351,16 +366,14 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
                     builtin_invocations += 1
                     if name == _SKILL_TOOL_NAME:
                         skill_tok, plugin_name = _skill_tool_target(block)
+                        target = skill_tok or plugin_name
                         if skill_tok:
-                            skills.add(skill_tok)
                             model_skill_invocations += 1
-                            skills_by_name[skill_tok] = (
-                                skills_by_name.get(skill_tok, 0) + 1
-                            )
                         elif plugin_name:
                             model_plugin_invocations += 1
-                            plugins_by_name[plugin_name] = (
-                                plugins_by_name.get(plugin_name, 0) + 1
+                        if target:
+                            model_by_name[target] = (
+                                model_by_name.get(target, 0) + 1
                             )
 
         # Slash-command (skill) + plugin invocations in user messages only,
@@ -391,6 +404,7 @@ def count_tools(jsonl_path: Path) -> ToolCounts:
         skill_invocations_by_name=skills_by_name,
         model_skill_invocations=model_skill_invocations,
         model_plugin_invocations=model_plugin_invocations,
+        model_skill_invocations_by_name=model_by_name,
     )
 
 
