@@ -82,18 +82,35 @@ def _make_output_live() -> None:
             pass
 
 
-def _version_banner() -> None:
-    """Print the version and, only when behind the server's published version, a
-    one-line update notice. Silent on any network/parse failure; skippable with
+def _version_banner() -> bool:
+    """Print the version and, only when behind the server's published version,
+    offer the update. Returns True when the run must STOP for that offer.
+
+    An agent-driven run (no TTY) asks BEFORE scanning — otherwise the user sits
+    through a full scan, updates, and scans again: it emits
+    ``CONDUCTORSCORE_ASK update`` and stops; the agent updates and re-runs, or
+    re-runs with ``--skip-update`` (CONDUCTORSCORE_SKIP_UPDATE), which only
+    prints the notice. A terminal run prints the notice and continues. Silent
+    on any network/parse failure; skippable with
     CONDUCTORSCORE_NO_VERSION_CHECK=1 (used by tests)."""
     local = version_check.skill_version()
     if local:
         print(f"Version {local}")
     if not local or os.environ.get("CONDUCTORSCORE_NO_VERSION_CHECK"):
-        return
+        return False
     latest = version_check.latest_version(API_BASE)
-    if latest and version_check.is_outdated(local, latest):
+    if not (latest and version_check.is_outdated(local, latest)):
+        return False
+    if sys.stdin.isatty() or os.environ.get("CONDUCTORSCORE_SKIP_UPDATE"):
         print(version_check.notice(latest))
+        return False
+    print(
+        f'CONDUCTORSCORE_ASK update "ConductorScore v{latest} is available '
+        f'(you have v{local}). Update before scoring?" '
+        "[Update now (Recommended)] [Not now]"
+    )
+    print(f"CONDUCTORSCORE_UPDATE_CMD {version_check.UPDATE_CMD}")
+    return True
 
 
 def _cache_dir() -> Path:
@@ -607,6 +624,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
     parser.add_argument("--step", action="store_true")
+    # The user declined the update offered before the scan; scan anyway.
+    parser.add_argument("--skip-update", action="store_true")
     ns, _unknown = parser.parse_known_args(argv)
     return ns
 
@@ -820,8 +839,11 @@ def main() -> int:
     # (agent-driven) run has no human reading a banner. A returning user (cached
     # consent) STILL sees the banner so the version + any update notice keeps
     # surfacing on every human run.
+    if args.skip_update:
+        os.environ["CONDUCTORSCORE_SKIP_UPDATE"] = "1"
     if not (args.providers or args.daily or os.environ.get("CONDUCTORSCORE_HEADLESS")):
-        _version_banner()
+        if _version_banner():
+            return 0  # stopped: the agent offers the update, then re-runs
 
     # `--providers` maps onto the CONDUCTORSCORE_PROVIDERS override the scanner
     # already honors. Set it before consent/scan logic reads the environment.

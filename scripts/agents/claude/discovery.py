@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from scripts.agents.base import (
+    first_ts_from_head,
     last_ts_from_tail,
     modified_before,
     preflight_from,
@@ -37,29 +38,6 @@ def _parse_ts_ms(line) -> int | None:
     if not isinstance(d, dict):
         return None
     return parse_iso_ts_ms(d.get("timestamp"))
-
-
-def _last_ts_ms_from_lines(lines: list[str]) -> int | None:
-    """Last parseable timestamp in a transcript, scanning from the end.
-
-    Used by ``find_sessions``, which has the lines in memory anyway.
-    ``preflight`` gets the same answer from ``last_ts_from_tail`` without
-    reading the whole file.
-    """
-    for line in reversed(lines):
-        ts = _parse_ts_ms(line)
-        if ts is not None:
-            return ts
-    return None
-
-
-def _first_ts_ms_from_lines(lines: list[str]) -> int | None:
-    """First parseable timestamp in a transcript, scanning from the start."""
-    for line in lines:
-        ts = _parse_ts_ms(line)
-        if ts is not None:
-            return ts
-    return None
 
 
 def _project_root_from_dir(dir_name: str) -> str:
@@ -130,14 +108,10 @@ def find_sessions() -> list[SessionMeta]:
         project_root = _project_root_from_dir(proj_dir.name)
         for jsonl in proj_dir.glob("*.jsonl"):
             session_id = jsonl.stem
-            try:
-                lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            if not lines:
-                continue
-            first = _first_ts_ms_from_lines(lines)
-            last = _last_ts_ms_from_lines(lines)
+            # Runs before every scan over every transcript ever written —
+            # read only the ends, never whole files (GBs for a heavy user).
+            first = first_ts_from_head(jsonl, _parse_ts_ms)
+            last = last_ts_from_tail(jsonl, _parse_ts_ms)
             if first is None or last is None:
                 continue
             out.append(

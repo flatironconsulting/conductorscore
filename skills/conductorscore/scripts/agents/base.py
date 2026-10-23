@@ -185,8 +185,39 @@ def last_ts_from_tail(
         return None
 
 
+def first_ts_from_head(
+    path: Path,
+    ts_of_line: Callable[[str], int | None],
+    chunk: int = TAIL_CHUNK_BYTES,
+) -> int | None:
+    """First timestamp in a line-oriented file, reading only its start —
+    the mirror of ``last_ts_from_tail``. A window that stops short of EOF may
+    end mid-line, so its last line is never parsed; the window widens 4x until
+    a complete line yields a timestamp or the whole file has been read."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            while True:
+                end = min(size, chunk)
+                f.seek(0)
+                lines = f.read(end).decode(
+                    "utf-8", errors="replace"
+                ).splitlines()
+                if end < size:
+                    lines = lines[:-1]
+                for line in lines:
+                    ts = ts_of_line(line)
+                    if ts is not None:
+                        return ts
+                if end == size:
+                    return None
+                chunk *= 4
+    except OSError:
+        return None
+
+
 __all__ = [
     "AgentAdapter", "AgentId", "Event", "SessionMeta", "TAIL_CHUNK_BYTES",
-    "is_dir_safe", "is_file_safe", "last_ts_from_tail", "modified_before",
-    "preflight_from",
+    "first_ts_from_head", "is_dir_safe", "is_file_safe", "last_ts_from_tail",
+    "modified_before", "preflight_from",
 ]

@@ -99,3 +99,47 @@ def test_codex_preflight_counts_recent_and_skips_stale(tmp_path, monkeypatch):
 
 def _iso(ms):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))
+
+
+# ---- discovery: first timestamp from the head ----------------------------
+
+from scripts.agents.base import first_ts_from_head  # noqa: E402
+
+
+def test_finds_first_timestamp_from_head(tmp_path):
+    p = _write(tmp_path / "s.jsonl", [
+        {"no_timestamp": True},
+        {"timestamp": "2026-01-01T00:00:00Z"},
+        {"timestamp": "2026-01-02T00:00:00Z", "pad": "x" * 200_000},
+    ])
+    assert first_ts_from_head(p, _ts, chunk=1024) == parse_iso_ts_ms("2026-01-01T00:00:00Z")
+
+
+def test_first_line_bigger_than_chunk_is_still_found(tmp_path):
+    p = _write(tmp_path / "s.jsonl", [
+        {"timestamp": "2026-01-05T00:00:00Z", "pad": "y" * 500_000},
+        {"timestamp": "2026-01-06T00:00:00Z"},
+    ])
+    assert first_ts_from_head(p, _ts, chunk=1024) == parse_iso_ts_ms("2026-01-05T00:00:00Z")
+
+
+def test_head_no_timestamps_returns_none(tmp_path):
+    p = _write(tmp_path / "s.jsonl", [{"a": 1}])
+    assert first_ts_from_head(p, _ts, chunk=4) is None
+
+
+def test_claude_find_sessions_bounds_from_head_and_tail(tmp_path, monkeypatch):
+    home = tmp_path / ".claude"
+    proj = home / "projects" / "-p"
+    proj.mkdir(parents=True)
+    monkeypatch.setenv("CONDUCTORSCORE_CLAUDE_HOME", str(home))
+    _write(proj / "a.jsonl", [
+        {"type": "summary"},
+        {"timestamp": "2026-01-01T00:00:00Z", "pad": "x" * 300_000},
+        {"timestamp": "2026-01-03T00:00:00Z", "pad": "z" * 300_000},
+        {"type": "summary"},
+    ])
+    (proj / "empty.jsonl").write_text("")
+    [s] = claude_discovery.find_sessions()
+    assert s.first_ts_ms == parse_iso_ts_ms("2026-01-01T00:00:00Z")
+    assert s.last_ts_ms == parse_iso_ts_ms("2026-01-03T00:00:00Z")

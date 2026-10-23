@@ -25,10 +25,6 @@ python3 <this-skill-dir>/scripts/run.py --step
 On Windows, if `python3` isn't found, use `python` or `py -3` instead. Always
 pass `--step` when running `run.py` for a scan, including the re-runs below.
 
-If the script prints `↑ vX.Y.Z available — run: <command>`, note the version
-and command and continue the scan normally; offer the update after the final
-report (see "Update offer").
-
 The script drives the flow. Don't narrate the steps. Your jobs are: (a) run the
 script, (b) relay its progress (below), (c) handle the `CONDUCTORSCORE_ASK`
 lines below, and (d) when the scan finishes, render the **final report** from
@@ -58,6 +54,21 @@ prose), then re-run `run.py` with the matching flag:
 - `providers` → re-run `run.py --step` with `--providers=all` (All),
   `--providers=claude` (Claude Code), `--providers=codex` (Codex), or
   `--providers=cursor` (Cursor). On Cancel, stop.
+- `update` → asked BEFORE any scanning, when a newer ConductorScore is
+  published. Present EXACTLY the two printed choices, **Update now** and
+  **Not now**. On **Not now**, re-run `run.py --step --skip-update` (it scans
+  with this version). On **Update now**:
+  1. Run the command from the `CONDUCTORSCORE_UPDATE_CMD <command>` line
+     exactly. Its output may mention other copies ("no GitHub metadata") —
+     ignore that; don't judge success from the output.
+  2. Read the `VERSION` file in this skill's directory (next to this SKILL.md).
+  3. If it now shows the new version, re-run `run.py --step` (the updated
+     script now runs the scan).
+  4. Otherwise this copy isn't managed by `gh skill`, so the update can't
+     reach it. Tell the user to reinstall it once with
+     `gh skill install https://github.com/flatironconsulting/conductorscore conductorscore --agent <claude-code|codex|cursor> --scope user --force`
+     (the agent you're running in), then re-run `run.py --step --skip-update`
+     so they still get a score now.
 - `daily` → present EXACTLY two choices, **Yes** and **No** (no Cancel, no other
   options). Re-run with ONLY `--daily=yes` or `--daily=no` — do NOT add
   `--providers`; this enables/declines the once-per-day hook and does NOT re-scan.
@@ -78,24 +89,6 @@ user a final report in exactly this shape (keep the ✓ and 📊 and the bullets
 - <Daily auto-refresh enabled — your score updates once per day | Daily auto-refresh not enabled>
 - Only your score (the numbers) was uploaded — never any transcript text
 ```
-
-## Update offer
-
-Only if this run printed a `↑ vX.Y.Z available — run: <command>` line: after
-the final report, ask with EXACTLY two choices, **Update now** and **Not now**:
-"ConductorScore vX.Y.Z is available (you have the version shown above). Update
-and re-score?" On **Not now**, stop. On **Update now**:
-
-1. Run `<command>` exactly as printed. Its output may mention other copies
-   ("no GitHub metadata") — ignore that; don't judge success from the output.
-2. Read the `VERSION` file in this skill's directory (next to this SKILL.md).
-3. If it now says X.Y.Z, run `run.py --step` again (relaying progress as above)
-   and present the new final report. If that re-run asks the `daily` question
-   again, don't ask the user: re-run with the answer they already gave.
-4. Otherwise this copy isn't managed by `gh skill`, so the update can't reach
-   it. Tell the user to reinstall it once with
-   `gh skill install https://github.com/flatironconsulting/conductorscore conductorscore --agent <claude-code|codex|cursor> --scope user --force`
-   (the agent you're running in), after which updates work, and stop.
 
 ## Debug / visualize a session — `/conductorscore debug`
 
