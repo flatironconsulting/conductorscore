@@ -84,12 +84,18 @@ user a final report in exactly this shape (keep the ✓ and 📊 and the bullets
 Only if this run printed a `↑ vX.Y.Z available — run: <command>` line: after
 the final report, ask with EXACTLY two choices, **Update now** and **Not now**:
 "ConductorScore vX.Y.Z is available (you have the version shown above). Update
-and re-score?" On **Update now**, run `<command>` exactly as printed, then run
-`run.py --step` again (relaying progress as above) and present the new final
-report. If that re-run asks the `daily` question again, don't ask the user:
-re-run with the answer they already gave. If the update command fails, show its
-error and stop. On **Not now**,
-stop.
+and re-score?" On **Not now**, stop. On **Update now**:
+
+1. Run `<command>` exactly as printed. Its output may mention other copies
+   ("no GitHub metadata") — ignore that; don't judge success from the output.
+2. Read the `VERSION` file in this skill's directory (next to this SKILL.md).
+3. If it now says X.Y.Z, run `run.py --step` again (relaying progress as above)
+   and present the new final report. If that re-run asks the `daily` question
+   again, don't ask the user: re-run with the answer they already gave.
+4. Otherwise this copy isn't managed by `gh skill`, so the update can't reach
+   it. Tell the user to reinstall it once with
+   `gh skill install https://github.com/flatironconsulting/conductorscore conductorscore --agent <claude-code|codex|cursor> --scope user --force`
+   (the agent you're running in), after which updates work, and stop.
 
 ## Debug / visualize a session — `/conductorscore debug`
 
