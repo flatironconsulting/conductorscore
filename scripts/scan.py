@@ -8,6 +8,7 @@ the user.
 """
 from __future__ import annotations
 
+import errno
 import gzip
 import json
 import os
@@ -83,6 +84,11 @@ def _profile_url(auth: dict, resp: dict | None = None) -> str:
     return f"{API_BASE}/u/{handle}"
 
 
+# Must exceed /api/ingest's maxDuration (300s) so a slow ingest comes back as
+# the server's own response (a score, or a 504) rather than a client timeout.
+UPLOAD_TIMEOUT_S = 330
+
+
 def _upload(features_json: str, device_token: str):
     """POST the payload to /api/ingest. Returns one of:
       ("ok", resp_dict) | ("http", (code, body)) | ("neterr", reason)
@@ -101,13 +107,19 @@ def _upload(features_json: str, device_token: str):
         },
     )
     try:
-        with open_url(req, timeout=30) as r:
+        with open_url(req, timeout=UPLOAD_TIMEOUT_S) as r:
             return "ok", json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") or "{}"
         return "http", (e.code, body)
     except urllib.error.URLError as e:
         return "neterr", e.reason
+    except OSError as e:
+        # urllib only wraps connect-phase failures in URLError. A timeout or
+        # reset while awaiting/reading the response (e.g. the server taking
+        # longer than `timeout` on a large payload) surfaces as a bare
+        # TimeoutError / ConnectionError — still a network failure, not a crash.
+        return "neterr", str(e) or type(e).__name__
 
 
 def main() -> int:
@@ -308,6 +320,9 @@ def _write_crash_log() -> Path | None:
         return None
 
 
+_FS_WRITE_ERRNOS = frozenset({errno.EROFS, errno.EACCES, errno.EPERM, errno.ENOSPC})
+
+
 def _backstop_main() -> int:
     """Last-resort guard so the scan subprocess never surfaces a Python traceback
     to the host session. SystemExit raised intentionally by inner code is
@@ -319,7 +334,12 @@ def _backstop_main() -> int:
         return main()
     except SystemExit:
         raise
-    except OSError:
+    except OSError as e:
+        # Only genuine can't-write errors get the read-only message: OSError
+        # also covers TimeoutError / ConnectionError, which must not be
+        # misreported as a filesystem problem.
+        if e.errno not in _FS_WRITE_ERRNOS:
+            return _report_unexpected()
         _write_crash_log()
         print(
             "ConductorScore couldn't write its cache (read-only filesystem); "
@@ -328,17 +348,22 @@ def _backstop_main() -> int:
         )
         return 0
     except Exception:
-        if os.environ.get("CONDUCTORSCORE_DEBUG"):
-            import traceback
+        return _report_unexpected()
 
-            traceback.print_exc()
-        crash_path = _write_crash_log()
-        detail = f" Details: {crash_path}" if crash_path else ""
-        print(
-            f"ConductorScore hit an unexpected error and stopped.{detail}",
-            file=sys.stderr,
-        )
-        return 0
+
+def _report_unexpected() -> int:
+    """Log the in-flight exception to crash.log and print one clean line."""
+    if os.environ.get("CONDUCTORSCORE_DEBUG"):
+        import traceback
+
+        traceback.print_exc()
+    crash_path = _write_crash_log()
+    detail = f" Details: {crash_path}" if crash_path else ""
+    print(
+        f"ConductorScore hit an unexpected error and stopped.{detail}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 if __name__ == "__main__":

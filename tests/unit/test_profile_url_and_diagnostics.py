@@ -12,7 +12,9 @@ traceback is appended to <cache>/crash.log and the one-line message points at it
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
 
 import pytest
 
@@ -129,6 +131,36 @@ def test_backstop_writes_crash_log(mod, tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "unexpected error" in err
     assert str(crash) in err  # the one-liner points at the details
+
+
+def test_backstop_network_oserror_is_not_reported_as_readonly_fs(tmp_path, monkeypatch, capsys):
+    # Live false diagnosis: an upload TimeoutError (an OSError subclass) hit the
+    # backstop's blanket ``except OSError`` and was reported as "couldn't write
+    # its cache (read-only filesystem)" on a perfectly writable cache.
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("CONDUCTORSCORE_DEBUG", raising=False)
+
+    def boom():
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(scan, "main", boom)
+    assert scan._backstop_main() == 0
+    err = capsys.readouterr().err
+    assert "read-only" not in err
+    assert "unexpected error" in err
+    assert "timed out" in (tmp_path / "crash.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("errno_", [errno.EROFS, errno.EACCES, errno.EPERM])
+def test_backstop_readonly_fs_message_only_for_fs_errors(errno_, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+
+    def boom():
+        raise OSError(errno_, os.strerror(errno_), str(tmp_path / "status.json"))
+
+    monkeypatch.setattr(scan, "main", boom)
+    assert scan._backstop_main() == 0
+    assert "couldn't write its cache" in capsys.readouterr().err
 
 
 def test_backstop_debug_env_prints_traceback(tmp_path, monkeypatch, capsys):
