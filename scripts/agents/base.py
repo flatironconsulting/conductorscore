@@ -58,6 +58,26 @@ class AgentAdapter(Protocol):
         ...
 
 
+def is_file_safe(p: Path) -> bool:
+    """``p.is_file()``, but ``False`` on ANY ``OSError`` (``EACCES``, ``EIO``,
+    ...). ``Path.is_file`` only swallows not-found-style errors; an
+    un-stat-able candidate (e.g. WSL ``/mnt/c/Users/...``) must read as
+    absent rather than crash discovery/preflight."""
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def is_dir_safe(p: Path) -> bool:
+    """``p.is_dir()`` with the same any-``OSError``-is-absent rule as
+    ``is_file_safe``."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
 def preflight_from(
     home: Path,
     config_filename: str,
@@ -98,8 +118,8 @@ def preflight_from(
     caller by design, not silently dropped.
     """
     out = {
-        "home_exists": home.is_dir(),
-        "config_exists": (home / config_filename).is_file(),
+        "home_exists": is_dir_safe(home),
+        "config_exists": is_file_safe(home / config_filename),
         "sessions_in_window": 0,
         "sessions_per_day": 0.0,
     }
@@ -115,4 +135,7 @@ def preflight_from(
     return out
 
 
-__all__ = ["AgentAdapter", "AgentId", "Event", "SessionMeta", "preflight_from"]
+__all__ = [
+    "AgentAdapter", "AgentId", "Event", "SessionMeta",
+    "is_dir_safe", "is_file_safe", "preflight_from",
+]

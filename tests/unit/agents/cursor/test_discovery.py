@@ -437,3 +437,63 @@ def test_preflight_counts_both_ide_and_cli_sessions(tmp_path, monkeypatch):
         "agentId": "cli-agent-6", "createdAt": T0, "messages": [user_message("hi")]})
     pf = discovery.preflight(now_ms=T0 + MS, window_ms=30 * 24 * 60 * MS)
     assert pf["sessions_in_window"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Un-stat-able candidate paths (WSL: /mnt/c/Users/... can raise EACCES/EIO on
+# stat) are treated as absent -- never crash discovery or preflight.
+# ---------------------------------------------------------------------------
+
+
+def _unstatable(monkeypatch, prefixes, err):
+    """Make ``Path.stat`` raise ``err`` for any path under ``prefixes``."""
+    import pathlib
+
+    real_stat = pathlib.Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        if any(str(self).startswith(p) for p in prefixes):
+            raise err
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", fake_stat)
+
+
+def _isolate_defaults(tmp_path, monkeypatch):
+    for var in ("CONDUCTORSCORE_CURSOR_IDE_STORE", "CONDUCTORSCORE_CURSOR_CLI_DIR",
+                "APPDATA"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_HOME", str(tmp_path / ".cursor"))
+
+
+def test_ide_store_paths_skips_unreadable_windows_store(tmp_path, monkeypatch):
+    _isolate_defaults(tmp_path, monkeypatch)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
+    _unstatable(monkeypatch, [str(tmp_path / "AppData")],
+                PermissionError(13, "Permission denied"))
+    assert discovery.ide_store_paths() == []
+
+
+def test_ide_store_paths_survives_eio_on_mnt_c_users(tmp_path, monkeypatch):
+    _isolate_defaults(tmp_path, monkeypatch)
+    _unstatable(monkeypatch, ["/mnt/c"], OSError(5, "Input/output error"))
+    assert discovery.ide_store_paths() == []
+
+
+def test_preflight_survives_unstatable_paths(tmp_path, monkeypatch):
+    _isolate_defaults(tmp_path, monkeypatch)
+    _unstatable(monkeypatch, ["/mnt/c", str(tmp_path / ".cursor")],
+                OSError(5, "Input/output error"))
+    pf = discovery.preflight(now_ms=T0, window_ms=30 * 24 * 60 * MS)
+    assert pf["home_exists"] is False
+    assert pf["config_exists"] is False
+    assert pf["sessions_in_window"] == 0
+
+
+def test_override_paths_unstatable_treated_as_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_IDE_STORE", str(tmp_path / "x" / "state.vscdb"))
+    monkeypatch.setenv("CONDUCTORSCORE_CURSOR_CLI_DIR", str(tmp_path / "x" / "chats"))
+    _unstatable(monkeypatch, [str(tmp_path / "x")], PermissionError(13, "denied"))
+    assert discovery.ide_store_paths() == []
+    assert discovery.cli_store_paths() == []

@@ -35,6 +35,8 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+from scripts.agents.base import is_file_safe
+
 # Restricts the f-string table interpolation in kv_get_json/kv_iter_prefix
 # to known schema tables only -- table names are never derived from
 # untrusted/external input, but this keeps the query construction honest.
@@ -69,7 +71,7 @@ def open_ro(db_path: Path) -> sqlite3.Connection | None:
     failure: missing file, copy failure, or an unopenable/corrupt database.
     Never raises. Closing the returned connection deletes the temp copy.
     """
-    if not db_path.is_file():
+    if not is_file_safe(db_path):
         return None
     copy_path = _copy_to_temp(db_path)
     if copy_path is None:
