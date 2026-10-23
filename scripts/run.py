@@ -600,21 +600,44 @@ def _emit_no_sessions(final: dict) -> None:
     )
 
 
+def _last_result_path() -> Path:
+    return _cache_dir() / "last_result.json"
+
+
 def _emit_result(final: dict) -> None:
     """Agent path: emit the scan result as ONE structured line and nothing else.
     The agent turns it into the final report (see SKILL.md), so the script never
-    prints a competing human summary — no duplicate score line."""
-    print(
-        "CONDUCTORSCORE_RESULT "
-        + json.dumps(
-            {
-                "score": _score_of(final),
-                "url": final.get("profile_url"),
-                "sessions": final.get("total"),
-                "verified_github": bool((final.get("verification") or {}).get("has_github")),
-            }
-        )
-    )
+    prints a competing human summary — no duplicate score line. The payload is
+    also saved so the --daily re-run can re-emit it (see _reemit_result)."""
+    payload = {
+        "score": _score_of(final),
+        "url": final.get("profile_url"),
+        "sessions": final.get("total"),
+        "verified_github": bool((final.get("verification") or {}).get("has_github")),
+    }
+    print("CONDUCTORSCORE_RESULT " + json.dumps(payload))
+    try:
+        path = _last_result_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _reemit_result(decision: str) -> None:
+    """Re-print the saved RESULT line (plus the daily choice) on the --daily
+    re-run, so the final report's data is in the agent's latest output rather
+    than two tool calls back, where agents were seen dropping the report."""
+    path = _last_result_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["daily"] = decision == "yes"
+    print("CONDUCTORSCORE_RESULT " + json.dumps(payload))
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -821,7 +844,9 @@ def main() -> int:
     # The daily decision is a scan-less follow-up: the user has already seen
     # their score, so applying it must NOT trigger another scan.
     if args.daily is not None:
-        return _apply_daily_decision(args.daily)
+        rc = _apply_daily_decision(args.daily)
+        _reemit_result(args.daily)
+        return rc
 
     # --step continuation: a scan an earlier --step call started is ours to
     # report on, so skip the banner, login and consent gates. A finished scan

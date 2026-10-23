@@ -77,8 +77,11 @@ prose), then re-run `run.py` with the matching flag:
 
 When the scan finishes the script prints a single line:
 `CONDUCTORSCORE_RESULT {"score":N,"url":"...","sessions":N,"verified_github":bool}`.
-Don't show that raw line. After the `daily` question is resolved, present the
-user a final report in exactly this shape (keep the ✓ and 📊 and the bullets):
+Don't show that raw line. The `--daily=yes|no` re-run prints it again with a
+`"daily":true|false` field. Render the final report from that line **in the same
+reply as the daily re-run, before anything else**.
+Never end the run without showing the user the report and its URL. Use exactly
+this shape (keep the ✓ and 📊 and the bullets):
 
 ```
 ✓ ConductorScore: <score>
