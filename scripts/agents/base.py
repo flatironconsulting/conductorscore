@@ -13,7 +13,7 @@ adding a new ``scripts/agents/<id>/`` package and registering its id in
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Literal, Protocol, runtime_checkable
+from typing import Callable, Iterable, Literal, Protocol, runtime_checkable
 
 from scripts.core.normalized import Event, SessionMeta
 from scripts.core.thresholds import MS_PER_DAY
@@ -135,7 +135,58 @@ def preflight_from(
     return out
 
 
+# Preflight runs before every scan, over every transcript an agent has ever
+# written (GBs for a heavy user), so it must not read whole files.
+TAIL_CHUNK_BYTES = 64 * 1024
+
+
+def modified_before(path: Path, cutoff_ms: int) -> bool:
+    """True if ``path`` was last written before ``cutoff_ms``. Its last
+    activity can't be later than its last write, so preflight can skip it
+    without opening it. ``False`` (read it) when it can't be stat-ed."""
+    try:
+        return path.stat().st_mtime * 1000 < cutoff_ms
+    except OSError:
+        return False
+
+
+def last_ts_from_tail(
+    path: Path,
+    ts_of_line: Callable[[str], int | None],
+    chunk: int = TAIL_CHUNK_BYTES,
+) -> int | None:
+    """Last timestamp in a line-oriented file, reading only its end.
+
+    Same answer as scanning every line in reverse with ``ts_of_line``, but
+    reads the final ``chunk`` bytes, widening the window 4x at a time until
+    a COMPLETE line yields a timestamp or the whole file has been read (the
+    first line of a partial window may be cut mid-way, so it is never
+    parsed). ``None`` if no line has one or the file can't be read.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            while True:
+                start = max(0, size - chunk)
+                f.seek(start)
+                lines = f.read(size - start).decode(
+                    "utf-8", errors="replace"
+                ).splitlines()
+                if start > 0:
+                    lines = lines[1:]
+                for line in reversed(lines):
+                    ts = ts_of_line(line)
+                    if ts is not None:
+                        return ts
+                if start == 0:
+                    return None
+                chunk *= 4
+    except OSError:
+        return None
+
+
 __all__ = [
-    "AgentAdapter", "AgentId", "Event", "SessionMeta",
-    "is_dir_safe", "is_file_safe", "preflight_from",
+    "AgentAdapter", "AgentId", "Event", "SessionMeta", "TAIL_CHUNK_BYTES",
+    "is_dir_safe", "is_file_safe", "last_ts_from_tail", "modified_before",
+    "preflight_from",
 ]

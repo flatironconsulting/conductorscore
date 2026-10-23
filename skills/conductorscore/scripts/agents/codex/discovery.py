@@ -17,7 +17,11 @@ import json
 import os
 from pathlib import Path
 
-from scripts.agents.base import preflight_from
+from scripts.agents.base import (
+    last_ts_from_tail,
+    modified_before,
+    preflight_from,
+)
 from scripts.core.normalized import SessionMeta
 from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.agents.codex.events import read_rollout_lines
@@ -45,6 +49,15 @@ def codex_home() -> Path:
 def _parse_ts_ms(d: dict) -> int | None:
     """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
     return parse_iso_ts_ms(d.get("timestamp"))
+
+
+def _line_ts_ms(line: str) -> int | None:
+    """``_parse_ts_ms`` for a raw JSONL line; ``None`` if it isn't a row."""
+    try:
+        d = json.loads(line.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return _parse_ts_ms(d) if isinstance(d, dict) else None
 
 
 def _session_meta_fields(lines: list[str]) -> tuple[str | None, str | None]:
@@ -102,6 +115,7 @@ def preflight(now_ms: int, window_ms: int) -> dict:
       * ``sessions_per_day`` — approximate sessions/day across the window.
     """
     home = codex_home()
+    cutoff = now_ms - window_ms
 
     def _last_ts_iter():
         sessions_dir = home / "sessions"
@@ -109,6 +123,14 @@ def preflight(now_ms: int, window_ms: int) -> dict:
             return
         for jsonl in _rollout_files(sessions_dir):
             if not jsonl.is_file():
+                continue
+            # Only the last timestamp matters: skip rollouts untouched since
+            # the cutoff, and tail-read plain ones. A .zst can't be read from
+            # the end, so an in-window one is decompressed in full.
+            if modified_before(jsonl, cutoff):
+                continue
+            if jsonl.suffix != ".zst":
+                yield last_ts_from_tail(jsonl, _line_ts_ms)
                 continue
             lines = read_rollout_lines(jsonl)
             if not lines:

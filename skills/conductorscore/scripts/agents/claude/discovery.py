@@ -11,7 +11,11 @@ import json
 import os
 from pathlib import Path
 
-from scripts.agents.base import preflight_from
+from scripts.agents.base import (
+    last_ts_from_tail,
+    modified_before,
+    preflight_from,
+)
 from scripts.core.normalized import SessionMeta
 from scripts.core.timestamps import parse_iso_ts_ms
 
@@ -38,9 +42,9 @@ def _parse_ts_ms(line) -> int | None:
 def _last_ts_ms_from_lines(lines: list[str]) -> int | None:
     """Last parseable timestamp in a transcript, scanning from the end.
 
-    Shared by ``preflight`` (only needs the last timestamp, cheaply, to
-    bound the session against the consent window) and ``find_sessions``
-    (needs both bounds) — same reversed-scan-until-first-hit semantics.
+    Used by ``find_sessions``, which has the lines in memory anyway.
+    ``preflight`` gets the same answer from ``last_ts_from_tail`` without
+    reading the whole file.
     """
     for line in reversed(lines):
         ts = _parse_ts_ms(line)
@@ -95,6 +99,7 @@ def preflight(now_ms: int, window_ms: int) -> dict:
       * ``sessions_per_day`` — approximate sessions/day across the window.
     """
     home = claude_home()
+    cutoff = now_ms - window_ms
 
     def _last_ts_iter():
         projects_dir = home / "projects"
@@ -104,15 +109,11 @@ def preflight(now_ms: int, window_ms: int) -> dict:
             if not proj_dir.is_dir():
                 continue
             for jsonl in proj_dir.glob("*.jsonl"):
-                try:
-                    lines = jsonl.read_text(
-                        encoding="utf-8", errors="replace"
-                    ).splitlines()
-                except OSError:
+                # Only the last timestamp matters: skip files untouched since
+                # the cutoff, read just the tail of the rest.
+                if modified_before(jsonl, cutoff):
                     continue
-                if not lines:
-                    continue
-                yield _last_ts_ms_from_lines(lines)
+                yield last_ts_from_tail(jsonl, _parse_ts_ms)
 
     return preflight_from(home, "settings.json", _last_ts_iter(), now_ms, window_ms)
 
