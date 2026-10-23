@@ -27,7 +27,6 @@ Anchors:
 from __future__ import annotations
 
 import json as _json
-import bisect
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -544,57 +543,25 @@ def _merge_intervals(intervals) -> list[tuple[int, int]]:
     return merged
 
 
-def _subtract_intervals(
-    intervals: list[tuple[int, int]], cut: list[tuple[int, int]]
-) -> list[tuple[int, int]]:
-    out: list[tuple[int, int]] = []
-    cut = _merge_intervals(cut)
-    for lo, hi in intervals:
-        cur = lo
-        for c_lo, c_hi in cut:
-            if c_hi <= cur or c_lo >= hi:
-                continue
-            if c_lo > cur:
-                out.append((cur, c_lo))
-            cur = max(cur, c_hi)
-            if cur >= hi:
-                break
-        if cur < hi:
-            out.append((cur, hi))
-    return out
-
-
-def _human_timestamps(events: list[Event]) -> list[int]:
-    """Main-thread events a HUMAN produced (typed prompt or AskUserQuestion
-    answer); script-sent prompts (task notifications, schedulers) are not."""
-    main = [e for e in events if not e.is_sidechain]
-    aq_ids = _ask_user_question_tool_use_ids(main)
-    return sorted(
-        e.timestamp_ms
-        for e in main
-        if _is_human_event(e, aq_ids) and not e.is_scripted_prompt
-    )
-
-
 def parallel_subagent_intervals(
     turns: list[Turn],
     events: list[Event],
     extra_spans: dict[str, tuple[int, int]] | None = None,
     extra_activity: dict[str, AgentActivity] | None = None,
 ) -> list[tuple[int, int]]:
-    """Wall-clock intervals credited as subagent work (issue #12).
+    """Wall-clock intervals with >= 1 subagent active (issue #12).
 
     * Each subagent is credited from its first to its last event — also
       OUTSIDE main-thread turns (background agents and Workflow runs
       outlive the dispatching turn) — minus its own idle gaps (> 5 min, not
       inside a tool call; same rule as ``_compute_active_seconds``).
-    * Credit stops at the first human (non-scripted) event after the agent
-      started: past that point the parent is no longer unattended.
+    * Credit is NOT clipped by human activity: a subagent running while the
+      human types in the main session is a parallel track for its whole
+      active span (both HITL and parallel time are real).
     * Concurrent agents are UNION-merged — the result is time with ≥ 1
       agent running, not the per-agent sum.
-    * Time inside HITL turns is removed, so a minute is never both HITL and
-      subagent-parallel.
 
+    ``turns`` is accepted for signature stability and is not used.
     Sources: sidechain events in ``events``, Codex multi-agent spans,
     ``extra_spans`` (whole span treated as active) and ``extra_activity``
     (on-disk transcripts, ``subagent_activity_from_disk``).
@@ -610,19 +577,7 @@ def parallel_subagent_intervals(
     if not agents:
         return []
 
-    humans = _human_timestamps(events)
-    credited: list[tuple[int, int]] = []
-    for a in agents:
-        i = bisect.bisect_right(humans, a.start_ts_ms)
-        limit = humans[i] if i < len(humans) else None
-        for lo, hi in a.intervals:
-            if limit is not None:
-                if lo >= limit:
-                    break
-                hi = min(hi, limit)
-            credited.append((lo, hi))
-    hitl = [(t.start_ts_ms, t.end_ts_ms) for t in turns if t.label == "HITL"]
-    return _subtract_intervals(_merge_intervals(credited), hitl)
+    return _merge_intervals(iv for a in agents for iv in a.intervals)
 
 
 def afk_parallel_subagent_seconds(
@@ -631,11 +586,12 @@ def afk_parallel_subagent_seconds(
     extra_spans: dict[str, tuple[int, int]] | None = None,
     extra_activity: dict[str, AgentActivity] | None = None,
 ) -> float:
-    """Seconds with ≥ 1 subagent running unattended — the wire's
-    ``afk_parallel_minutes_foreground``. See ``parallel_subagent_intervals``
-    for the rule. Callers with the on-disk transcripts pass
-    ``subagent_activity_from_disk`` as ``extra_activity`` — the main JSONL
-    alone usually lacks sidechain lines.
+    """Seconds with ≥ 1 subagent active — the wire's
+    ``afk_parallel_minutes_foreground``. Despite the (kept, server-read)
+    field name this is agent wall-clock, union, NOT limited to AFK time. See
+    ``parallel_subagent_intervals`` for the rule. Callers with the on-disk
+    transcripts pass ``subagent_activity_from_disk`` as ``extra_activity`` —
+    the main JSONL alone usually lacks sidechain lines.
 
     Fits the server's leverage numerator ``afk − afk_dispatch + parallel``:
     main-thread time spent blocked on a dispatch is ``afk_dispatch`` (and is
