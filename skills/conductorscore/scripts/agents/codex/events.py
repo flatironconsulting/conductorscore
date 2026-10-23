@@ -525,6 +525,9 @@ class _ReadContext:
     current_model: str | None = None
     last_assistant_idx: int | None = None
     turn_close_idx: int | None = None
+    # ``codex exec`` session (from ``session_meta``): every prompt was sent
+    # by a script, so USER events are stamped ``is_scripted_prompt``.
+    is_exec: bool = False
 
 
 def _handle_response_item(
@@ -552,6 +555,7 @@ def _handle_response_item(
                 user_text_hash=_sha16(text),
                 user_text_token_count=token_count,
                 is_structured_prompt=structured,
+                is_scripted_prompt=ctx.is_exec,
             )
             ctx.events.append(ev)
             if ctx.want_text:
@@ -702,6 +706,7 @@ def _handle_event_msg(
                 user_text_hash=_sha16(text),
                 user_text_token_count=token_count,
                 is_structured_prompt=structured,
+                is_scripted_prompt=ctx.is_exec,
             )
             ctx.events.append(ev)
             if ctx.want_text:
@@ -917,6 +922,13 @@ def _read(
                 prov = payload.get("model_provider")
                 if isinstance(prov, str) and prov:
                     ctx.current_model = prov
+            # Older rollouts carry only originator="codex_exec"; newer ones
+            # also set source="exec".
+            if (
+                payload.get("source") == "exec"
+                or payload.get("originator") == "codex_exec"
+            ):
+                ctx.is_exec = True
             continue
 
         if top == "response_item":
