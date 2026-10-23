@@ -25,12 +25,13 @@ from scripts.agents.claude.taxonomy import (
     EDIT_TOOL_NAMES,
     EXCLUDED_EDIT_BASENAMES,
     EXCLUDED_EDIT_DIR_PARTS,
+    MACHINE_PROMPT_OPENERS,
     MACHINE_TURN_ORIGINS,
     RAW_INPUT_TOOLS,
     SYNTHETIC_SENTINELS,
     SYNTHETIC_TAG_RE,
-    TASK_NOTIFICATION_OPENER,
 )
+from scripts.core.prompt_origin import mark_scheduled_repeats
 
 
 def _usage_tokens(message: dict) -> tuple[int, int]:
@@ -143,7 +144,7 @@ def _classify_user_message(d: dict, raw_text: str) -> tuple[str | None, str]:
     raw = raw_text.strip()
     if raw and (
         d.get("turnOrigin") in MACHINE_TURN_ORIGINS
-        or raw.startswith(TASK_NOTIFICATION_OPENER)
+        or raw.startswith(MACHINE_PROMPT_OPENERS)
     ):
         # A notification is all wrapper; hash the raw text instead.
         return "scripted", text or raw
@@ -591,6 +592,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                 )
             )
 
+    # Rule 3: prompts no marker identifies, but a schedule does.
+    events, _ = mark_scheduled_repeats(events)
     return events
 
 

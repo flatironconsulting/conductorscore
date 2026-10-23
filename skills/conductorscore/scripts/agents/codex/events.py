@@ -38,6 +38,7 @@ from pathlib import Path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
+from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.agents.codex.taxonomy import (
     DENIAL_MARKER,
@@ -947,7 +948,9 @@ def _read(
         # session_meta / turn_context carry no timeline event.
         continue
 
-    return ctx.events, ctx.text_map
+    # Rule 3: prompts no marker identifies, but a schedule does (e.g. a cron
+    # job resuming an interactive thread).
+    return mark_scheduled_repeats(ctx.events, ctx.text_map)
 
 
 __all__ = ["is_codex_jsonl", "read_events", "read_events_and_text"]

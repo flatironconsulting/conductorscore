@@ -815,6 +815,14 @@ def _user(ts, content, **extra):
         # Legacy task notification with no turnOrigin.
         (_user("2026-01-01T00:00:00Z",
                "<task-notification><task-id>a1</task-id></task-notification>"), "scripted"),
+        # Cross-session idle notice: wakes the session to act — machine.
+        (_user("2026-01-01T00:00:00Z",
+               '[Cross-session idle notice] "s-40", which you asked to be notified about, is idle now',
+               turnOrigin="system", isMeta=True), "scripted"),
+        # Delivery receipt: informational context.
+        (_user("2026-01-01T00:00:00Z",
+               "[Cross-session delivery notice] Your message to another session was held",
+               turnOrigin="system", isMeta=True), None),
         # Legacy typed prompt with no turnOrigin.
         (_user("2026-01-01T00:00:00Z", "commit"), "human"),
         # Rule 1 — context, not a prompt.
@@ -860,3 +868,14 @@ def test_text_map_stays_paired_with_new_prompt_kinds(tmp_path):
     events, text_map = read_events_and_text(p)
     users = [e for e in events if e.kind == EventKind.USER]
     assert [text_map[id(u)] for u in users] == ["first typed", "Loop tick", "second typed"]
+
+
+def test_claude_reader_applies_schedule_rule(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(p, [
+        _user(f"2026-01-01T{h:02d}:00:05.2Z", "Loop status: check the backtest",
+              turnOrigin="human")
+        for h in (0, 5, 10)
+    ])
+    users = [e for e in read_events(p) if e.kind == EventKind.USER]
+    assert [u.is_scripted_prompt for u in users] == [True, True, True]

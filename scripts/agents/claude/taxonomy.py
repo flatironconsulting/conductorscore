@@ -53,8 +53,14 @@ SYNTHETIC_TAG_RE = re.compile(
 MACHINE_TURN_ORIGINS: frozenset[str] = frozenset(
     {"sdk", "scheduled", "task_notification", "peer"}
 )
-# Task notifications written before ``turnOrigin`` existed.
-TASK_NOTIFICATION_OPENER = "<task-notification>"
+# Machine prompts recognised by how they open: task notifications written
+# before ``turnOrigin`` existed, and the cross-session idle notice (origin
+# ``system``) that wakes a session to act on another session's result. The
+# cross-session DELIVERY notice is only a receipt, so it stays context.
+MACHINE_PROMPT_OPENERS: tuple[str, ...] = (
+    "<task-notification>",
+    "[Cross-session idle notice]",
+)
 SYNTHETIC_SENTINELS = (
     "[Request interrupted by user]",
     "[Request interrupted by user for tool use]",
@@ -79,10 +85,10 @@ __all__ = [
     "EDIT_TOOL_NAMES",
     "EXCLUDED_EDIT_BASENAMES",
     "EXCLUDED_EDIT_DIR_PARTS",
+    "MACHINE_PROMPT_OPENERS",
     "MACHINE_TURN_ORIGINS",
     "RAW_INPUT_TOOLS",
     "SYNTHETIC_SENTINELS",
     "SYNTHETIC_TAG_RE",
     "SYNTHETIC_WRAPPER_TAGS",
-    "TASK_NOTIFICATION_OPENER",
 ]

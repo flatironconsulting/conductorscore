@@ -299,3 +299,13 @@ def test_top_level_composer_user_bubbles_are_human(tmp_path):
     loc = _locator(tmp_path, [user_bubble(_hex_id("u1"), "hi", T0)])
     users = [e for e in cursor_events.read_events(loc) if e.kind == EventKind.USER]
     assert users and not any(u.is_scripted_prompt for u in users)
+
+
+def test_ide_reader_applies_schedule_rule(tmp_path):
+    H = 3_600_000
+    loc = _locator(tmp_path, [
+        user_bubble(_hex_id(f"u{i}"), "run the nightly check", T0 + i * 5 * H)
+        for i in range(3)
+    ])
+    users = [e for e in cursor_events.read_events(loc) if e.kind == EventKind.USER]
+    assert [u.is_scripted_prompt for u in users] == [True, True, True]

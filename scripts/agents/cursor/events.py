@@ -45,6 +45,7 @@ from pathlib import Path
 from scripts.agents.cursor import taxonomy
 from scripts.agents.cursor.store import kv_get_json, open_ro, parse_locator
 from scripts.core.normalized import Event, EventKind
+from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ms
@@ -310,7 +311,9 @@ def _read_ide(
                 # Soft-fail: one malformed bubble must not kill the session.
                 continue
 
-        return events, text_map
+        # Rule 3 (IDE only: bubbles carry real timestamps; the CLI reader's
+        # are spread evenly, so every repeat there would look scheduled).
+        return mark_scheduled_repeats(events, text_map)
     except Exception:
         return [], {}
     finally:
