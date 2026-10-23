@@ -9,6 +9,9 @@ Behavior:
     choice and re-runs with ``--providers``).
   * Otherwise spawn scan.py (or $CONDUCTORSCORE_SCAN_CMD), poll status.json,
     print one updating line per ~3s during scan, then print the score.
+  * ``--step`` (what agents use): start the scan detached and return within a
+    few seconds with a ``CONDUCTORSCORE_PROGRESS`` line; each re-run with
+    ``--step`` reports progress again until the scan's result is printed.
   * After a successful scan, emit ``CONDUCTORSCORE_ASK daily ...`` unless
     ``--daily`` was given; ``--daily yes`` enables daily scoring.
 
@@ -627,8 +630,165 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--providers", choices=["all", "claude", "codex", "cursor"], default=None
     )
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
+    parser.add_argument("--step", action="store_true")
     ns, _unknown = parser.parse_known_args(argv)
     return ns
+
+
+def _spawn_scan(cache: Path, log, detached: bool = False) -> subprocess.Popen:
+    """Start OUR OWN local scanner (scripts/scan.py). It reads transcripts
+    on-device and uploads only per-metric numbers + invoked names (see
+    WIRE_FORMAT.md), and only after the device is paired + the user consents to
+    the providers scanned. Its output goes to the log file (not hidden), and it
+    gets the chosen cache dir so it writes status.json / last-run.log exactly
+    where we read them.
+
+    ``detached`` lets the scan outlive this process (a --step call returns while
+    it runs), with no tie to the caller's stdin or process group."""
+    scan_env = dict(os.environ)
+    scan_env["CONDUCTORSCORE_CACHE_DIR"] = str(cache)
+    kwargs: dict = {}
+    if detached:
+        kwargs["stdin"] = subprocess.DEVNULL
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(
+                subprocess, "DETACHED_PROCESS", 0x00000008
+            )
+        else:
+            kwargs["start_new_session"] = True
+    return subprocess.Popen(
+        _scan_cmd(), stdout=log, stderr=subprocess.STDOUT, env=scan_env, **kwargs
+    )
+
+
+# ── --step mode ──────────────────────────────────────────────────────────────
+# An agent runs run.py as ONE shell call, and hosts show nothing of a call
+# while it runs (Claude Code then collapses it to "Ran 1 shell command"), so
+# the progress lines never reach the user. With --step, run.py starts the scan
+# detached and returns within STEP_WAIT_SECONDS, printing
+# `CONDUCTORSCORE_PROGRESS <percent> "<text>"`. The agent shows <text> as its
+# own message and re-runs `run.py --step` until the scan's final output (the
+# RESULT / daily ASK / error) arrives. Agent text between tool calls is the one
+# thing every host renders.
+STEP_WAIT_SECONDS = 6.0
+# A scan that hasn't touched status.json for this long is dead even if its pid
+# still answers (an unreaped zombie in an init-less container). The longest
+# legitimate silence is the upload, bounded by scan.py's 330s timeout.
+STEP_STALE_SECONDS = 600.0
+# A scan nobody collected within this window is dropped, and the next --step
+# starts a fresh scan instead of reporting an old score.
+STEP_MAX_AGE_SECONDS = 3600.0
+_TERMINAL_PHASES = ("done", "error", "no_sessions")
+_PHASE_LABELS = {
+    "starting": "Starting up",
+    "scanning": "Scanning your transcripts",
+    "uploading": "Uploading your score",
+}
+
+
+def _step_path() -> Path:
+    return _cache_dir() / "step.json"
+
+
+def _load_step() -> dict | None:
+    try:
+        step = json.loads(_step_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(step, dict) and isinstance(step.get("pid"), int) and isinstance(step.get("cache"), str):
+        return step
+    return None
+
+
+def _save_step(step: dict) -> None:
+    try:
+        _step_path().write_text(json.dumps(step), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_step() -> None:
+    try:
+        _step_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        # Reap it if it's our own exited child; a zombie still answers kill(0).
+        if os.waitpid(pid, os.WNOHANG) != (0, 0):
+            return False
+    except ChildProcessError:
+        pass  # not our child (the usual case: an earlier --step call started it)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _step_running(step: dict, proc: subprocess.Popen | None = None) -> bool:
+    """True while the step's scan is still working: no terminal phase written,
+    the process is alive, and status.json changed within STEP_STALE_SECONDS."""
+    status_path = Path(step["cache"]) / "status.json"
+    if (_read_status(status_path) or {}).get("phase") in _TERMINAL_PHASES:
+        return False
+    alive = proc.poll() is None if proc is not None else _pid_alive(step["pid"])
+    if not alive:
+        return False
+    started = step.get("started_at", 0)
+    try:
+        touched = max(status_path.stat().st_mtime, started)
+    except OSError:
+        touched = started
+    return time.time() - touched < STEP_STALE_SECONDS
+
+
+def _step_start(cache: Path, log) -> int:
+    proc = _spawn_scan(cache, log, detached=True)
+    log.close()
+    step = {"pid": proc.pid, "cache": str(cache), "started_at": time.time(), "percent": 0}
+    if os.environ.get("CONDUCTORSCORE_PROVIDERS"):
+        step["providers"] = os.environ["CONDUCTORSCORE_PROVIDERS"]
+    _save_step(step)
+    return _step_wait(step, proc)
+
+
+def _step_wait(step: dict, proc: subprocess.Popen | None = None) -> int:
+    """Wait up to STEP_WAIT_SECONDS on the step's scan. Still running: print a
+    CONDUCTORSCORE_PROGRESS line. Finished: clear the step and report it."""
+    cache = Path(step["cache"])
+    deadline = time.time() + STEP_WAIT_SECONDS
+    while _step_running(step, proc):
+        if time.time() >= deadline:
+            status = _read_status(cache / "status.json") or {}
+            percent = max(int(step.get("percent", 0)), int(status.get("percent", 0)))
+            step["percent"] = percent
+            _save_step(step)
+            label = _PHASE_LABELS.get(status.get("phase") or "", "Working")
+            print(f'CONDUCTORSCORE_PROGRESS {percent} "{label}… {percent}%"')
+            return 0
+        time.sleep(POLL_INTERVAL)
+    _clear_step()
+    # The --providers choice came with the call that started the scan; restore
+    # it so a successful scan persists it (see _persist_consent_choice).
+    if step.get("providers"):
+        os.environ["CONDUCTORSCORE_PROVIDERS"] = step["providers"]
+    return _report_final(_read_status(cache / "status.json") or {}, cache / "last-run.log")
 
 
 def main() -> int:
@@ -658,6 +818,16 @@ def main() -> int:
     # their score, so applying it must NOT trigger another scan.
     if args.daily is not None:
         return _apply_daily_decision(args.daily)
+
+    # --step continuation: a scan an earlier --step call started is ours to
+    # report on, so skip the banner, login and consent gates. A finished scan
+    # nobody collected for STEP_MAX_AGE_SECONDS is dropped for a fresh one.
+    if args.step:
+        step = _load_step()
+        if step is not None:
+            if time.time() - step.get("started_at", 0) < STEP_MAX_AGE_SECONDS:
+                return _step_wait(step)
+            _clear_step()
 
     # Banner: print the version up front (and an update notice only if behind),
     # but suppress it on ASK-driven re-runs. `--providers`/`--daily` re-runs are
@@ -715,6 +885,13 @@ def main() -> int:
                     _emit_providers_ask(detected)
                     return 0
 
+    # A scan a --step call started is still running (e.g. the daily hook fired
+    # mid-scan): starting a second one would delete the status.json it writes.
+    running = _load_step()
+    if running is not None and _step_running(running):
+        print("A ConductorScore scan is already running; it uploads when it finishes.")
+        return 0
+
     # Cache setup is best-effort: even after _writable_cache_dir()'s temp
     # fallback, a hostile FS can still refuse the unlink/open. Any OSError here
     # must NOT break the host session — print one clean line and exit 0.
@@ -732,19 +909,13 @@ def main() -> int:
         )
         return 0
 
+    # The next --step call must find this scan's state in the regular cache dir;
+    # on the temp-dir fallback it can't, so scan in the foreground instead.
+    if args.step and cache == _cache_dir():
+        return _step_start(cache, log)
+
     print("Scanning your transcripts… 0%")
-    # Runs OUR OWN local scanner (scripts/scan.py) as a child so this process can
-    # stream progress while it works. scan.py reads transcripts on-device and uploads
-    # only per-metric numbers + invoked names (see WIRE_FORMAT.md), and only after the
-    # device is paired + the user consents to the providers scanned. Output is captured
-    # to a log file (not hidden) so the foreground UI can tail it.
-    # Share the chosen writable dir with the scan subprocess so the scanner writes
-    # status.json / last-run.log to the exact same place we read (log already opened above).
-    scan_env = dict(os.environ)
-    scan_env["CONDUCTORSCORE_CACHE_DIR"] = str(cache)
-    proc = subprocess.Popen(
-        _scan_cmd(), stdout=log, stderr=subprocess.STDOUT, env=scan_env
-    )
+    proc = _spawn_scan(cache, log)
 
     last_line_at = time.time()
     last_percent = 0
@@ -759,18 +930,18 @@ def main() -> int:
         # (starting/uploading).
         changed = percent != last_percent and (now - last_line_at) > LINE_INTERVAL
         if changed or (now - last_line_at) >= HEARTBEAT_INTERVAL:
-            label = {
-                "starting": "Starting up",
-                "scanning": "Scanning your transcripts",
-                "uploading": "Uploading your score",
-            }.get(status.get("phase") or "", "Working")
+            label = _PHASE_LABELS.get(status.get("phase") or "", "Working")
             print(f"{label}… {percent}%")
             last_line_at = now
             last_percent = percent
 
     log.close()
-    final = _read_status(status_path) or {}
+    return _report_final(_read_status(status_path) or {}, log_path)
 
+
+def _report_final(final: dict, log_path: Path) -> int:
+    """Report a finished scan from its final status.json: the result (then the
+    daily question), the zero-session outcome, or the failure."""
     if final.get("phase") == "done":
         print("Scan complete… 100%")
         # Persist the provider choice so the NEXT run reads cached consent and

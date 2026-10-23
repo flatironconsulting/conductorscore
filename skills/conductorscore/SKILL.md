@@ -19,18 +19,29 @@ location: depending on the agent and installer the skill may live under
 Use the `scripts/run.py` next to this file:
 
 ```
-python3 <this-skill-dir>/scripts/run.py
+python3 <this-skill-dir>/scripts/run.py --step
 ```
 
-On Windows, if `python3` isn't found, use `python` or `py -3` instead.
+On Windows, if `python3` isn't found, use `python` or `py -3` instead. Always
+pass `--step` when running `run.py` for a scan, including the re-runs below.
 
 If the script prints `↑ vX.Y.Z available — run: gh skill update …`, relay that
 line so the user can update; then continue normally.
 
-The script drives the flow. Don't narrate the steps or restate its progress
-lines. Your jobs are: (a) run the script, (b) handle the `CONDUCTORSCORE_ASK`
-lines below, and (c) when the scan finishes, render the **final report** from
+The script drives the flow. Don't narrate the steps. Your jobs are: (a) run the
+script, (b) relay its progress (below), (c) handle the `CONDUCTORSCORE_ASK`
+lines below, and (d) when the scan finishes, render the **final report** from
 the `CONDUCTORSCORE_RESULT` line (see "Final report").
+
+## Progress relay rule
+
+The scan runs in the background, and each `run.py --step` call returns after a
+few seconds. If the output ends with `CONDUCTORSCORE_PROGRESS <percent> "<text>"`,
+the scan is still running: write `<text>` to the user as its own short message
+(just that text, e.g. `Scanning your transcripts… 42%`, nothing else), then
+immediately run `run.py --step` again with no other flags. Keep going until the
+output has no `CONDUCTORSCORE_PROGRESS` line. Don't sleep between calls; the
+script already waits.
 
 ## ASK relay rule
 
@@ -41,10 +52,11 @@ prose), then re-run `run.py` with the matching flag:
 
 - `login` → the script printed a GitHub URL + code. Show them, let the user
   authorize in their browser, and when they confirm ("I've authorized") re-run
-  `run.py` with NO new flag — it resumes the login and continues. On Cancel, stop.
-- `providers` → re-run with `--providers=all` (All), `--providers=claude`
-  (Claude Code), `--providers=codex` (Codex), or `--providers=cursor`
-  (Cursor). On Cancel, stop.
+  `run.py --step` with NO new flag — it resumes the login and continues. On
+  Cancel, stop.
+- `providers` → re-run `run.py --step` with `--providers=all` (All),
+  `--providers=claude` (Claude Code), `--providers=codex` (Codex), or
+  `--providers=cursor` (Cursor). On Cancel, stop.
 - `daily` → present EXACTLY two choices, **Yes** and **No** (no Cancel, no other
   options). Re-run with ONLY `--daily=yes` or `--daily=no` — do NOT add
   `--providers`; this enables/declines the once-per-day hook and does NOT re-scan.
@@ -118,7 +130,7 @@ re-narrate or restate the numbers.**
 
 First run prints a `https://github.com/login/device` URL and a code, then STOPS
 (it does not poll in the background). Show the URL and code to the user, let them
-authorize in their browser, and once they confirm, re-run `run.py` — it resumes
+authorize in their browser, and once they confirm, re-run `run.py --step` — it resumes
 the pending login, finishes authentication, and proceeds to the scan.
 
 ## Privacy & data handling
