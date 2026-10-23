@@ -65,6 +65,11 @@ from scripts.agents.base import is_dir_safe, is_file_safe, preflight_from
 from scripts.agents.cursor.store import kv_get_json, make_locator, open_ro
 from scripts.core.normalized import SessionMeta
 
+# Composer ids Cursor IDE creates identically on every install (never real
+# sessions). Their session_hash collides across users and trips the server's
+# H1 cross-user check.
+PLACEHOLDER_COMPOSER_IDS = frozenset({"empty-state-draft"})
+
 
 def cursor_home() -> Path:
     """The ``.cursor`` directory. Override with ``CONDUCTORSCORE_CURSOR_HOME``."""
@@ -267,7 +272,7 @@ def _iter_composer_headers(con: sqlite3.Connection):
         return
 
     for composer_id, created_at, last_updated_at, is_archived, raw_value in rows:
-        if is_archived:
+        if is_archived or composer_id in PLACEHOLDER_COMPOSER_IDS:
             continue
         if not isinstance(created_at, int):
             continue

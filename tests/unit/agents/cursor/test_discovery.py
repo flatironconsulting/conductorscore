@@ -81,6 +81,16 @@ def test_archived_sessions_skipped(tmp_path, monkeypatch):
     assert discovery.find_sessions() == []
 
 
+def test_empty_state_draft_placeholder_skipped(tmp_path, monkeypatch):
+    """Cursor IDE keeps a placeholder composer with the fixed id
+    ``empty-state-draft`` on every install; its session_hash would collide
+    across users and trip the server's H1 cross-user check."""
+    _store(tmp_path, monkeypatch, [{
+        "composerId": "empty-state-draft", "createdAt": T0,
+        "lastUpdatedAt": T0 + MS, "bubbles": []}])
+    assert discovery.find_sessions() == []
+
+
 def test_zero_bubble_composer_still_discovered(tmp_path, monkeypatch):
     _store(tmp_path, monkeypatch, [{
         "composerId": "c4", "createdAt": T0, "lastUpdatedAt": T0 + MS,
