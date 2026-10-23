@@ -172,26 +172,20 @@ def find_sessions() -> list[SessionMeta]:
             session_id = jsonl.stem
         project_root = cwd if cwd else ""
 
-        first: int | None = None
+        # Rollout lines are not guaranteed to be in time order (#10): take
+        # the true bounds over every line we already hold, not the ends.
+        stamps: list[int] = []
         for line in lines:
             try:
                 d = json.loads(line.strip())
             except (json.JSONDecodeError, ValueError):
                 continue
             if isinstance(d, dict):
-                first = _parse_ts_ms(d)
-                if first is not None:
-                    break
-        last: int | None = None
-        for line in reversed(lines):
-            try:
-                d = json.loads(line.strip())
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(d, dict):
-                last = _parse_ts_ms(d)
-                if last is not None:
-                    break
+                ts = _parse_ts_ms(d)
+                if ts is not None:
+                    stamps.append(ts)
+        first = min(stamps) if stamps else None
+        last = max(stamps) if stamps else None
         if first is None or last is None:
             continue
 

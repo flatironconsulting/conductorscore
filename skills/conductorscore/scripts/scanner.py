@@ -216,6 +216,15 @@ def _build_per_session(
     """
     stf = SessionToolFields.from_tool_counts(tc)
 
+    # Session bounds (#10). Discovery reads only the head/tail lines of each
+    # transcript, which are not the extremes when lines are out of order (a
+    # metadata entry such as ``queue-operation`` written late at the top of
+    # the file). Widen them to the events actually parsed so the uploaded
+    # wall clock spans everything the minute totals are computed from.
+    event_ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
+    started_at_ms = min([s.first_ts_ms, *event_ts])
+    ended_at_ms = max([s.last_ts_ms, *event_ts])
+
     # v0.4 — turn-based time partition (replaces v0.3 minute rule).
     # Foreground sessions get a window so we know whether to compute
     # turns; Cron-only sessions skip turn segmentation entirely.
@@ -242,7 +251,11 @@ def _build_per_session(
         afk_parallel_fg = agg.afk_parallel_minutes_foreground
         afk_max_streak = agg.afk_max_streak_minutes
         window_minutes = max(0, window[1] - window[0])
-        idle_minutes = max(0, window_minutes - hitl_minutes - afk_minutes)
+        # Never account for more minutes than the session lasted (#10).
+        wall_minutes = (ended_at_ms - started_at_ms) // 60_000
+        idle_minutes = max(
+            0, min(window_minutes, wall_minutes) - hitl_minutes - afk_minutes
+        )
         hitl_minute_set = _hitl_minute_set_from_turns(agg.turns)
         for start, end_excl in afk_intervals(agg.turns):
             intervals.append(
@@ -370,8 +383,8 @@ def _build_per_session(
     return PerSession(
         session_hash=session_hash,
         project_hash=project_hash,
-        started_at_ms=s.first_ts_ms,
-        ended_at_ms=s.last_ts_ms,
+        started_at_ms=started_at_ms,
+        ended_at_ms=ended_at_ms,
         provider=provider,
         token_data_missing=token_data_missing,
         distinct_skills=stf.distinct_skills,
