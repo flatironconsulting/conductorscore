@@ -470,7 +470,8 @@ def _isolate_defaults(tmp_path, monkeypatch):
 def test_ide_store_paths_skips_unreadable_windows_store(tmp_path, monkeypatch):
     _isolate_defaults(tmp_path, monkeypatch)
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
-    _unstatable(monkeypatch, [str(tmp_path / "AppData")],
+    # /mnt/c is blocked too so a real WSL Cursor install can't leak in.
+    _unstatable(monkeypatch, [str(tmp_path / "AppData"), "/mnt/c"],
                 PermissionError(13, "Permission denied"))
     assert discovery.ide_store_paths() == []
 
