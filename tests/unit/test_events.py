@@ -756,3 +756,37 @@ def test_load_subagent_panels_pairs_tool_use_ids(tmp_path):
     description, sub_jsonl_path = panels["toolu_a1"]
     assert description == "find files"
     assert sub_jsonl_path.exists()
+
+
+def test_read_events_flags_script_sent_prompts(tmp_path):
+    # Claude Code stamps prompts sent programmatically (``claude -p`` /
+    # Agent SDK) with turnOrigin="sdk"; prompts the human typed carry
+    # turnOrigin="human" — even from the VS Code extension, whose
+    # promptSource is also "sdk". Only turnOrigin decides.
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(
+        p,
+        [
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "promptSource": "sdk",
+                "turnOrigin": "sdk",
+                "message": {"role": "user", "content": "You are an implementer"},
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "promptSource": "sdk",
+                "turnOrigin": "human",
+                "message": {"role": "user", "content": "looks good, merge it"},
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:02:00Z",
+                "message": {"role": "user", "content": "legacy, no origin field"},
+            },
+        ],
+    )
+    events = read_events(p)
+    assert [e.is_scripted_prompt for e in events] == [True, False, False]

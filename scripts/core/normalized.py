@@ -123,6 +123,10 @@ class Event:
     # belt-and-suspenders on top of never being serialized.
     raw_input: dict | None = field(default=None, repr=False)
     is_auto_compaction_marker: bool = False
+    # USER: True iff the prompt was sent by a script (``claude -p`` / Agent
+    # SDK), not typed by the human. Claude Code stamps these
+    # ``turnOrigin: "sdk"``. The turn it opens is AFK regardless of length.
+    is_scripted_prompt: bool = False
     stop_reason: str | None = None        # ASSISTANT_TEXT/TOOL: 'end_turn' | 'tool_use' | 'stop_sequence' | 'max_tokens' | None
     tool_use_id: str | None = None        # ASSISTANT_TOOL: dispatch id; TOOL_RESULT: matching id
     # TOOL_RESULT: True iff the result text matched a tool-use DENIAL marker

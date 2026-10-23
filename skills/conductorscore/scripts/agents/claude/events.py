@@ -368,6 +368,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         user_text_token_count=token_count,
                         is_structured_prompt=structured,
                         is_auto_compaction_marker=is_auto_compaction,
+                        is_scripted_prompt=d.get("turnOrigin") == "sdk",
                     )
                 )
             # Tool result blocks may also appear inside a user-role message

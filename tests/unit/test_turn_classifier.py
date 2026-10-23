@@ -129,3 +129,28 @@ def test_multi_agent_spans_only_track_explicit_ids():
     spans = multi_agent_spans(evs)
     assert set(spans) == {"agent-a"}
     assert spans["agent-a"] == (10, 200)
+
+
+def _short_turn(start_ms, scripted):
+    # 60s turn: well under the 5-min HITL threshold.
+    return [
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=start_ms,
+              is_scripted_prompt=scripted),
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+              timestamp_ms=start_ms + 60_000, stop_reason="end_turn"),
+    ]
+
+
+def test_script_sent_turn_is_afk_regardless_of_length():
+    # No human is at the keyboard for a prompt a script sent, so the turn
+    # is AFK even though it is shorter than K_TURN_SECONDS.
+    agg = compute_turn_aggregates(_short_turn(0, scripted=True))
+    assert [t.label for t in agg.turns] == ["AFK"]
+    assert agg.afk_minutes == 1
+    assert agg.hitl_minutes == 0
+
+
+def test_human_turn_of_same_length_stays_hitl():
+    agg = compute_turn_aggregates(_short_turn(0, scripted=False))
+    assert [t.label for t in agg.turns] == ["HITL"]
+    assert agg.hitl_minutes == 1

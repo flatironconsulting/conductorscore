@@ -10,7 +10,9 @@ rule classifies *turns*, not minutes:
    an AskUserQuestion dispatch (synthetic end_turn), the next USER, or
    session end.
 3. A turn is **HITL** if its duration ≤ ``K_TURN_SECONDS`` (5 min),
-   else **AFK**.
+   else **AFK**. Exception: a turn opened by a script-sent prompt
+   (``Event.is_scripted_prompt``) is always **AFK** — no human is at
+   the keyboard, however short the turn.
 
 Only main-thread events participate in turn segmentation. Sidechain
 (subagent) events are summarized separately for parallel leverage.
@@ -78,6 +80,7 @@ class Turn:
     active_seconds: float = 0.0  # engaged time within the turn
     tool_seconds: float = 0.0  # active seconds attributable to tool runtime
     dispatch_seconds: float = 0.0  # of tool_seconds, the Agent/Task dispatch portion
+    is_scripted: bool = False  # opened by a script-sent prompt → always AFK
     label: str = ""  # 'HITL' | 'AFK', filled after classification
 
     @property
@@ -141,6 +144,7 @@ def segment_turns(events: list[Event]) -> list[Turn]:
 
     turns: list[Turn] = []
     current_start: int | None = None
+    current_scripted = False
     last_ts: int | None = None
 
     for ev in main_events:
@@ -152,9 +156,11 @@ def segment_turns(events: list[Event]) -> list[Turn]:
                         start_ts_ms=current_start,
                         end_ts_ms=ev.timestamp_ms,
                         end_reason="next_user",
+                        is_scripted=current_scripted,
                     )
                 )
             current_start = ev.timestamp_ms
+            current_scripted = ev.is_scripted_prompt
         elif current_start is not None and _is_turn_ender_event(ev):
             reason = (
                 "ask_user_question"
@@ -169,6 +175,7 @@ def segment_turns(events: list[Event]) -> list[Turn]:
                     start_ts_ms=current_start,
                     end_ts_ms=ev.timestamp_ms,
                     end_reason=reason,
+                    is_scripted=current_scripted,
                 )
             )
             current_start = None
@@ -179,6 +186,7 @@ def segment_turns(events: list[Event]) -> list[Turn]:
                 start_ts_ms=current_start,
                 end_ts_ms=last_ts,
                 end_reason="session_end",
+                is_scripted=current_scripted,
             )
         )
 
@@ -188,7 +196,10 @@ def segment_turns(events: list[Event]) -> list[Turn]:
     # the user left open overnight doesn't masquerade as autonomous work.
     _compute_active_seconds(turns, main_events)
     for t in turns:
-        t.label = "HITL" if t.active_seconds <= K_TURN_SECONDS else "AFK"
+        if t.is_scripted:
+            t.label = "AFK"
+        else:
+            t.label = "HITL" if t.active_seconds <= K_TURN_SECONDS else "AFK"
     return turns
 
 
