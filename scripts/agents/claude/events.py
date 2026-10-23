@@ -12,6 +12,7 @@ entirely; only structural metadata survives.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from scripts.core.normalized import Event, EventKind
@@ -32,34 +33,6 @@ from scripts.agents.claude.taxonomy import (
     SYNTHETIC_TAG_RE,
 )
 from scripts.core.prompt_origin import mark_scheduled_repeats
-
-
-def _usage_tokens(message: dict) -> tuple[int, int]:
-    usage = message.get("usage") if isinstance(message, dict) else None
-    if not isinstance(usage, dict):
-        return (0, 0)
-    return (
-        int(usage.get("input_tokens") or 0),
-        int(usage.get("output_tokens") or 0),
-    )
-
-
-def _usage_cache_tokens(message: dict) -> tuple[int, int]:
-    """Return (cache_hit_input_tokens, cache_creation_input_tokens).
-
-    Anthropic API usage block carries:
-      • ``cache_read_input_tokens``     — cache HIT (cheap input)
-      • ``cache_creation_input_tokens`` — cache MISS (write-through, full price)
-
-    Both default to 0 when absent (older transcripts, non-cache models).
-    """
-    usage = message.get("usage") if isinstance(message, dict) else None
-    if not isinstance(usage, dict):
-        return (0, 0)
-    return (
-        int(usage.get("cache_read_input_tokens") or 0),
-        int(usage.get("cache_creation_input_tokens") or 0),
-    )
 
 
 def _thinking_token_estimate(block: dict) -> int:
@@ -307,6 +280,196 @@ def _subagent_id_for(d: dict, is_sidechain: bool) -> str | None:
         return own
     return None
 
+# ---------------------------------------------------------------------------
+# Per-message token accounting (#13)
+# ---------------------------------------------------------------------------
+
+_USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _int(v) -> int:
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_vector(usage) -> tuple[int, int, int, int]:
+    if not isinstance(usage, dict):
+        return (0, 0, 0, 0)
+    return tuple(_int(usage.get(f)) for f in _USAGE_FIELDS)  # type: ignore[return-value]
+
+
+def _extra_iterations(usage) -> list[tuple[str | None, tuple[int, int, int, int]]]:
+    """``usage.iterations`` entries other than ``type == "message"``.
+
+    The single ``{"type": "message"}`` entry duplicates the top-level usage;
+    other entries (e.g. advisor calls, possibly on another model) are NOT in
+    the top-level numbers and are added on top.
+    """
+    if not isinstance(usage, dict):
+        return []
+    its = usage.get("iterations")
+    if not isinstance(its, list):
+        return []
+    out = []
+    for it in its:
+        if not isinstance(it, dict) or it.get("type") in (None, "message"):
+            continue
+        vec = _usage_vector(it)
+        if any(vec):
+            model = it.get("model")
+            out.append((model if isinstance(model, str) and model else None, vec))
+    return out
+
+
+def _message_key(d: dict, message: dict | None) -> tuple[str, str] | None:
+    """``(message.id, requestId)`` — one API response. Claude Code writes one
+    JSONL line per content block, every line repeating the message usage."""
+    if not isinstance(message, dict):
+        return None
+    mid = message.get("id")
+    rid = d.get("requestId")
+    if isinstance(mid, str) and mid and isinstance(rid, str) and rid:
+        return (mid, rid)
+    return None
+
+
+def _is_assistant_record(d: dict, message: dict | None) -> bool:
+    return d.get("type") == "assistant" or bool(
+        message and message.get("role") == "assistant"
+    )
+
+
+class _MessageUsage:
+    """Usage of one API message folded across its JSONL lines.
+
+    Each field is the MAX seen: subagent/Workflow transcripts stream partial
+    usage (``output_tokens`` 5 on an early line, 253 on the last) and usage
+    never decreases, so the max is the final value. Iterations come from the
+    line with the largest output (the final one)."""
+
+    __slots__ = ("vec", "iterations", "_best_out")
+
+    def __init__(self) -> None:
+        self.vec = (0, 0, 0, 0)
+        self.iterations: list = []
+        self._best_out = -1
+
+    def add(self, usage) -> None:
+        v = _usage_vector(usage)
+        self.vec = tuple(max(a, b) for a, b in zip(self.vec, v))  # type: ignore[assignment]
+        if v[1] > self._best_out:
+            self._best_out = v[1]
+            self.iterations = _extra_iterations(usage)
+
+
+def _fold_message_usage(records: list[dict]) -> dict[tuple[str, str], _MessageUsage]:
+    folded: dict[tuple[str, str], _MessageUsage] = {}
+    for d in records:
+        message = d.get("message") if isinstance(d.get("message"), dict) else None
+        if not _is_assistant_record(d, message):
+            continue
+        key = _message_key(d, message)
+        if key is None:
+            continue
+        folded.setdefault(key, _MessageUsage()).add(message.get("usage"))
+    return folded
+
+
+def _parse_records(jsonl_path: Path, prefilter: str | None = None) -> list[dict]:
+    """JSON-decode each line to a dict with a parseable timestamp. With
+    ``prefilter`` set, lines not containing that substring are skipped
+    before decoding (cheap; used for the usage-only subagent pass)."""
+    out: list[dict] = []
+    for raw in _read_lines(jsonl_path):
+        line = raw.strip()
+        if not line or (prefilter is not None and prefilter not in line):
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def _usage_event(
+    session_id: str,
+    ts_ms: int,
+    model: str | None,
+    vec: tuple[int, int, int, int],
+    *,
+    is_sidechain: bool,
+    is_message_head: bool = False,
+) -> Event:
+    return Event(
+        kind=EventKind.USAGE,
+        session_id=session_id,
+        timestamp_ms=ts_ms,
+        is_sidechain=is_sidechain,
+        model=model,
+        input_tokens=vec[0],
+        output_tokens=vec[1],
+        cache_input_tokens=vec[2],
+        cache_creation_input_tokens=vec[3],
+        is_message_head=is_message_head,
+    )
+
+
+def _with_usage(ev: Event, vec: tuple[int, int, int, int]) -> Event:
+    return replace(
+        ev,
+        input_tokens=vec[0],
+        output_tokens=vec[1],
+        cache_input_tokens=vec[2],
+        cache_creation_input_tokens=vec[3],
+        is_message_head=True,
+    )
+
+
+def subagent_usage_events(jsonl_path: Path, session_id: str | None = None) -> list[Event]:
+    """Token-only USAGE events for every subagent / Workflow transcript of a
+    session (``discovery.subagent_transcripts``), attributed to the parent
+    session and tagged ``is_sidechain`` so no turn/HITL logic reads them.
+    One event per API message (max-folded usage) plus non-``message``
+    iterations; lines without an id fall back to per-line usage."""
+    jsonl_path = Path(jsonl_path)
+    sid = session_id or jsonl_path.stem
+    out: list[Event] = []
+    for sub in subagent_transcripts(jsonl_path):
+        records = _parse_records(sub, prefilter='"usage"')
+        folded = _fold_message_usage(records)
+        done: set[tuple[str, str]] = set()
+        for d in records:
+            message = d.get("message") if isinstance(d.get("message"), dict) else None
+            if not _is_assistant_record(d, message):
+                continue
+            ts_ms = _parse_ts_ms(d)
+            if ts_ms is None:
+                continue
+            model = message.get("model") if isinstance(message.get("model"), str) else None
+            key = _message_key(d, message)
+            if key is not None:
+                if key in done:
+                    continue
+                done.add(key)
+                vec, its = folded[key].vec, folded[key].iterations
+            else:
+                vec, its = _usage_vector(message.get("usage")), _extra_iterations(message.get("usage"))
+            if any(vec):
+                out.append(_usage_event(sid, ts_ms, model, vec, is_sidechain=True))
+            for it_model, it_vec in its:
+                out.append(_usage_event(sid, ts_ms, it_model or model, it_vec, is_sidechain=True))
+    return out
+
+
 
 def read_events(jsonl_path: Path) -> list[Event]:
     """Parse a Claude Code session JSONL into a list of typed Events.
@@ -326,18 +489,13 @@ def read_events(jsonl_path: Path) -> list[Event]:
 
     session_id = jsonl_path.stem
     events: list[Event] = []
+    records = _parse_records(jsonl_path)
+    # Usage is attributed once per API message, to the first event of its
+    # first line, whatever the block type (thinking / tool_use / text).
+    folded = _fold_message_usage(records)
+    attributed: set[tuple[str, str]] = set()
 
-    for raw in _read_lines(jsonl_path):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(d, dict):
-            continue
-
+    for d in records:
         ts_ms = _parse_ts_ms(d)
         if ts_ms is None:
             # No timestamp -> can't position on the minute timeline.
@@ -430,10 +588,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                 if message and isinstance(message.get("model"), str)
                 else None
             )
-            input_tokens, output_tokens = _usage_tokens(message or {})
-            cache_hit_tokens, cache_creation_tokens = _usage_cache_tokens(
-                message or {}
-            )
+            line_start = len(events)
             _stop_reason_raw = message.get("stop_reason") if message else None
             stop_reason_val = (
                 _stop_reason_raw if isinstance(_stop_reason_raw, str) else None
@@ -469,8 +624,6 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         )
                     )
 
-                # Attribute message usage to the first text event only.
-                first_text = True
                 for _ in text_blocks:
                     events.append(
                         Event(
@@ -480,18 +633,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             is_sidechain=is_sidechain,
                             subagent_id=subagent_id,
                             model=model,
-                            input_tokens=input_tokens if first_text else 0,
-                            output_tokens=output_tokens if first_text else 0,
-                            cache_input_tokens=cache_hit_tokens
-                            if first_text
-                            else 0,
-                            cache_creation_input_tokens=cache_creation_tokens
-                            if first_text
-                            else 0,
                             stop_reason=stop_reason_val,
                         )
                     )
-                    first_text = False
 
                 for block in tool_blocks:
                     name = (
@@ -570,11 +714,37 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         is_sidechain=is_sidechain,
                         subagent_id=subagent_id,
                         model=model,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cache_input_tokens=cache_hit_tokens,
-                        cache_creation_input_tokens=cache_creation_tokens,
                         stop_reason=stop_reason_val,
+                    )
+                )
+            # --- Usage: once per API message (#13). ---
+            usage = message.get("usage") if message else None
+            key = _message_key(d, message)
+            if key is None:
+                # No id/requestId (old or synthetic lines): per-line usage.
+                vec, extra = _usage_vector(usage), _extra_iterations(usage)
+            elif key in attributed:
+                vec, extra = None, []
+            else:
+                attributed.add(key)
+                vec, extra = folded[key].vec, folded[key].iterations
+            if vec is not None:
+                if len(events) > line_start:
+                    events[line_start] = _with_usage(events[line_start], vec)
+                elif any(vec):
+                    # A line whose blocks produced no event (empty content,
+                    # redacted_thinking, server tool blocks …) still counts.
+                    events.append(
+                        _usage_event(
+                            session_id, ts_ms, model, vec,
+                            is_sidechain=is_sidechain, is_message_head=True,
+                        )
+                    )
+            for it_model, it_vec in extra:
+                events.append(
+                    _usage_event(
+                        session_id, ts_ms, it_model or model, it_vec,
+                        is_sidechain=is_sidechain,
                     )
                 )
             continue
@@ -652,6 +822,10 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
     # Suppress unused-import warning — keep the late import for parity
     # with read_events so the modules stay in lockstep.
     _ = _plan_signals_is_structured_prompt
+    # #13 — subagent / Workflow transcript tokens belong to this session.
+    # USAGE events only (sidechain-tagged), so turns, HITL/AFK, plan and edit
+    # detectors are unchanged; only the token aggregators read them.
+    events.extend(subagent_usage_events(jsonl_path, jsonl_path.stem))
     return events, text_map
 
 
@@ -688,6 +862,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 
 __all__ = [
     "load_subagent_panels",
+    "subagent_usage_events",
     "read_events",
     "read_events_and_text",
 ]

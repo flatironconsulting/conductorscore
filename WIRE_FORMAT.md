@@ -1034,3 +1034,24 @@ break the chain (the scanner recomputes it over the edited counts) — that case
 is caught by the content invariants instead; `session_chain` specifically
 catches *post-scan* telemetry edits. The field is an ordering hash over data
 already transmitted; it carries no new content.
+
+## `sessions[].token_accounting_version` — additive, no schema bump
+
+| Field                      | Type | Default (absent) | Notes |
+|----------------------------|------|------------------|-------|
+| `token_accounting_version` | int  | `1`              | How the session's token fields (`total_input_tokens`, `total_output_tokens`, `cache_input_tokens`, `cache_creation_input_tokens`, `tokens_by_model`) were counted. Always emitted by current clients (value `2`). The server MUST treat absence as `1`. |
+
+- **1** (absent; clients ≤ 0.7.13): Claude usage was read only from the first
+  `text` block of each JSONL line, from the main transcript only. Messages
+  made only of `thinking` / `tool_use` blocks contributed zero, and subagent /
+  Workflow transcripts were never read — totals were a fraction of actual.
+- **2**: Claude usage is counted once per API message (`message.id` +
+  `requestId`, max per field across the message's split lines) whatever the
+  block type; non-`message` `usage.iterations` entries are added; and every
+  subagent transcript under `<session>/subagents/**/agent-*.jsonl` (incl.
+  Workflow agents) is attributed to the parent session. Same fields, same
+  invariants — only the coverage changes, so totals are substantially higher
+  for the same session. `assistant_msgs_by_model` likewise counts API messages
+  (main thread), not JSONL lines. Codex / Cursor accounting is unchanged.
+
+Not covered by `session_chain`.
