@@ -255,6 +255,8 @@ def write_cli_store(chats_dir: Path, session: dict) -> Path:
     }
     if "lastUsedModel" in session:
         meta_fields["lastUsedModel"] = session["lastUsedModel"]
+    if "subagentInfo" in session:
+        meta_fields["subagentInfo"] = session["subagentInfo"]
 
     if not session.get("no_meta_row"):
         if session.get("bad_hex"):

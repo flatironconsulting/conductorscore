@@ -181,7 +181,7 @@ def write_ide_store(db_path: Path, composers: list[dict]) -> Path:
         is SQL NULL (real-world case seen once in recon)
       - ``name``, ``modelConfig``, ``gitWorktree``, ``isNAL``,
         ``contextTokenLimit``, ``contextTokensUsed``, ``contextUsagePercent``,
-        ``promptTokenBreakdown`` -- optional passthrough keys copied
+        ``promptTokenBreakdown``, ``subagentInfo`` -- optional passthrough keys copied
         verbatim onto the composerData doc when present
       - ``isArchived``, ``isSubagent``, ``isDraft``, ``isSpec``, ``isProject``,
         ``totalLinesAdded``, ``totalLinesRemoved`` -- optional, feed both the
@@ -278,7 +278,7 @@ def write_ide_store(db_path: Path, composers: list[dict]) -> Path:
                 doc["isNAL"] = c["isNAL"]
             for passthrough_key in (
                 "contextTokenLimit", "contextTokensUsed", "contextUsagePercent",
-                "promptTokenBreakdown",
+                "promptTokenBreakdown", "subagentInfo",
             ):
                 if passthrough_key in c:
                     doc[passthrough_key] = c[passthrough_key]

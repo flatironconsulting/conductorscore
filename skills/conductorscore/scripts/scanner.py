@@ -278,16 +278,22 @@ def _build_per_session(
 
     # v0.5 — anti-pattern cluster (Feature 7).
     revert_count = count_reverts(events)
+    # Repetition and rage-quit judge the human's prompting, so machine-sent
+    # prompts (scripts, schedulers, notifications) are left out of both.
+    human_events = [
+        e for e in events
+        if not (e.kind == EventKind.USER and e.is_scripted_prompt)
+    ]
     # Build the list of user texts in event order for the Jaccard
     # similarity detector. The map is keyed by id(); look up each
     # USER event in order.
     user_texts = [
         text_map.get(id(e), "")
-        for e in events
+        for e in human_events
         if e.kind == EventKind.USER
     ]
     rep = jaccard_repetitive_rate(user_texts)
-    rage = detect_rage_quit(events, text_map)
+    rage = detect_rage_quit(human_events, text_map)
     # tool_error_count: number of events with is_error=True (covers
     # TOOL_RESULT errored blocks). The reader populates is_error on
     # TOOL_RESULT events.

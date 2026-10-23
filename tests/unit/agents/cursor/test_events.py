@@ -284,3 +284,18 @@ def test_reader_opens_db_exactly_once(tmp_path, monkeypatch):
     evs, _ = cursor_events.read_events_and_text(locator)
     assert len(evs) >= 5  # at least one event per bubble unit
     assert len(calls) == 1
+
+
+def test_subagent_composer_user_bubbles_are_scripted(tmp_path):
+    loc = _locator(
+        tmp_path, [user_bubble(_hex_id("u1"), "audit the module", T0)],
+        subagentInfo={"subagentType": 3, "parentComposerId": "p1"},
+    )
+    users = [e for e in cursor_events.read_events(loc) if e.kind == EventKind.USER]
+    assert users and all(u.is_scripted_prompt for u in users)
+
+
+def test_top_level_composer_user_bubbles_are_human(tmp_path):
+    loc = _locator(tmp_path, [user_bubble(_hex_id("u1"), "hi", T0)])
+    users = [e for e in cursor_events.read_events(loc) if e.kind == EventKind.USER]
+    assert users and not any(u.is_scripted_prompt for u in users)

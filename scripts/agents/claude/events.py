@@ -25,9 +25,11 @@ from scripts.agents.claude.taxonomy import (
     EDIT_TOOL_NAMES,
     EXCLUDED_EDIT_BASENAMES,
     EXCLUDED_EDIT_DIR_PARTS,
+    MACHINE_TURN_ORIGINS,
     RAW_INPUT_TOOLS,
     SYNTHETIC_SENTINELS,
     SYNTHETIC_TAG_RE,
+    TASK_NOTIFICATION_OPENER,
 )
 
 
@@ -119,6 +121,35 @@ def _strip_synthetic_content(text: str) -> str:
     for sentinel in SYNTHETIC_SENTINELS:
         stripped = stripped.replace(sentinel, "")
     return stripped.strip()
+
+
+def _classify_user_message(d: dict, raw_text: str) -> tuple[str | None, str]:
+    """Decide what a user-role record is.
+
+    Returns ``("human", text)`` for a prompt the human typed,
+    ``("scripted", text)`` for a prompt a machine sent (script, scheduler,
+    background task, another session), or ``(None, text)`` for context that
+    is not a prompt and must never open a turn. ``text`` is what gets hashed.
+
+    Rule 1 — context first: tool-linked injections (``sourceToolUseID``:
+    skill bodies, hook output) and compaction summaries. Rule 2 — Claude's
+    ``turnOrigin``; legacy task notifications predate it, so they are
+    recognised by their wrapper. Everything else ``isMeta`` is context, and a
+    message that is all wrappers/sentinels (``/model``, Esc) is not a prompt.
+    """
+    text = _strip_synthetic_content(raw_text)
+    if d.get("sourceToolUseID") or AUTO_COMPACT_BANNER in raw_text:
+        return None, text
+    raw = raw_text.strip()
+    if raw and (
+        d.get("turnOrigin") in MACHINE_TURN_ORIGINS
+        or raw.startswith(TASK_NOTIFICATION_OPENER)
+    ):
+        # A notification is all wrapper; hash the raw text instead.
+        return "scripted", text or raw
+    if d.get("isMeta") or not text:
+        return None, text
+    return "human", text
 
 
 def _select_raw_input(tool_name: str | None, inp: dict) -> dict | None:
@@ -320,43 +351,15 @@ def read_events(jsonl_path: Path) -> list[Event]:
         # --- User events -----------------------------------------------------
         if kind_field == "user" or (message and message.get("role") == "user"):
             content = message.get("content") if message else d.get("content")
-            text = _flatten_text(content)
-            # Strip harness-injected wrapper tags (ide_opened_file, task-
-            # notification, command-name scaffolding, etc.) and literal
-            # sentinels ([Request interrupted by user]). What remains is
-            # the actual human prose, if any. See _strip_synthetic_content.
-            text = _strip_synthetic_content(text)
-            token_count = _approx_token_count(text)
-            # Claude Code wraps several kinds of system-injected content in
-            # user-role messages: skill content, hook outputs, IDE selection
-            # context, task notifications. These are flagged with
-            # ``isMeta: true`` or carry a ``sourceToolUseID`` linking them
-            # to a preceding tool_use. They are not human actions and must
-            # not emit USER events (would otherwise create false HITL minutes).
-            is_synthetic_injection = bool(
-                d.get("isMeta") or d.get("sourceToolUseID")
-            )
-            # Privacy: compute the structured-prompt flag here, while we
-            # still have the text in scope; ``text`` itself is discarded
-            # at the end of this block.
-            structured = (
-                _plan_signals_is_structured_prompt(text, token_count)
-                if text
-                else False
-            )
-            # v0.5 — auto-compaction banner detection. Banner is a fixed
-            # known prefix; the raw text never leaves this block.
-            is_auto_compaction = bool(text) and (AUTO_COMPACT_BANNER in text)
-            # Only emit a USER event when the message carries real user text
-            # AND is not a system-injected wrapper. Anthropic API tool results
-            # come back wrapped in user-role messages with
-            # content = [{"type": "tool_result", ...}] and no text block;
-            # those are not human actions and must not influence HITL
-            # classification (they previously created spurious HITL minutes
-            # immediately after every tool call). Same goes for Claude Code's
-            # synthetic injections (skill content, hooks, IDE context) which
-            # do have text but carry isMeta=true or sourceToolUseID.
-            if text and not is_synthetic_injection:
+            raw_text = _flatten_text(content)
+            # Tool results (content = [{"type": "tool_result", ...}], no text
+            # block) flatten to "" and are not prompts; see
+            # _classify_user_message for every other kind of user-role record.
+            origin, text = _classify_user_message(d, raw_text)
+            if origin is not None:
+                token_count = _approx_token_count(text)
+                # Privacy: the structured-prompt flag is computed here, while
+                # the text is in scope; the text itself is discarded below.
                 events.append(
                     Event(
                         kind=EventKind.USER,
@@ -366,9 +369,25 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         subagent_id=subagent_id,
                         user_text_hash=_sha16(text),
                         user_text_token_count=token_count,
-                        is_structured_prompt=structured,
-                        is_auto_compaction_marker=is_auto_compaction,
-                        is_scripted_prompt=d.get("turnOrigin") == "sdk",
+                        is_structured_prompt=_plan_signals_is_structured_prompt(
+                            text, token_count
+                        ),
+                        is_scripted_prompt=origin == "scripted",
+                    )
+                )
+            elif AUTO_COMPACT_BANNER in raw_text and not (
+                d.get("isMeta") or d.get("sourceToolUseID")
+            ):
+                # v0.5 — the compaction summary is context, not a prompt, but
+                # it still marks one auto-compaction.
+                events.append(
+                    Event(
+                        kind=EventKind.SYSTEM,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        is_sidechain=is_sidechain,
+                        subagent_id=subagent_id,
+                        is_auto_compaction_marker=True,
                     )
                 )
             # Tool result blocks may also appear inside a user-role message
@@ -621,13 +640,9 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
             if user_idx >= len(user_events):
                 break
             content = message.get("content") if message else d.get("content")
-            text = _flatten_text(content)
-            text = _strip_synthetic_content(text)
-            # Tool-result-only user-role messages and synthetic injections
-            # (isMeta / sourceToolUseID) no longer create USER events (see
-            # read_events). Skip them here too so the pairing stays aligned.
-            is_synthetic = bool(d.get("isMeta") or d.get("sourceToolUseID"))
-            if not text or is_synthetic:
+            # Same rule as read_events, so the pairing stays aligned.
+            origin, text = _classify_user_message(d, _flatten_text(content))
+            if origin is None:
                 continue
             text_map[id(user_events[user_idx])] = text
             user_idx += 1

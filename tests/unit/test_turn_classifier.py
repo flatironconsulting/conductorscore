@@ -154,3 +154,25 @@ def test_human_turn_of_same_length_stays_hitl():
     agg = compute_turn_aggregates(_short_turn(0, scripted=False))
     assert [t.label for t in agg.turns] == ["HITL"]
     assert agg.hitl_minutes == 1
+
+
+def test_scripted_prompt_mid_turn_does_not_split_the_turn():
+    # A background-task notification arriving while the human's turn is
+    # still running is absorbed: one turn, opened by the human.
+    evs = [
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=0),
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s", timestamp_ms=30_000),
+        Event(kind=EventKind.USER, session_id="s", timestamp_ms=60_000,
+              is_scripted_prompt=True),
+        Event(kind=EventKind.ASSISTANT_TEXT, session_id="s",
+              timestamp_ms=120_000, stop_reason="end_turn"),
+    ]
+    agg = compute_turn_aggregates(evs)
+    assert len(agg.turns) == 1
+    assert agg.turns[0].is_scripted is False
+
+
+def test_scripted_prompt_after_turn_ended_opens_afk_turn():
+    evs = _short_turn(0, scripted=False) + _short_turn(600_000, scripted=True)
+    agg = compute_turn_aggregates(evs)
+    assert [t.label for t in agg.turns] == ["HITL", "AFK"]

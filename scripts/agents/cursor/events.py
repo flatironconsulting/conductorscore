@@ -250,6 +250,9 @@ def _read_ide(
                         user_text_hash=_sha16(text),
                         user_text_token_count=token_count,
                         is_structured_prompt=is_structured_prompt(text, token_count),
+                        # A subagent composer is prompted by its parent
+                        # agent, never typed by the human.
+                        is_scripted_prompt=bool(doc.get("subagentInfo")),
                     )
                     events.append(ev)
                     if want_text:

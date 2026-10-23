@@ -624,7 +624,8 @@ def test_read_events_system_auto_compaction_flag(isolated_claude_home):
 
 
 def test_read_events_user_banner_auto_compaction_flag(isolated_claude_home):
-    """USER events containing the auto-compaction banner are flagged."""
+    """The auto-compaction banner is flagged — on a non-prompt event, since
+    the compaction summary is context, not something the user typed."""
     proj_dir = isolated_claude_home / "projects" / "-foo"
     _write_jsonl(
         proj_dir / "s.jsonl",
@@ -650,9 +651,9 @@ def test_read_events_user_banner_auto_compaction_flag(isolated_claude_home):
     )
     events = read_events(proj_dir / "s.jsonl")
     user_events = [e for e in events if e.kind == EventKind.USER]
-    assert len(user_events) == 2
-    assert user_events[0].is_auto_compaction_marker is True
-    assert user_events[1].is_auto_compaction_marker is False
+    assert len(user_events) == 1
+    assert user_events[0].is_auto_compaction_marker is False
+    assert sum(e.is_auto_compaction_marker for e in events) == 1
 
 
 def test_read_events_and_text_returns_text_map(isolated_claude_home):
@@ -790,3 +791,72 @@ def test_read_events_flags_script_sent_prompts(tmp_path):
     )
     events = read_events(p)
     assert [e.is_scripted_prompt for e in events] == [True, False, False]
+
+
+def _user(ts, content, **extra):
+    return {"type": "user", "timestamp": ts,
+            "message": {"role": "user", "content": content}, **extra}
+
+
+@pytest.mark.parametrize(
+    "record, expected",
+    [
+        # Rule 2 — explicit origin markers.
+        (_user("2026-01-01T00:00:00Z", "fix the bug", turnOrigin="human"), "human"),
+        (_user("2026-01-01T00:00:00Z", "You are an implementer", turnOrigin="sdk"), "scripted"),
+        (_user("2026-01-01T00:00:00Z", "Loop 6 status update", turnOrigin="scheduled",
+               isMeta=True), "scripted"),
+        (_user("2026-01-01T00:00:00Z",
+               'Another Claude session sent a message: <agent-message from="x">hi</agent-message>',
+               turnOrigin="peer", isMeta=True), "scripted"),
+        (_user("2026-01-01T00:00:00Z",
+               "<task-notification><task-id>a1</task-id></task-notification>",
+               turnOrigin="task_notification"), "scripted"),
+        # Legacy task notification with no turnOrigin.
+        (_user("2026-01-01T00:00:00Z",
+               "<task-notification><task-id>a1</task-id></task-notification>"), "scripted"),
+        # Legacy typed prompt with no turnOrigin.
+        (_user("2026-01-01T00:00:00Z", "commit"), "human"),
+        # Rule 1 — context, not a prompt.
+        (_user("2026-01-01T00:00:00Z", "Base directory for this skill: /x",
+               isMeta=True, sourceToolUseID="toolu_1"), None),
+        (_user("2026-01-01T00:00:00Z", "<command-name>/model</command-name>"), None),
+        (_user("2026-01-01T00:00:00Z", "[Request interrupted by user]"), None),
+        (_user("2026-01-01T00:00:00Z",
+               "This session is being continued from a previous conversation that "
+               "ran out of context. Summary: ...", turnOrigin="peer"), None),
+    ],
+)
+def test_user_record_origin_rules(tmp_path, record, expected):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(p, [record])
+    users = [e for e in read_events(p) if e.kind == EventKind.USER]
+    if expected is None:
+        assert users == []
+    else:
+        assert len(users) == 1
+        assert users[0].is_scripted_prompt is (expected == "scripted")
+
+
+def test_compaction_summary_still_counts_as_compaction(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(p, [_user(
+        "2026-01-01T00:00:00Z",
+        "This session is being continued from a previous conversation that "
+        "ran out of context. Summary: ...", turnOrigin="peer")])
+    events = read_events(p)
+    assert [e.is_auto_compaction_marker for e in events] == [True]
+    assert events[0].kind != EventKind.USER
+
+
+def test_text_map_stays_paired_with_new_prompt_kinds(tmp_path):
+    p = tmp_path / "sess.jsonl"
+    _write_raw_jsonl(p, [
+        _user("2026-01-01T00:00:00Z", "first typed", turnOrigin="human"),
+        _user("2026-01-01T00:00:01Z", "skill body", isMeta=True, sourceToolUseID="t"),
+        _user("2026-01-01T00:00:02Z", "Loop tick", turnOrigin="scheduled", isMeta=True),
+        _user("2026-01-01T00:00:03Z", "second typed", turnOrigin="human"),
+    ])
+    events, text_map = read_events_and_text(p)
+    users = [e for e in events if e.kind == EventKind.USER]
+    assert [text_map[id(u)] for u in users] == ["first typed", "Loop tick", "second typed"]

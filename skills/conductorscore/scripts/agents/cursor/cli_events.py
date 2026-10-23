@@ -604,8 +604,13 @@ def _events_for_message(
     *,
     want_text: bool,
     text_map: dict[int, str],
+    scripted: bool = False,
 ) -> list[Event]:
-    """Normalize one chat-turn JSON message into zero or more Events."""
+    """Normalize one chat-turn JSON message into zero or more Events.
+
+    ``scripted``: the session is a subagent, so its user messages were sent
+    by the parent agent, not typed by the human.
+    """
     role = msg.get("role")
     content = msg.get("content")
     events: list[Event] = []
@@ -665,6 +670,7 @@ def _events_for_message(
             user_text_hash=_sha16(text),
             user_text_token_count=token_count,
             is_structured_prompt=is_structured_prompt(text, token_count),
+            is_scripted_prompt=scripted,
         )
         events.append(ev)
         if want_text:
@@ -775,6 +781,7 @@ def read_cli_events_and_text(
                     _events_for_message(
                         session_id, ts, model, msg,
                         want_text=want_text, text_map=text_map,
+                        scripted=bool(meta.get("subagentInfo")),
                     )
                 )
             except Exception:

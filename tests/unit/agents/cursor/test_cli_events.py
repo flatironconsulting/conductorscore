@@ -723,3 +723,22 @@ def test_out_of_order_anchor_clamped_monotonic(tmp_path):
     evs = cli_events.read_cli_events_and_text(db, "agent-skew", want_text=False)[0]
     ts = [e.timestamp_ms for e in evs]
     assert ts == sorted(ts)
+
+
+def test_subagent_session_user_messages_are_scripted(tmp_path):
+    # meta.subagentInfo marks a chat spawned by a parent agent: its "user"
+    # messages are the parent's instructions, not human input.
+    db = _db(tmp_path, {
+        "agentId": "sub-1", "createdAt": T0,
+        "subagentInfo": {"subagentType": 3, "parentComposerId": "p1"},
+        "messages": [user_message("audit the module")],
+    })
+    [u] = cli_events.read_cli_events_and_text(db, "sub-1", want_text=False)[0]
+    assert u.kind == EventKind.USER and u.is_scripted_prompt is True
+
+
+def test_top_level_session_user_messages_are_human(tmp_path):
+    db = _db(tmp_path, {"agentId": "a", "createdAt": T0,
+                        "messages": [user_message("hi")]})
+    [u] = cli_events.read_cli_events_and_text(db, "a", want_text=False)[0]
+    assert u.is_scripted_prompt is False

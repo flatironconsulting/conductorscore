@@ -46,6 +46,15 @@ SYNTHETIC_TAG_RE = re.compile(
     r"<(" + "|".join(SYNTHETIC_WRAPPER_TAGS) + r")>.*?</\1>",
     re.DOTALL,
 )
+# ``turnOrigin`` values for prompts a machine sent: a script / the Agent SDK
+# (``sdk``), /loop and cron (``scheduled``), a finished background task
+# (``task_notification``), another Claude session (``peer``). The human's
+# own prompts carry ``human``.
+MACHINE_TURN_ORIGINS: frozenset[str] = frozenset(
+    {"sdk", "scheduled", "task_notification", "peer"}
+)
+# Task notifications written before ``turnOrigin`` existed.
+TASK_NOTIFICATION_OPENER = "<task-notification>"
 SYNTHETIC_SENTINELS = (
     "[Request interrupted by user]",
     "[Request interrupted by user for tool use]",
@@ -70,8 +79,10 @@ __all__ = [
     "EDIT_TOOL_NAMES",
     "EXCLUDED_EDIT_BASENAMES",
     "EXCLUDED_EDIT_DIR_PARTS",
+    "MACHINE_TURN_ORIGINS",
     "RAW_INPUT_TOOLS",
     "SYNTHETIC_SENTINELS",
     "SYNTHETIC_TAG_RE",
     "SYNTHETIC_WRAPPER_TAGS",
+    "TASK_NOTIFICATION_OPENER",
 ]

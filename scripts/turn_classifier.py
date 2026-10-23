@@ -12,7 +12,8 @@ rule classifies *turns*, not minutes:
 3. A turn is **HITL** if its duration ≤ ``K_TURN_SECONDS`` (5 min),
    else **AFK**. Exception: a turn opened by a script-sent prompt
    (``Event.is_scripted_prompt``) is always **AFK** — no human is at
-   the keyboard, however short the turn.
+   the keyboard, however short the turn. A script-sent prompt that arrives
+   while a turn is still open does not end it; it is absorbed.
 
 Only main-thread events participate in turn segmentation. Sidechain
 (subagent) events are summarized separately for parallel leverage.
@@ -149,6 +150,10 @@ def segment_turns(events: list[Event]) -> list[Turn]:
 
     for ev in main_events:
         last_ts = ev.timestamp_ms
+        if ev.is_scripted_prompt and current_start is not None:
+            # A machine prompt arriving mid-turn (e.g. a background-task
+            # notification) is absorbed into the open turn, not a new one.
+            continue
         if _is_human_event(ev, aq_ids):
             if current_start is not None:
                 turns.append(
