@@ -61,7 +61,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from scripts.agents.base import preflight_from
+from scripts.agents.base import is_dir_safe, is_file_safe, preflight_from
 from scripts.agents.cursor.store import kv_get_json, make_locator, open_ro
 from scripts.core.normalized import SessionMeta
 
@@ -89,7 +89,7 @@ def ide_store_paths() -> list[Path]:
     override = os.environ.get("CONDUCTORSCORE_CURSOR_IDE_STORE")
     if override:
         p = Path(override)
-        return [p] if p.is_file() else []
+        return [p] if is_file_safe(p) else []
 
     home = Path.home()
     candidates = [
@@ -101,7 +101,7 @@ def ide_store_paths() -> list[Path]:
         candidates.append(Path(appdata) / "Cursor/User/globalStorage/state.vscdb")
 
     users = Path("/mnt/c/Users")
-    if users.is_dir():
+    if is_dir_safe(users):
         try:
             for u in sorted(users.iterdir()):
                 candidates.append(
@@ -110,7 +110,9 @@ def ide_store_paths() -> list[Path]:
         except OSError:
             pass
 
-    return [p for p in candidates if p.is_file()]
+    # An existing-but-un-stat-able candidate (WSL /mnt/c can raise EACCES or
+    # EIO) is treated as absent, never a crash.
+    return [p for p in candidates if is_file_safe(p)]
 
 
 def cli_store_paths() -> list[Path]:
@@ -141,7 +143,12 @@ def cli_store_paths() -> list[Path]:
     override = os.environ.get("CONDUCTORSCORE_CURSOR_CLI_DIR")
     if override:
         base = Path(override)
-        return sorted(base.glob("*/*/store.db")) if base.is_dir() else []
+        if not is_dir_safe(base):
+            return []
+        try:
+            return sorted(base.glob("*/*/store.db"))
+        except OSError:
+            return []
 
     if os.environ.get("CONDUCTORSCORE_CURSOR_HOME"):
         dirs = [cursor_home() / "chats"]
@@ -151,9 +158,13 @@ def cli_store_paths() -> list[Path]:
     out: list[Path] = []
     seen: set[Path] = set()
     for d in dirs:
-        if not d.is_dir():
+        if not is_dir_safe(d):
             continue
-        for p in sorted(d.glob("*/*/store.db")):
+        try:
+            found = sorted(d.glob("*/*/store.db"))
+        except OSError:
+            continue
+        for p in found:
             if p not in seen:
                 seen.add(p)
                 out.append(p)
@@ -363,7 +374,7 @@ def preflight(now_ms: int, window_ms: int) -> dict:
     # store is present, e.g. a fresh/WSL-only setup with no ``~/.cursor``
     # dir populated yet) — override the plain ``home.is_dir()`` default.
     out["home_exists"] = (
-        home.is_dir() or bool(ide_store_paths()) or bool(cli_store_paths())
+        is_dir_safe(home) or bool(ide_store_paths()) or bool(cli_store_paths())
     )
     return out
 

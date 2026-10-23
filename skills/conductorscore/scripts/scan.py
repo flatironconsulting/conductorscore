@@ -8,6 +8,7 @@ the user.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -76,13 +77,17 @@ def _profile_url(auth: dict, resp: dict | None = None) -> str:
 def _upload(features_json: str, device_token: str):
     """POST the payload to /api/ingest. Returns one of:
       ("ok", resp_dict) | ("http", (code, body)) | ("neterr", reason)
+
+    The body is gzipped: heavy users' raw JSON (~1.3 KB/session) exceeds
+    Vercel's 4.5 MB request limit, and gzip shrinks it ~20x.
     """
     req = urllib.request.Request(
         f"{API_BASE}/api/ingest",
         method="POST",
-        data=features_json.encode("utf-8"),
+        data=gzip.compress(features_json.encode("utf-8")),
         headers={
             "content-type": "application/json",
+            "content-encoding": "gzip",
             "authorization": f"Bearer {device_token}",
         },
     )
