@@ -36,10 +36,10 @@ from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 
 # Bump when the entry layout changes or a session's features must be
 # recomputed without a client-version change (independent of the client
-# version). 2: nested Workflow subagent transcripts + per-message token
-# accounting (issues #12/#13); true min/max session
-# bounds (issue #10).
-CACHE_FORMAT = 2
+# version). 3: nested Workflow subagent transcripts + per-message token
+# accounting (#12/#13); true min/max session bounds (#10); PerSession
+# gained model_skill/plugin_invocations (#11).
+CACHE_FORMAT = 3
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 

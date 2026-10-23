@@ -434,6 +434,8 @@ def _build_per_session(
         skill_invocations_by_name=stf.skill_invocations_by_name,
         mcp_invocations_by_name=mcp_invocations_by_name,
         plugin_invocations_by_name=stf.plugin_invocations_by_name,
+        model_skill_invocations=stf.model_skill_invocations,
+        model_plugin_invocations=stf.model_plugin_invocations,
     )
 
 

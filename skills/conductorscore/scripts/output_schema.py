@@ -221,13 +221,23 @@ class PerSession:
     # modal's per-(model, leg) rows without server-side approximation.
     tokens_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
     # v0.11 — per-name invocation maps for the Customization "Top by
-    # invocations" table. Each map sums to its existing scalar total
-    # (skill→user_skill_invocations, mcp→hitl_mcp_invocations,
-    # plugin→plugin_invocations). Plugin keys are RAW names, rendered
-    # plaintext on both the dashboard and the public profile.
+    # invocations" table. Each map sums to its scalar total(s)
+    # (skill→user_skill_invocations + model_skill_invocations,
+    # mcp→hitl_mcp_invocations,
+    # plugin→plugin_invocations + model_plugin_invocations). Plugin keys are
+    # RAW names, rendered plaintext on both the dashboard and the public
+    # profile.
     skill_invocations_by_name: dict[str, int] = field(default_factory=dict)
     mcp_invocations_by_name: dict[str, int] = field(default_factory=dict)
     plugin_invocations_by_name: dict[str, int] = field(default_factory=dict)
+    # Issue #11 — Claude ``Skill`` tool calls (the model loading a skill on
+    # its own), kept separate from the user-typed ``user_skill_invocations``
+    # / ``plugin_invocations``. Colon-free names → model_skill_invocations,
+    # ``plugin:skill`` names → model_plugin_invocations. Emitted on the wire
+    # only when non-zero (byte parity for sessions without Skill calls);
+    # not folded into ``compute_session_chain``.
+    model_skill_invocations: int = 0
+    model_plugin_invocations: int = 0
     # Slice 2 — the agent that produced this session. Defaults to "claude"
     # and is serialized only when it isn't the default (see to_dict), so a
     # Claude-only payload stays byte-equivalent to v0.11.
@@ -344,6 +354,12 @@ class ExtractorOutput:
             if s.token_data_missing:
                 d["token_data_missing"] = True
             d["token_accounting_version"] = s.token_accounting_version
+            # Model-initiated skill loads: emit only when non-zero so a
+            # session without Skill tool calls stays byte-identical.
+            if s.model_skill_invocations:
+                d["model_skill_invocations"] = s.model_skill_invocations
+            if s.model_plugin_invocations:
+                d["model_plugin_invocations"] = s.model_plugin_invocations
             # Emit ``provider`` only for non-default (codex) sessions so the
             # Claude-only payload is byte-identical to v0.11.
             if s.provider != _DEFAULT_PROVIDER:
