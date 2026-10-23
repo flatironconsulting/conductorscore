@@ -123,9 +123,12 @@ def _had_plan_artifact_prior_24h(
 def _aggregate_msgs_by_model(events, provider: str) -> dict[str, int]:
     """Count assistant messages per raw model id.
 
-    A single transcript message may emit multiple Events (text + tool_use +
-    thinking) sharing one timestamp_ms — dedupe on that pair so one line is
-    one message. ``model`` is only set on assistant-side events; the reader
+    Claude: one API message is split across several JSONL lines (one per
+    content block, distinct timestamps), so count only the event the reader
+    marks ``is_message_head`` — one per ``message.id`` + ``requestId`` — on
+    the main thread (subagent usage events are never heads). Other
+    providers: a message may emit multiple Events (text + tool_use +
+    thinking) sharing one timestamp_ms — dedupe on that pair. ``model`` is only set on assistant-side events; the reader
     leaves it None elsewhere. For Cursor, a model-less assistant event is
     attributed to the Cursor-family placeholder (``_CURSOR_UNRESOLVED_MODEL``)
     so unresolved-model sessions still count their turns instead of
@@ -134,7 +137,10 @@ def _aggregate_msgs_by_model(events, provider: str) -> dict[str, int]:
     seen_assistant_msgs: set[tuple[int, str]] = set()
     assistant_msgs_by_model: dict[str, int] = {}
     for e in events:
-        if e.kind not in (
+        if provider == "claude":
+            if not e.is_message_head or e.is_sidechain:
+                continue
+        elif e.kind not in (
             EventKind.ASSISTANT_TEXT,
             EventKind.ASSISTANT_TOOL,
             EventKind.ASSISTANT_THINKING,
@@ -156,9 +162,11 @@ def _aggregate_msgs_by_model(events, provider: str) -> dict[str, int]:
 def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int]]:
     """Precise per-model token split.
 
-    Only assistant events carry a model id and usage counts; the reader
-    only sets input_tokens on the FIRST text event of a message so the per-
-    model sum here doesn't double-count multi-block assistant messages.
+    Only assistant/usage events carry a model id and usage counts. The
+    Claude reader attaches each API message's usage (folded across its
+    split JSONL lines) to exactly ONE event, whatever its block type, and
+    adds sidechain USAGE events for subagent/Workflow transcripts and extra
+    ``usage.iterations`` — so summing every event never double-counts.
     Skip events without a model — those are user/system events that don't
     carry token counts anyway. Invariants by construction:
       Σ tokens_by_model[m].input_miss  == cache_creation_input_tokens

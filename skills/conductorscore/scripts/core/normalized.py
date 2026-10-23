@@ -34,6 +34,12 @@ class EventKind(str, Enum):
     ASSISTANT_THINKING = "assistant_thinking"
     SYSTEM = "system"
     TOOL_RESULT = "tool_result"
+    # Token usage with no other event to ride on: subagent / Workflow
+    # transcripts (attributed to the parent session, ``is_sidechain=True``),
+    # ``usage.iterations`` entries, and a message line that produced no
+    # other event. Only token aggregators read it; every turn/plan/edit
+    # detector filters on the kinds above and never sees it.
+    USAGE = "usage"
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,11 @@ class Event:
     # discarded there (the privacy-invariant test pins that no raw text
     # lives on the Event).
     is_denied: bool = False
+    # Claude assistant events: True on the ONE event that carries its API
+    # message's usage (one message = one ``message.id`` + ``requestId``,
+    # however many JSONL lines/content blocks it was split into). Lets the
+    # per-model message counter count messages, not lines. Never serialized.
+    is_message_head: bool = False
     # TOOL_RESULT: True iff the result indicates the tool call was ABORTED /
     # interrupted by the user mid-run (e.g. a hung Codex ``exec_command`` the
     # user killed — the output reads "aborted by user after Ns"). Used to

@@ -29,12 +29,16 @@ import os
 from dataclasses import asdict, fields
 from pathlib import Path
 
+from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.core.normalized import SessionMeta
 from scripts.core.text import sha16
 from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 
-# Bump when the entry layout changes (independent of the client version).
-CACHE_FORMAT = 1
+# Bump when the entry layout changes or a session's features must be
+# recomputed without a client-version change (independent of the client
+# version). 2: nested Workflow subagent transcripts + per-message token
+# accounting (issues #12/#13).
+CACHE_FORMAT = 2
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 
@@ -47,11 +51,12 @@ def file_fingerprint(meta: SessionMeta, provider: str = "claude") -> list | None
     path = meta.jsonl_path
     try:
         st = path.stat()
-        # Claude subagent transcripts, read by the turn aggregate
-        # (turn_classifier.subagent_spans_from_disk). Hashed: names only.
+        # Claude subagent transcripts (incl. nested Workflow agents), read by
+        # the turn aggregate and the token reader. Hashed: relative paths only.
+        sub_root = path.parent / path.stem / "subagents"
         subs = sorted(
-            [sha16(p.name), p.stat().st_mtime_ns, p.stat().st_size]
-            for p in (path.parent / path.stem / "subagents").glob("agent-*.jsonl")
+            [sha16(p.relative_to(sub_root).as_posix()), p.stat().st_mtime_ns, p.stat().st_size]
+            for p in subagent_transcripts(path)
         )
     except OSError:
         return None

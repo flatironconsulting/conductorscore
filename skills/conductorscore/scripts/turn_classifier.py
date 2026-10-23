@@ -27,10 +27,12 @@ Anchors:
 from __future__ import annotations
 
 import json as _json
+import bisect
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.codex.taxonomy import multi_agent_action
 from scripts.core.thresholds import K_TURN_SECONDS
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
@@ -54,7 +56,7 @@ K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AF
 
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.
-DISPATCH_TOOLS: frozenset[str] = frozenset({"Task", "Agent"})
+DISPATCH_TOOLS: frozenset[str] = frozenset({"Task", "Agent", "Workflow"})
 
 # The AskUserQuestion tool is special: dispatching it ends the agent
 # turn, and its tool_result is a soft-USER event.
@@ -404,97 +406,245 @@ def multi_agent_spans(events: list[Event]) -> dict[str, tuple[int, int]]:
     return spans
 
 
-def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:
-    """Load subagent activity intervals from the per-session subagents dir.
+@dataclass(frozen=True)
+class AgentActivity:
+    """One subagent's activity: first/last event and its ACTIVE intervals.
+
+    ``intervals`` are the gaps between consecutive events that count as
+    work, under the same rule as ``_compute_active_seconds``: a gap
+    ≤ ``K_TURN_SECONDS`` (5 min) or fully inside a paired tool call is
+    active; any other gap is Idle and excluded.
+    """
+
+    start_ts_ms: int
+    end_ts_ms: int
+    intervals: tuple[tuple[int, int], ...]
+
+
+def _active_intervals(
+    timestamps: list[int], tool_intervals: list[tuple[int, int]]
+) -> tuple[tuple[int, int], ...]:
+    ts = sorted(set(timestamps))
+    out: list[tuple[int, int]] = []
+    for lo, hi in zip(ts, ts[1:]):
+        if (hi - lo) / 1000.0 <= K_TURN_SECONDS or _within_any_interval(
+            lo, hi, tool_intervals
+        ):
+            if out and out[-1][1] == lo:
+                out[-1] = (out[-1][0], hi)
+            else:
+                out.append((lo, hi))
+    return tuple(out)
+
+
+def _read_agent_activity(sub_jsonl: Path) -> AgentActivity | None:
+    timestamps: list[int] = []
+    calls: dict[str, int] = {}
+    tool_intervals: list[tuple[int, int]] = []
+    try:
+        with sub_jsonl.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                msg = d.get("message")
+                if not isinstance(msg, dict) or msg.get("role") not in ("assistant", "user"):
+                    continue
+                ts_ms = _parse_iso_ts_ms(d.get("timestamp"))
+                if ts_ms is None:
+                    continue
+                timestamps.append(ts_ms)
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                        calls[block["id"]] = ts_ms
+                    elif block.get("type") == "tool_result":
+                        c = calls.pop(block.get("tool_use_id"), None)
+                        if c is not None and ts_ms > c:
+                            tool_intervals.append((c, ts_ms))
+    except OSError:
+        return None
+    if not timestamps:
+        return None
+    return AgentActivity(
+        start_ts_ms=min(timestamps),
+        end_ts_ms=max(timestamps),
+        intervals=_active_intervals(timestamps, tool_intervals),
+    )
+
+
+def subagent_activity_from_disk(jsonl_path: Path) -> dict[str, AgentActivity]:
+    """Per-subagent activity from the session's on-disk subagent transcripts.
 
     Claude Code writes subagent (sidechain) transcripts to a sibling
-    directory next to the main JSONL::
+    directory next to the main JSONL, Workflow agents one level deeper
+    (``discovery.subagent_transcripts`` owns the layout)::
 
         <projects>/<encoded-cwd>/<session_id>.jsonl
         <projects>/<encoded-cwd>/<session_id>/subagents/agent-<sid>.jsonl
+        <projects>/<encoded-cwd>/<session_id>/subagents/workflows/wf_<run>/agent-<sid>.jsonl
 
     The main JSONL itself usually carries no sidechain lines, so the
-    scanner cannot recover parallel-AFK time from it alone. Mirrors
-    the megarun's ``_load_subagent_tracks`` so the live card sees the
-    same subagent activity the megarun does.
+    scanner cannot recover subagent time from it alone. Assistant and user
+    (tool-result) lines both count as activity.
     """
-    session_id = jsonl_path.stem
-    subagents_dir = jsonl_path.parent / session_id / "subagents"
-    if not subagents_dir.is_dir():
-        return {}
-    spans: dict[str, tuple[int, int]] = {}
-    for sub_jsonl in subagents_dir.glob("agent-*.jsonl"):
-        sid = sub_jsonl.stem  # 'agent-...'
-        first: int | None = None
-        last: int | None = None
-        try:
-            with sub_jsonl.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = _json.loads(line)
-                    except _json.JSONDecodeError:
-                        continue
-                    if not isinstance(d, dict):
-                        continue
-                    msg = d.get("message")
-                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                        continue
-                    ts_ms = _parse_iso_ts_ms(d.get("timestamp"))
-                    if ts_ms is None:
-                        continue
-                    if first is None or ts_ms < first:
-                        first = ts_ms
-                    if last is None or ts_ms > last:
-                        last = ts_ms
-        except OSError:
+    out: dict[str, AgentActivity] = {}
+    for sub_jsonl in subagent_transcripts(jsonl_path):
+        act = _read_agent_activity(sub_jsonl)
+        if act is not None:
+            out[sub_jsonl.stem] = act
+    return out
+
+
+def subagent_spans_from_disk(jsonl_path: Path) -> dict[str, tuple[int, int]]:
+    """``{agent-<sid>: (first_ts_ms, last_ts_ms)}`` for every subagent
+    transcript of the session (see ``subagent_activity_from_disk``)."""
+    return {
+        sid: (a.start_ts_ms, a.end_ts_ms)
+        for sid, a in subagent_activity_from_disk(jsonl_path).items()
+    }
+
+
+def _event_agent_activity(events: list[Event]) -> dict[str, AgentActivity]:
+    """Activity of subagents whose sidechain events are in ``events``."""
+    ts_by: dict[str, list[int]] = {}
+    for ev in events:
+        if ev.is_sidechain and ev.subagent_id and ev.kind != EventKind.USAGE:
+            ts_by.setdefault(ev.subagent_id, []).append(ev.timestamp_ms)
+    out: dict[str, AgentActivity] = {}
+    for sid, ts in ts_by.items():
+        side = sorted(
+            (e for e in events if e.is_sidechain and e.subagent_id == sid),
+            key=lambda e: e.timestamp_ms,
+        )
+        tools = _tool_runtime_intervals(side, min(ts), max(ts))
+        out[sid] = AgentActivity(min(ts), max(ts), _active_intervals(ts, tools))
+    return out
+
+
+def _merge_intervals(intervals) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(intervals):
+        if hi <= lo:
             continue
-        if first is not None and last is not None:
-            spans[sid] = (first, last)
-    return spans
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _subtract_intervals(
+    intervals: list[tuple[int, int]], cut: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    cut = _merge_intervals(cut)
+    for lo, hi in intervals:
+        cur = lo
+        for c_lo, c_hi in cut:
+            if c_hi <= cur or c_lo >= hi:
+                continue
+            if c_lo > cur:
+                out.append((cur, c_lo))
+            cur = max(cur, c_hi)
+            if cur >= hi:
+                break
+        if cur < hi:
+            out.append((cur, hi))
+    return out
+
+
+def _human_timestamps(events: list[Event]) -> list[int]:
+    """Main-thread events a HUMAN produced (typed prompt or AskUserQuestion
+    answer); script-sent prompts (task notifications, schedulers) are not."""
+    main = [e for e in events if not e.is_sidechain]
+    aq_ids = _ask_user_question_tool_use_ids(main)
+    return sorted(
+        e.timestamp_ms
+        for e in main
+        if _is_human_event(e, aq_ids) and not e.is_scripted_prompt
+    )
+
+
+def parallel_subagent_intervals(
+    turns: list[Turn],
+    events: list[Event],
+    extra_spans: dict[str, tuple[int, int]] | None = None,
+    extra_activity: dict[str, AgentActivity] | None = None,
+) -> list[tuple[int, int]]:
+    """Wall-clock intervals credited as subagent work (issue #12).
+
+    * Each subagent is credited from its first to its last event — also
+      OUTSIDE main-thread turns (background agents and Workflow runs
+      outlive the dispatching turn) — minus its own idle gaps (> 5 min, not
+      inside a tool call; same rule as ``_compute_active_seconds``).
+    * Credit stops at the first human (non-scripted) event after the agent
+      started: past that point the parent is no longer unattended.
+    * Concurrent agents are UNION-merged — the result is time with ≥ 1
+      agent running, not the per-agent sum.
+    * Time inside HITL turns is removed, so a minute is never both HITL and
+      subagent-parallel.
+
+    Sources: sidechain events in ``events``, Codex multi-agent spans,
+    ``extra_spans`` (whole span treated as active) and ``extra_activity``
+    (on-disk transcripts, ``subagent_activity_from_disk``).
+    """
+    agents: list[AgentActivity] = list(_event_agent_activity(events).values())
+    spans = dict(multi_agent_spans(events))
+    for sid, (start, end) in (extra_spans or {}).items():
+        prev = spans.get(sid)
+        spans[sid] = (start, end) if prev is None else (min(prev[0], start), max(prev[1], end))
+    for start, end in spans.values():
+        agents.append(AgentActivity(start, end, ((start, end),) if end > start else ()))
+    agents.extend((extra_activity or {}).values())
+    if not agents:
+        return []
+
+    humans = _human_timestamps(events)
+    credited: list[tuple[int, int]] = []
+    for a in agents:
+        i = bisect.bisect_right(humans, a.start_ts_ms)
+        limit = humans[i] if i < len(humans) else None
+        for lo, hi in a.intervals:
+            if limit is not None:
+                if lo >= limit:
+                    break
+                hi = min(hi, limit)
+            credited.append((lo, hi))
+    hitl = [(t.start_ts_ms, t.end_ts_ms) for t in turns if t.label == "HITL"]
+    return _subtract_intervals(_merge_intervals(credited), hitl)
 
 
 def afk_parallel_subagent_seconds(
     turns: list[Turn],
     events: list[Event],
     extra_spans: dict[str, tuple[int, int]] | None = None,
+    extra_activity: dict[str, AgentActivity] | None = None,
 ) -> float:
-    """Sum of per-subagent active-time intersected with AFK turns.
+    """Seconds with ≥ 1 subagent running unattended — the wire's
+    ``afk_parallel_minutes_foreground``. See ``parallel_subagent_intervals``
+    for the rule. Callers with the on-disk transcripts pass
+    ``subagent_activity_from_disk`` as ``extra_activity`` — the main JSONL
+    alone usually lacks sidechain lines.
 
-    ``extra_spans`` are merged with intervals derived from sidechain
-    events in ``events``. Callers that have access to the on-disk
-    subagent JSONLs should pass spans from
-    ``subagent_spans_from_disk`` — the main JSONL alone often lacks
-    sidechain lines, so this is the only way to recover parallel-AFK
-    time on the live card.
+    Fits the server's leverage numerator ``afk − afk_dispatch + parallel``:
+    main-thread time spent blocked on a dispatch is ``afk_dispatch`` (and is
+    subtracted), so the agent work replacing it is counted once, here.
     """
-    afk_turns = [t for t in turns if t.label == "AFK"]
-    if not afk_turns:
-        return 0.0
-    spans = dict(subagent_intervals(events))
-    for sid, (start, end) in multi_agent_spans(events).items():
-        prev = spans.get(sid)
-        if prev is None:
-            spans[sid] = (start, end)
-        else:
-            spans[sid] = (min(prev[0], start), max(prev[1], end))
-    if extra_spans:
-        for sid, (start, end) in extra_spans.items():
-            prev = spans.get(sid)
-            if prev is None:
-                spans[sid] = (start, end)
-            else:
-                spans[sid] = (min(prev[0], start), max(prev[1], end))
-    total = 0.0
-    for start, end in spans.values():
-        for t in afk_turns:
-            overlap_start = max(start, t.start_ts_ms)
-            overlap_end = min(end, t.end_ts_ms)
-            if overlap_end > overlap_start:
-                total += (overlap_end - overlap_start) / 1000.0
-    return total
+    return sum(
+        (hi - lo) / 1000.0
+        for lo, hi in parallel_subagent_intervals(turns, events, extra_spans, extra_activity)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -625,8 +775,8 @@ def compute_turn_aggregates(
     hitl_tool_s = sum(t.tool_seconds for t in turns if t.label == "HITL")
     afk_tool_s = sum(t.tool_seconds for t in turns if t.label == "AFK")
     afk_dispatch_s = sum(t.dispatch_seconds for t in turns if t.label == "AFK")
-    extra_spans = subagent_spans_from_disk(jsonl_path) if jsonl_path else None
-    parallel_s = afk_parallel_subagent_seconds(turns, events, extra_spans)
+    activity = subagent_activity_from_disk(jsonl_path) if jsonl_path else None
+    parallel_s = afk_parallel_subagent_seconds(turns, events, extra_activity=activity)
     streaks = top_afk_streaks(turns, n=5)
     streak_s = streaks[0].active_seconds if streaks else 0.0
     return TurnAggregates(
@@ -711,6 +861,7 @@ __all__ = [
     "Turn",
     "TurnAggregates",
     "afk_intervals",
+    "AgentActivity",
     "afk_parallel_subagent_seconds",
     "afk_streaks",
     "classify_minutes",
@@ -718,7 +869,10 @@ __all__ = [
     "hitl_minute_set",
     "longest_afk_streak_seconds",
     "multi_agent_spans",
+    "parallel_subagent_intervals",
     "segment_turns",
+    "subagent_activity_from_disk",
     "subagent_intervals",
+    "subagent_spans_from_disk",
     "top_afk_streaks",
 ]
