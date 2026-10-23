@@ -170,6 +170,8 @@ def write_cli_store(chats_dir: Path, session: dict) -> Path:
         if absent, the meta key is OMITTED entirely (real behavior --
         CURSOR_FORMAT.md Fixture contract (c): "do not default it to
         null, omit the key")
+      - ``headless`` -- if True, no ``prompt_history.json`` is written
+        (a ``cursor-agent -p`` run); default writes one (interactive)
       - ``messages`` -- list of message dicts (OLDEST FIRST) built via the
         helpers above. The builder reverses this internally to build the
         checkpoint chain newest-last (root = last checkpoint built), so a
@@ -284,6 +286,12 @@ def write_cli_store(chats_dir: Path, session: dict) -> Path:
             "hasConversation": True,
         }
         (db_dir / "meta.json").write_text(json.dumps(meta_json), encoding="utf-8")
+
+    # Sibling ``prompt_history.json``: the interactive CLI records what the
+    # human typed there; ``cursor-agent -p`` (headless) never writes it.
+    # Written by default (an interactive chat); ``headless=True`` omits it.
+    if not session.get("headless"):
+        (db_dir / "prompt_history.json").write_text("[]", encoding="utf-8")
 
     return db_path
 

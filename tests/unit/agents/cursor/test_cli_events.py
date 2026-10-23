@@ -742,3 +742,24 @@ def test_top_level_session_user_messages_are_human(tmp_path):
                         "messages": [user_message("hi")]})
     [u] = cli_events.read_cli_events_and_text(db, "a", want_text=False)[0]
     assert u.is_scripted_prompt is False
+
+
+def test_headless_session_user_messages_are_scripted(tmp_path):
+    # `cursor-agent -p` never writes prompt_history.json (verified against a
+    # real headless vs interactive run, CLI 2026.07.16): its prompts were
+    # sent by whatever launched it, not typed.
+    db = _db(tmp_path, {"agentId": "h", "createdAt": T0, "headless": True,
+                        "messages": [user_message("Reply with OK.")]})
+    [u] = cli_events.read_cli_events_and_text(db, "h", want_text=False)[0]
+    assert u.is_scripted_prompt is True
+
+
+def test_user_info_context_block_is_not_a_user_event(tmp_path):
+    # The CLI injects an environment block as a user-role message.
+    db = _db(tmp_path, {"agentId": "a", "createdAt": T0, "messages": [
+        user_message("<user_info>\nOS Version: linux\nShell: bash\n</user_info>"),
+        user_message("say hi"),
+    ]})
+    evs, text_map = cli_events.read_cli_events_and_text(db, "a", want_text=True)
+    users = [e for e in evs if e.kind == EventKind.USER]
+    assert [text_map[id(u)] for u in users] == ["say hi"]

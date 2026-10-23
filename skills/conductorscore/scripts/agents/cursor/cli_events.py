@@ -111,6 +111,10 @@ _MAX_CHILDREN_PER_NODE = 1024
 _MAX_TOTAL_BLOB_BYTES = 64 * 1024 * 1024  # 64 MiB.
 
 _USER_QUERY_RE = re.compile(r"^\s*<user_query>(.*)</user_query>\s*$", re.DOTALL)
+# The CLI's injected environment block (OS, shell, workspace) — context.
+_USER_INFO_OPENER = "<user_info>"
+# Interactive-only sibling of store.db; its absence marks a headless run.
+_PROMPT_HISTORY_FILE = "prompt_history.json"
 
 # Synthetic per-message timestamp increment (ms) -- see module docstring.
 _SYNTHETIC_TS_STEP_MS = 1
@@ -658,6 +662,10 @@ def _events_for_message(
         if raw_text:
             raw_text = _TIMESTAMP_TAG_RE.sub("", raw_text)
         text = _strip_user_query_wrapper(raw_text) if raw_text else raw_text
+        if text and text.lstrip().startswith(_USER_INFO_OPENER):
+            # Environment context the CLI injects as a user-role message —
+            # not a prompt, so it must not open a turn.
+            return events
         token_count = _approx_token_count(text)
         # Late import to avoid a cycle: plan_signals imports Event from
         # core.normalized (same pattern as the IDE reader/codex).
@@ -768,6 +776,14 @@ def read_cli_events_and_text(
 
         events: list[Event] = []
         text_map: dict[int, str] = {}
+        # A subagent chat is prompted by its parent agent. A headless chat
+        # (``cursor-agent -p``) has no ``prompt_history.json`` — the
+        # interactive CLI writes one recording what the human typed — so its
+        # prompts came from whatever launched it.
+        scripted = (
+            bool(meta.get("subagentInfo"))
+            or not (db_path.parent / _PROMPT_HISTORY_FILE).exists()
+        )
         for i, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 continue
@@ -781,7 +797,7 @@ def read_cli_events_and_text(
                     _events_for_message(
                         session_id, ts, model, msg,
                         want_text=want_text, text_map=text_map,
-                        scripted=bool(meta.get("subagentInfo")),
+                        scripted=scripted,
                     )
                 )
             except Exception:
