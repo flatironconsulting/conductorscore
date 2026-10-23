@@ -732,7 +732,7 @@ def main() -> int:
         )
         return 0
 
-    print("Scanning your transcripts…")
+    print("Scanning your transcripts… 0%")
     # Runs OUR OWN local scanner (scripts/scan.py) as a child so this process can
     # stream progress while it works. scan.py reads transcripts on-device and uploads
     # only per-metric numbers + invoked names (see WIRE_FORMAT.md), and only after the
@@ -747,34 +747,32 @@ def main() -> int:
     )
 
     last_line_at = time.time()
-    last_text = ""
+    last_percent = 0
     while proc.poll() is None:
         time.sleep(POLL_INTERVAL)
         now = time.time()
-        status = _read_status(status_path)
-        phase = status.get("phase") if status else None
-        if phase == "scanning":
-            text = f"Scanning {status.get('current', 0)}/{status.get('total', 0)} sessions…"
-            if (now - last_line_at) > LINE_INTERVAL and text != last_text:
-                print(text)
-                last_line_at = now
-                last_text = text
-        # Guaranteed heartbeat: if nothing has printed for HEARTBEAT_INTERVAL,
-        # emit a phase-aware "still alive" line so the run never looks hung —
-        # covers slow scans and the non-"scanning" phases (starting/uploading).
-        if (now - last_line_at) >= HEARTBEAT_INTERVAL:
+        status = _read_status(status_path) or {}
+        percent = max(last_percent, int(status.get("percent", last_percent)))
+        # Print on a new percentage (throttled to LINE_INTERVAL), and always
+        # after HEARTBEAT_INTERVAL of silence so the run never looks hung —
+        # covers stalls and the phases with no fine-grained progress
+        # (starting/uploading).
+        changed = percent != last_percent and (now - last_line_at) > LINE_INTERVAL
+        if changed or (now - last_line_at) >= HEARTBEAT_INTERVAL:
             label = {
                 "starting": "Starting up",
-                "scanning": "Scanning",
+                "scanning": "Scanning your transcripts",
                 "uploading": "Uploading your score",
-            }.get(phase or "", "Working")
-            print(f"{label}… (still running)")
+            }.get(status.get("phase") or "", "Working")
+            print(f"{label}… {percent}%")
             last_line_at = now
+            last_percent = percent
 
     log.close()
     final = _read_status(status_path) or {}
 
     if final.get("phase") == "done":
+        print("Scan complete… 100%")
         # Persist the provider choice so the NEXT run reads cached consent and
         # scans straight through — no second providers ASK. We only reach here
         # after a successful scan, and only record when the user actually made a

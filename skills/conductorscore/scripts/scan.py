@@ -37,6 +37,15 @@ from scripts.status_writer import StatusWriter
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
+# Overall 0-100% progress bands, (start, end) per extractor stage, roughly
+# proportional to wall time on a measured ~8k-session run (discovery 8s,
+# loading 25s, scoring 18s). Upload holds at 90%; run.py shows 100% on done.
+PROGRESS_STAGES = {
+    "discover": (0, 15),
+    "load": (15, 60),
+    "score": (60, 90),
+}
+
 
 def _cache_dir() -> Path:
     explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
@@ -112,16 +121,31 @@ def main() -> int:
     device_id = auth_store.load_or_create_device_id()
 
     last_emit = 0.0
-    last_progress = {"current": 0, "total": 0}
+    last_progress = {"current": 0, "total": 0, "percent": 0}
+
+    def emit(percent: int, force: bool = False) -> None:
+        nonlocal last_emit
+        last_progress["percent"] = percent
+        now = time.time()
+        if force or now - last_emit > 0.2:
+            sw.write(
+                phase="scanning",
+                current=last_progress["current"],
+                total=last_progress["total"],
+                percent=percent,
+            )
+            last_emit = now
+
+    def stage_percent(done: int, total: int, lo: int, hi: int) -> int:
+        return lo + (hi - lo) * done // total if total else hi
 
     def on_progress(current: int, total: int) -> None:
-        nonlocal last_emit
         last_progress["current"] = current
         last_progress["total"] = total
-        now = time.time()
-        if now - last_emit > 0.2 or current == total:
-            sw.write(phase="scanning", current=current, total=total)
-            last_emit = now
+        emit(stage_percent(current, total, *PROGRESS_STAGES["load"]), current == total)
+
+    def on_stage(stage: str, done: int, total: int) -> None:
+        emit(stage_percent(done, total, *PROGRESS_STAGES[stage]), done == total)
 
     # Cross-provider consent gate. Decide WHICH providers to scan before we
     # touch any transcript. Any non-launched provider(s) with recent activity
@@ -161,6 +185,7 @@ def main() -> int:
             client_version=CLIENT_VERSION,
             on_progress=on_progress,
             consent_decision=decision,
+            on_stage=on_stage,
         )
     except Exception as e:
         sw.write(phase="error", message=f"scan_failed: {e}")
@@ -204,7 +229,12 @@ def main() -> int:
         )
         return 0
 
-    sw.write(phase="uploading", current=last_progress["current"], total=last_progress["total"])
+    sw.write(
+        phase="uploading",
+        current=last_progress["current"],
+        total=last_progress["total"],
+        percent=PROGRESS_STAGES["score"][1],
+    )
 
     # ExtractorOutput.to_json() serialises via to_dict() — use it rather than
     # json.dumps(features) which would fail on the dataclass object.

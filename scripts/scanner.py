@@ -408,6 +408,7 @@ def extract(
     now_ms: int | None = None,
     on_progress=None,
     consent_decision: "consent_mod.ConsentDecision | None" = None,
+    on_stage=None,
 ) -> ExtractorOutput:
     """Scan + score the user's session transcripts.
 
@@ -422,6 +423,10 @@ def extract(
             an explicit ``CONDUCTORSCORE_PROVIDERS`` override, cached consent,
             or fresh consent allows the other. The non-launched provider is
             NEVER scanned without one of those.
+        on_stage: optional callable(stage: str, done: int, total: int) for the
+            stages ``on_progress`` doesn't cover — ``"discover"`` (once per
+            provider whose sessions have been listed) and ``"score"`` (once per
+            session scored in Pass 2) — so callers can report overall progress.
     """
     if now_ms is None:
         now_ms = int(time.time() * 1000)
@@ -447,9 +452,11 @@ def extract(
     # is tagged with the adapter (provider) that discovered it so Pass 2 can
     # read events with the right parser, set ``provider`` on the wire, and
     # hash session ids per-provider to avoid cross-provider collisions.
-    all_sessions = [
-        (agent, s) for agent in agents for s in agent.find_sessions()
-    ]
+    all_sessions = []
+    for n, agent in enumerate(agents):
+        all_sessions.extend((agent, s) for s in agent.find_sessions())
+        if on_stage is not None:
+            on_stage("discover", n + 1, len(agents))
     in_window = [(a, s) for (a, s) in all_sessions if s.last_ts_ms >= cutoff]
     total = len(in_window)
     # Device-level set of providers actually scanned (sorted on emit).
@@ -514,10 +521,13 @@ def extract(
         other = scan()
         config = _merge_config_counts(config, other)
 
-    sessions: list[PerSession] = [
-        _build_per_session(s, provider, events, text_map, tc, artifact_times_by_project)
-        for s, provider, events, text_map, tc in loaded
-    ]
+    sessions: list[PerSession] = []
+    for i, (s, provider, events, text_map, tc) in enumerate(loaded):
+        sessions.append(
+            _build_per_session(s, provider, events, text_map, tc, artifact_times_by_project)
+        )
+        if on_stage is not None:
+            on_stage("score", i + 1, total)
     # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
     # byte-equivalent to v0.11 (output_schema omits the key in that case).
     # Empty scans (no sessions) also report the default Claude-only set.
