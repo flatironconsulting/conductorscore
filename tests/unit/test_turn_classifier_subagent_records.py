@@ -69,13 +69,21 @@ def test_compute_turn_aggregates_records_opens_no_files(tmp_path, monkeypatch):
 
 
 def test_raw_line_separators_do_not_split_records(tmp_path):
-    # JSON permits raw U+2028 etc. inside strings; file iteration does not split on them.
-    seps = "  \u0085\x0b\x0c\x1c\x1d\x1e"
-    line = _rec("assistant", "2026-01-01T00:00:00Z",
-                [{"type": "text", "text": "a" + seps + "b"}])
+    # JSON permits raw U+2028/2029/0085 inside strings; file iteration does not
+    # split on them, but str.splitlines() does. (Other splitlines separators are
+    # control chars, invalid raw in JSON strings.)
+    seps = "\u2028\u2029\u0085"
+    rec = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "a" + seps + "b"}]},
+    }
+    line = json.dumps(rec, ensure_ascii=False)
     line2 = _rec("assistant", "2026-01-01T00:01:00Z")
     main = _layout(tmp_path, [line, line2])
     sub = next(iter(load_subagent_records(main)))
+    raw = sub.read_bytes()
+    for ch in seps:  # guard: the separators really are raw in the file
+        assert ch.encode("utf-8") in raw
     recs = parse_transcript_records(sub)
     assert len(recs) == 2
     assert recs[0]["message"]["content"][0]["text"] == "a" + seps + "b"
