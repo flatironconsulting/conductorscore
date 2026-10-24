@@ -7,11 +7,11 @@ from scripts.core import thresholds
 
 def test_time_accounting_constants():
     assert thresholds.K_TURN_SECONDS == 300
-    assert thresholds.K_BRIDGE_IDLE_SECONDS == 300  # R1: bridge idle gap
-    assert thresholds.K_TOOL_CAP_SECONDS == 1800  # R2: per-tool-call cap
+    assert thresholds.K_BRIDGE_IDLE_SECONDS == 300  # R2: bridge idle gap
+    assert thresholds.K_TOOL_CAP_SECONDS == 1800  # R3: per-tool-call cap
     assert thresholds.K_TOOL_CAP_INTERRUPTED_SECONDS == 600  # R3: cap when interrupted
-    assert thresholds.K_PROMPT_CREDIT_SECONDS == 300  # R4: credit for a prompt
-    assert thresholds.K_POLL_GRACE_SECONDS == 300  # R5: poll grace period
+    assert thresholds.K_PROMPT_CREDIT_SECONDS == 300  # R5: credit for a prompt
+    assert thresholds.K_POLL_GRACE_SECONDS == 300  # R6: wait/repeat-call idle after 5 min
 
     for name in (
         "K_BRIDGE_IDLE_SECONDS",
