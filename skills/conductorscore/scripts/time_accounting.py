@@ -21,21 +21,43 @@ spec's rules:
   seconds, so its interval (and wait) is tiny; no flag is needed.
 
 ``AskUserQuestion`` is a turn boundary, not a tool call, and is skipped.
+
+The second block partitions one session's main-thread window into
+``Segment``s (``partition_main_thread``), each owned by an Interactive turn,
+a Background turn or the time between turns:
+
+- **R1 Turn kind.** Agent-active time (MODEL + TOOL + DISPATCH_WAIT) <=
+  ``K_TURN_SECONDS`` is Interactive, else Background. Scripted turns are
+  always Background.
+- **R2 Gaps.** Inside a turn, non-tool time between consecutive main-thread
+  events is MODEL up to ``K_BRIDGE_IDLE_SECONDS``, else NO_ACTIVITY.
+  Between turns everything is NO_ACTIVITY except R5 credit.
+- **R5 Reading & typing.** A typed prompt (or AskUserQuestion answer) that
+  opens a turn credits the last ``K_PROMPT_CREDIT_SECONDS`` of the gap
+  before it as Interactive READ_WRITE. A queued prompt opens no turn.
 """
 
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from scripts.core.normalized import Event, EventKind
 from scripts.core.thresholds import (
+    K_BRIDGE_IDLE_SECONDS,
     K_POLL_GRACE_SECONDS,
+    K_PROMPT_CREDIT_SECONDS,
     K_TOOL_CAP_INTERRUPTED_SECONDS,
     K_TOOL_CAP_SECONDS,
+    K_TURN_SECONDS,
 )
-from scripts.turn_classifier import ASK_USER_QUESTION_TOOL, DISPATCH_TOOLS
+from scripts.turn_classifier import (
+    ASK_USER_QUESTION_TOOL,
+    DISPATCH_TOOLS,
+    Turn,
+    segment_turns,
+)
 
 
 class Activity(str, Enum):
@@ -267,11 +289,207 @@ def tool_pieces_union(spans: list[ToolSpan]) -> list[Piece]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Main-thread partition (R1, R2, R5)
+# ---------------------------------------------------------------------------
+
+
+class Owner(str, Enum):
+    INTERACTIVE = "interactive"
+    BACKGROUND = "background"
+    BETWEEN = "between_turns"
+
+
+@dataclass(frozen=True)
+class Segment:
+    start_ms: int
+    end_ms: int
+    owner: Owner
+    kind: Activity | IdleReason
+
+
+_TURN_MS = K_TURN_SECONDS * 1000
+_BRIDGE_MS = K_BRIDGE_IDLE_SECONDS * 1000
+_PROMPT_CREDIT_MS = K_PROMPT_CREDIT_SECONDS * 1000
+
+# Kinds that count toward the R1 threshold (agent-active time).
+_AGENT_ACTIVE: frozenset[Activity | IdleReason] = frozenset(
+    {Activity.MODEL, Activity.TOOL, IdleReason.DISPATCH_WAIT}
+)
+
+
+def _clip_main_events(events: list[Event], ws: int, we: int) -> list[Event]:
+    """Main-thread events, clipped into the window, sorted by timestamp.
+
+    A timestamp <= 0 is a missing timestamp and the event is dropped (the
+    scanner's session bounds ignore those too). The sort is stable, so
+    lines sharing a timestamp keep file order.
+    """
+    out: list[Event] = []
+    for e in events:
+        if e.is_sidechain or e.timestamp_ms <= 0:
+            continue
+        ts = min(max(e.timestamp_ms, ws), we)
+        out.append(e if ts == e.timestamp_ms else replace(e, timestamp_ms=ts))
+    out.sort(key=lambda e: e.timestamp_ms)
+    return out
+
+
+def _open_call_intervals(main: list[Event]) -> list[tuple[int, int]]:
+    """Call→result intervals of paired main-thread tool calls.
+
+    AskUserQuestion is excluded: its "result" is the user's answer.
+    """
+    calls: dict[str, int] = {}
+    for e in main:
+        if (
+            e.kind == EventKind.ASSISTANT_TOOL
+            and e.tool_use_id
+            and e.tool_name != ASK_USER_QUESTION_TOOL
+        ):
+            calls.setdefault(e.tool_use_id, e.timestamp_ms)
+    out: list[tuple[int, int]] = []
+    seen: set[str] = set()
+    for e in main:
+        tid = e.tool_use_id
+        if e.kind == EventKind.TOOL_RESULT and tid in calls and tid not in seen:
+            seen.add(tid)
+            out.append((calls[tid], e.timestamp_ms))
+    return out
+
+
+def _is_queued(ts: int, main: list[Event], open_calls: list[tuple[int, int]]) -> bool:
+    """A typed prompt at ``ts`` arrived while the agent was still working.
+
+    Claude Code delivers a prompt queued mid-turn as a ``queued_command``
+    attachment, which the reader never turns into a USER event, so the open
+    turn is not split. A typed USER event that ``segment_turns`` saw end a
+    turn mid-flight is queued when a main-thread tool call was still running
+    at that instant (called before it, result after it). A prompt after an
+    interrupt or a turn that ended without ``end_turn`` (no tool open) is a
+    real new prompt.
+    """
+    opener = any(
+        e.timestamp_ms == ts and e.kind == EventKind.USER and not e.is_scripted_prompt
+        for e in main
+    )
+    return opener and any(lo < ts < hi for lo, hi in open_calls)
+
+
+def _main_turns(main: list[Event]) -> list[Turn]:
+    """``segment_turns`` boundaries, with queued-prompt splits undone (R5)."""
+    turns = segment_turns(main)
+    open_calls = _open_call_intervals(main)
+    merged: list[Turn] = []
+    for t in turns:
+        prev = merged[-1] if merged else None
+        if (
+            prev is not None
+            and prev.end_reason == "next_user"
+            and prev.end_ts_ms == t.start_ts_ms
+            and _is_queued(t.start_ts_ms, main, open_calls)
+        ):
+            merged[-1] = Turn(
+                start_ts_ms=prev.start_ts_ms,
+                end_ts_ms=t.end_ts_ms,
+                end_reason=t.end_reason,
+                is_scripted=prev.is_scripted,
+            )
+        else:
+            merged.append(t)
+    return merged
+
+
+def _turn_pieces(
+    start: int, end: int, event_ts: list[int], tool_pieces: list[Piece]
+) -> list[tuple[int, int, Activity | IdleReason]]:
+    """Contiguous (lo, hi, kind) pieces covering ``[start, end)``.
+
+    Tool pieces win where they cover time. The rest is cut at main-thread
+    event timestamps; each uncovered stretch is MODEL up to the bridge
+    limit, NO_ACTIVITY beyond it (R2).
+    """
+    clipped = [
+        (max(p.start_ms, start), min(p.end_ms, end), p.kind)
+        for p in tool_pieces
+        if p.end_ms > start and p.start_ms < end
+    ]
+    points = {start, end}
+    points.update(ts for ts in event_ts if start < ts < end)
+    for lo, hi, _ in clipped:
+        points.add(lo)
+        points.add(hi)
+    bounds = sorted(points)
+    out: list[tuple[int, int, Activity | IdleReason]] = []
+    j = 0  # tool pieces are sorted and non-overlapping
+    for lo, hi in zip(bounds, bounds[1:]):
+        while j < len(clipped) and clipped[j][1] <= lo:
+            j += 1
+        if j < len(clipped) and clipped[j][0] <= lo:
+            kind = clipped[j][2]
+        else:
+            kind = Activity.MODEL if hi - lo <= _BRIDGE_MS else IdleReason.NO_ACTIVITY
+        if out and out[-1][2] == kind and out[-1][1] == lo:
+            out[-1] = (out[-1][0], hi, kind)
+        else:
+            out.append((lo, hi, kind))
+    return out
+
+
+def partition_main_thread(
+    events: list[Event], window: tuple[int, int]
+) -> list[Segment]:
+    """Partition ``window`` into owned segments (R1, R2, R5).
+
+    ``window`` is ``(started_at_ms, ended_at_ms)``. The result is sorted,
+    contiguous, has no empty segment, and sums to the window exactly.
+    Events outside the window are clipped into it; sidechain events and
+    events with no timestamp are ignored.
+    """
+    ws, we = window
+    if we <= ws:
+        return []
+    main = _clip_main_events(events, ws, we)
+    turns = _main_turns(main)
+    tool_pieces = tool_pieces_union(classify_tool_calls(main, we))
+    event_ts = sorted({e.timestamp_ms for e in main})
+
+    out: list[Segment] = []
+
+    def emit(lo: int, hi: int, owner: Owner, kind: Activity | IdleReason) -> None:
+        if hi > lo:
+            out.append(Segment(lo, hi, owner, kind))
+
+    cursor = ws
+    for t in turns:
+        # Between turns: idle, except the R5 credit right before the prompt.
+        gap_start, gap_end = cursor, t.start_ts_ms
+        credit = 0 if t.is_scripted else min(gap_end - gap_start, _PROMPT_CREDIT_MS)
+        emit(gap_start, gap_end - credit, Owner.BETWEEN, IdleReason.NO_ACTIVITY)
+        emit(gap_end - credit, gap_end, Owner.INTERACTIVE, Activity.READ_WRITE)
+
+        pieces = _turn_pieces(t.start_ts_ms, t.end_ts_ms, event_ts, tool_pieces)
+        active = sum(hi - lo for lo, hi, k in pieces if k in _AGENT_ACTIVE)
+        owner = (
+            Owner.BACKGROUND
+            if t.is_scripted or active > _TURN_MS
+            else Owner.INTERACTIVE
+        )
+        for lo, hi, kind in pieces:
+            emit(lo, hi, owner, kind)
+        cursor = t.end_ts_ms
+    emit(cursor, we, Owner.BETWEEN, IdleReason.NO_ACTIVITY)
+    return out
+
+
 __all__ = [
     "Activity",
     "IdleReason",
+    "Owner",
     "Piece",
+    "Segment",
     "ToolSpan",
     "classify_tool_calls",
+    "partition_main_thread",
     "tool_pieces_union",
 ]
