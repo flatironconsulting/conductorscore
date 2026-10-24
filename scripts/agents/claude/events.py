@@ -447,9 +447,11 @@ def _fold_message_usage(records: list[dict]) -> dict[tuple[str, str], _MessageUs
 
 
 def _parse_records(jsonl_path: Path, prefilter: str | None = None) -> list[dict]:
-    """JSON-decode each line to a dict with a parseable timestamp. With
-    ``prefilter`` set, lines not containing that substring are skipped
-    before decoding (cheap; used for the usage-only subagent pass)."""
+    """JSON-decode each line, keeping those that decode to a dict, in file
+    order. No timestamp filter: consumers skip timestamp-less records
+    themselves. With ``prefilter`` set, lines not containing that substring
+    are skipped before decoding (cheap; used for the usage-only subagent
+    pass)."""
     out: list[dict] = []
     for raw in _read_lines(jsonl_path):
         line = raw.strip()
@@ -517,20 +519,64 @@ def _with_usage(ev: Event, vec: tuple[int, int, int, int]) -> Event:
     )
 
 
-def subagent_usage_events(jsonl_path: Path, session_id: str | None = None) -> list[Event]:
+_USAGE_PREFILTER = '"usage"'
+
+
+def _is_usage_token(s: str) -> bool:
+    # In a JSON line, '"usage"' ends a string token (the closing quote follows
+    # "e", so it is unescaped). The opening quote is either that token's own
+    # (s == "usage") or an escaped \" inside it (s ends with '"usage').
+    return s == "usage" or s.endswith('"usage')
+
+
+def _has_usage_token(obj) -> bool:
+    """Record-level equivalent of ``'"usage"' in raw_line``: some key or
+    string value, at any depth, serialises with a ``"usage"`` tail. Exact for
+    standard JSON writers, which escape ``"`` as ``\\"`` and never escape
+    ASCII letters."""
+    if isinstance(obj, str):
+        return _is_usage_token(obj)
+    if isinstance(obj, dict):
+        return any(
+            _is_usage_token(k) or _has_usage_token(v) for k, v in obj.items()
+        )
+    if isinstance(obj, list):
+        return any(_has_usage_token(v) for v in obj)
+    return False
+
+
+def subagent_usage_events(
+    jsonl_path: Path,
+    session_id: str | None = None,
+    *,
+    records: SubagentRecords | None = None,
+) -> list[Event]:
     """Token-only USAGE events for every subagent / Workflow transcript of a
     session (``discovery.subagent_transcripts``), attributed to the parent
     session and tagged ``is_sidechain`` so no turn/HITL logic reads them.
     One event per API message (max-folded usage) plus non-``message``
-    iterations; lines without an id fall back to per-line usage."""
+    iterations; lines without an id fall back to per-line usage.
+
+    With ``records`` (from ``load_subagent_records``) no file is opened; the
+    ``"usage"`` line prefilter is applied per record via ``_has_usage_token``
+    (it decides which line of a message is seen first, hence the stamped
+    timestamp)."""
     jsonl_path = Path(jsonl_path)
     sid = session_id or jsonl_path.stem
     out: list[Event] = []
-    for sub in subagent_transcripts(jsonl_path):
-        records = _parse_records(sub, prefilter='"usage"')
-        folded = _fold_message_usage(records)
+    if records is None:
+        per_file = (
+            _parse_records(sub, prefilter=_USAGE_PREFILTER)
+            for sub in subagent_transcripts(jsonl_path)
+        )
+    else:
+        per_file = (
+            [d for d in recs if _has_usage_token(d)] for recs in records.values()
+        )
+    for file_records in per_file:
+        folded = _fold_message_usage(file_records)
         done: set[tuple[str, str]] = set()
-        for d in records:
+        for d in file_records:
             message = d.get("message") if isinstance(d.get("message"), dict) else None
             if not _is_assistant_record(d, message):
                 continue
@@ -877,7 +923,9 @@ def read_events(jsonl_path: Path) -> list[Event]:
     return events
 
 
-def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]:
+def read_events_and_text(
+    jsonl_path: Path, *, subagent_records: SubagentRecords | None = None
+) -> tuple[list[Event], dict[int, str]]:
     """Like ``read_events`` but also returns an in-memory map of
     ``id(user_event) -> raw_user_text`` for the Feature 7 detectors that
     need the raw text (frustration / prompt similarity).
@@ -935,7 +983,11 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
     # #13 — subagent / Workflow transcript tokens belong to this session.
     # USAGE events only (sidechain-tagged), so turns, HITL/AFK, plan and edit
     # detectors are unchanged; only the token aggregators read them.
-    events.extend(subagent_usage_events(jsonl_path, jsonl_path.stem))
+    events.extend(
+        subagent_usage_events(
+            jsonl_path, jsonl_path.stem, records=subagent_records
+        )
+    )
     return events, text_map
 
 
