@@ -40,8 +40,9 @@ from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 # accounting (#12/#13); true min/max session bounds (#10); PerSession
 # gained model_skill/plugin_invocations (#11). 4: Skill-tool calls moved out
 # of distinct_skills / the typed by-name maps into
-# model_skill_invocations_by_name (#11 follow-up).
-CACHE_FORMAT = 4
+# model_skill_invocations_by_name (#11 follow-up). 5: parallel subagent time
+# (afk_parallel_minutes_foreground) is the per-agent SUM again, not the union.
+CACHE_FORMAT = 5
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 

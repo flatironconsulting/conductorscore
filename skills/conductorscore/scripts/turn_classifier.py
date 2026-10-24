@@ -549,7 +549,7 @@ def parallel_subagent_intervals(
     extra_spans: dict[str, tuple[int, int]] | None = None,
     extra_activity: dict[str, AgentActivity] | None = None,
 ) -> list[tuple[int, int]]:
-    """Wall-clock intervals with >= 1 subagent active (issue #12).
+    """Each subagent's credited intervals, concatenated per agent (issue #12).
 
     * Each subagent is credited from its first to its last event — also
       OUTSIDE main-thread turns (background agents and Workflow runs
@@ -558,8 +558,10 @@ def parallel_subagent_intervals(
     * Credit is NOT clipped by human activity: a subagent running while the
       human types in the main session is a parallel track for its whole
       active span (both HITL and parallel time are real).
-    * Concurrent agents are UNION-merged — the result is time with ≥ 1
-      agent running, not the per-agent sum.
+    * Concurrent agents are SUMMED (agent-time): three agents running for
+      the same hour yield three hours. Intervals are merged only WITHIN one
+      agent (so an agent never double counts itself); intervals of different
+      agents may overlap and are deliberately NOT merged with each other.
 
     ``turns`` is accepted for signature stability and is not used.
     Sources: sidechain events in ``events``, Codex multi-agent spans,
@@ -574,10 +576,11 @@ def parallel_subagent_intervals(
     for start, end in spans.values():
         agents.append(AgentActivity(start, end, ((start, end),) if end > start else ()))
     agents.extend((extra_activity or {}).values())
-    if not agents:
-        return []
 
-    return _merge_intervals(iv for a in agents for iv in a.intervals)
+    out: list[tuple[int, int]] = []
+    for a in agents:
+        out.extend(_merge_intervals(a.intervals))  # merge within this agent only
+    return out
 
 
 def afk_parallel_subagent_seconds(
@@ -586,16 +589,18 @@ def afk_parallel_subagent_seconds(
     extra_spans: dict[str, tuple[int, int]] | None = None,
     extra_activity: dict[str, AgentActivity] | None = None,
 ) -> float:
-    """Seconds with ≥ 1 subagent active — the wire's
-    ``afk_parallel_minutes_foreground``. Despite the (kept, server-read)
-    field name this is agent wall-clock, union, NOT limited to AFK time. See
-    ``parallel_subagent_intervals`` for the rule. Callers with the on-disk
+    """Subagent agent-seconds — the wire's ``afk_parallel_minutes_foreground``.
+
+    The per-agent SUM of each subagent's credited active seconds (see
+    ``parallel_subagent_intervals`` for the span rule): concurrent agents
+    each count, so 3 agents × 1 h = 3 h. Despite the (kept, server-read)
+    field name this is NOT limited to AFK time. Callers with the on-disk
     transcripts pass ``subagent_activity_from_disk`` as ``extra_activity`` —
     the main JSONL alone usually lacks sidechain lines.
 
     Fits the server's leverage numerator ``afk − afk_dispatch + parallel``:
     main-thread time spent blocked on a dispatch is ``afk_dispatch`` (and is
-    subtracted), so the agent work replacing it is counted once, here.
+    subtracted), so the agent work replacing it is counted here instead.
     """
     return sum(
         (hi - lo) / 1000.0

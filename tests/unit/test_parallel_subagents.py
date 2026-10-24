@@ -1,6 +1,7 @@
 """Subagent leverage (#12): Workflow dispatches count, and agent time is
-credited as the union of agent active time — also outside turns and while
-the human is typing; only the agent's own idle gaps are excluded."""
+credited as the per-agent SUM of agent active time (agent-minutes) — also
+outside turns and while the human is typing; only the agent's own idle gaps
+are excluded."""
 from __future__ import annotations
 
 import datetime as dt
@@ -97,11 +98,27 @@ def test_user_example_agent_beside_typing_human_gets_full_credit():
     assert secs == 100 * MIN / 1000
 
 
-def test_two_fully_concurrent_agents_count_once():
+def test_two_fully_concurrent_agents_count_twice():
     evs = _short_hitl_dispatch_session()
     act = {"a": _agent(2 * MIN, 42 * MIN), "b": _agent(2 * MIN, 42 * MIN)}
     secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
-    assert secs == 40 * MIN / 1000
+    assert secs == 2 * 40 * MIN / 1000
+
+
+def test_three_fully_concurrent_hour_long_agents_give_180_min():
+    evs = _short_hitl_dispatch_session()
+    act = {k: _agent(2 * MIN, 62 * MIN) for k in ("a", "b", "c")}
+    secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
+    assert secs == 180 * MIN / 1000
+
+
+def test_one_agent_never_double_counts_itself():
+    # One agent whose own intervals overlap (2..20 and 10..30 min): merged
+    # within the agent, so it is credited 28 min, not 38.
+    evs = _short_hitl_dispatch_session()
+    act = {"a": AgentActivity(2 * MIN, 30 * MIN, ((2 * MIN, 20 * MIN), (10 * MIN, 30 * MIN)))}
+    secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
+    assert secs == 28 * MIN / 1000
 
 
 def test_scripted_prompt_does_not_clip_agent_credit():
@@ -111,12 +128,12 @@ def test_scripted_prompt_does_not_clip_agent_credit():
     assert secs == (50 * MIN - MIN) / 1000
 
 
-def test_concurrent_agents_are_union_merged():
+def test_concurrent_agents_are_summed_per_agent():
     evs = _short_hitl_dispatch_session()
     act = {"a": _agent(2 * MIN, 22 * MIN), "b": _agent(12 * MIN, 32 * MIN),
            "c": _agent(14 * MIN, 20 * MIN)}
     secs = afk_parallel_subagent_seconds(segment_turns(evs), evs, extra_activity=act)
-    assert secs == 30 * MIN / 1000  # 2..32 min, not 20+20+6
+    assert secs == (20 + 20 + 6) * MIN / 1000  # per-agent sum, not the 30-min union
 
 
 def test_idle_gaps_inside_an_agent_are_excluded():
