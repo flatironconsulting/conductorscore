@@ -476,7 +476,26 @@ def parse_transcript_records(path: Path) -> list[dict]:
     each consumer applies its own filter and stays byte-identical. Blank,
     invalid and truncated lines are skipped; an unreadable file gives ``[]``.
     """
-    return _parse_records(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict] = []
+    # Split on "\n" only (read_text already folds \r and \r\n to "\n"), NOT
+    # str.splitlines(): that also cuts at U+2028/2029/0085/\x0b/\x0c/\x1c-\x1e,
+    # which JSON allows raw inside strings. The legacy file-iteration reader
+    # never split there, so neither may this shared parse.
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
 
 
 def load_subagent_records(jsonl_path: Path) -> SubagentRecords:
