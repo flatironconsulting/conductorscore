@@ -60,7 +60,11 @@ from enum import Enum
 from pathlib import Path
 
 from scripts.agents.claude.discovery import subagent_transcripts
-from scripts.agents.claude.events import read_events
+from scripts.agents.claude.events import (
+    SubagentRecords,
+    events_from_records,
+    read_events,
+)
 from scripts.core.normalized import Event, EventKind
 from scripts.core.thresholds import (
     K_BRIDGE_IDLE_SECONDS,
@@ -636,21 +640,32 @@ def _agent_from_events(agent_type: str, events: list[Event]) -> AgentSummary | N
     )
 
 
-def _transcript_agents(jsonl_path: Path) -> list[AgentSummary]:
-    """Every subagent / Workflow transcript of the session (R8)."""
+def _transcript_agents(
+    jsonl_path: Path, *, records: SubagentRecords | None = None
+) -> list[AgentSummary]:
+    """Every subagent / Workflow transcript of the session (R8).
+
+    With ``records`` (from ``load_subagent_records``) no subagent file is
+    opened: each path's records become Events via ``events_from_records``.
+    The agent type always comes from the path (key), never the records.
+    """
     jsonl_path = Path(jsonl_path)
     root = jsonl_path.parent / jsonl_path.stem / "subagents"
     out: list[AgentSummary] = []
-    for path in subagent_transcripts(jsonl_path):
+    paths = subagent_transcripts(jsonl_path) if records is None else list(records)
+    for path in paths:
         try:
             parts = path.relative_to(root).parts
         except ValueError:
             parts = ()
         agent_type = "workflow" if parts[:1] == ("workflows",) else "subagent"
-        try:
-            events = read_events(path)
-        except OSError:
-            continue
+        if records is not None:
+            events = events_from_records(records[path], path.stem)
+        else:
+            try:
+                events = read_events(path)
+            except OSError:
+                continue
         summary = _agent_from_events(agent_type, events)
         if summary is not None:
             out.append(summary)
@@ -723,7 +738,11 @@ def _union_and_peak(agents: list[AgentSummary]) -> tuple[int, int]:
 
 
 def account_agents(
-    main_events: list[Event], jsonl_path: Path | None, main_window_end_ms: int
+    main_events: list[Event],
+    jsonl_path: Path | None,
+    main_window_end_ms: int,
+    *,
+    subagent_records: SubagentRecords | None = None,
 ) -> AgentAccounting:
     """Account every parallel agent of one session (R8, R9, R10).
 
@@ -731,9 +750,14 @@ def account_agents(
     ``subagents/`` tree (none when ``jsonl_path`` is None); background
     shells from ``main_events``. Agent-seconds are summed by the caller over
     ``agents``; ``union_s`` and ``max_concurrent`` cover their active
-    intervals.
+    intervals. ``subagent_records`` (``load_subagent_records``) replaces the
+    subagent file reads.
     """
-    agents = _transcript_agents(jsonl_path) if jsonl_path is not None else []
+    agents = (
+        _transcript_agents(jsonl_path, records=subagent_records)
+        if jsonl_path is not None
+        else []
+    )
     agents += _background_shells(main_events, main_window_end_ms)
     agents.sort(key=lambda a: (a.start_ms, a.end_ms, a.agent_type))
     union, peak = _union_and_peak(agents)
@@ -1210,6 +1234,8 @@ def build_time_accounting(
     window: tuple[int, int],
     jsonl_path: Path | None,
     permission_signal: str,
+    *,
+    subagent_records: SubagentRecords | None = None,
 ) -> TimeAccounting:
     """Build one session's wire object from ``grid_seconds``, rounding only.
 
@@ -1217,11 +1243,15 @@ def build_time_accounting(
     ended_at_ms)``; ``jsonl_path`` locates the Claude subagent / Workflow
     transcripts (None for none). ``grid_seconds`` runs ``longest_run_seconds``
     on the same segments and agents, so its ``longest_run_s`` is used as is.
+    ``subagent_records`` (``load_subagent_records``) replaces the subagent
+    file reads.
     """
     if permission_signal not in PERMISSION_SIGNALS:
         raise ValueError(f"permission_signal must be one of {PERMISSION_SIGNALS}")
     segments = partition_main_thread(events, window)
-    agents = account_agents(events, jsonl_path, window[1])
+    agents = account_agents(
+        events, jsonl_path, window[1], subagent_records=subagent_records
+    )
     g = grid_seconds(segments, agents)
     ia, bm, ag, bt = g["interactive"], g["background_main"], g["agents"], g["between_turns"]
     kw: dict[str, int | str] = {

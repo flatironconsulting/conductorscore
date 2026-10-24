@@ -234,3 +234,94 @@ def test_background_shell_short_and_concurrency_with_subagent(tmp_path):
 def test_no_agents():
     acc = account_agents([], None, T)
     assert acc == AgentAccounting(agents=(), union_s=0.0, max_concurrent=0)
+
+
+# --- plan 035 task 4: agent accounting over shared subagent records ----------
+
+
+def _mixed_agent_lines() -> list[dict]:
+    """Calls, results, text and a timestamp-less line: every Event shape the
+    agent path reads."""
+    return [
+        _j_text(T),
+        _j_call(T + 1 * MIN, "t1"),
+        _j_result(T + 3 * MIN, "t1"),
+        {"type": "assistant", "isSidechain": True,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "no ts"}]}},
+        _j_call(T + 4 * MIN, "t2", name="Read", inp={"file_path": "/x"}),
+        _j_result(T + 5 * MIN, "t2"),
+        _j_text(T + 9 * MIN),
+    ]
+
+
+def test_events_from_records_equals_read_events(tmp_path):
+    from scripts.agents.claude.events import (
+        events_from_records,
+        parse_transcript_records,
+        read_events,
+    )
+
+    main = _session(tmp_path)
+    _agent(main, "agent-a.jsonl", _mixed_agent_lines())
+    sub = main.parent / main.stem / "subagents" / "agent-a.jsonl"
+    got = events_from_records(parse_transcript_records(sub), sub.stem)
+    assert got == read_events(sub)
+    assert len(got) > 0
+
+
+def test_transcript_agents_records_opens_no_files(tmp_path, monkeypatch):
+    import builtins
+
+    import scripts.time_accounting as ta
+    from scripts.agents.claude.events import load_subagent_records
+
+    main = _session(tmp_path)
+    _agent(main, "agent-a.jsonl", _mixed_agent_lines())
+    _agent(main, "workflows/wf_x/agent-b.jsonl", _texts(T, 3))
+    expected = ta._transcript_agents(main)
+    records = load_subagent_records(main)
+
+    def boom(*a, **k):
+        raise AssertionError("subagent file opened despite records")
+
+    monkeypatch.setattr(ta, "read_events", boom)
+    monkeypatch.setattr(Path, "open", boom)
+    monkeypatch.setattr(Path, "read_text", boom)
+    monkeypatch.setattr(builtins, "open", boom)
+    assert ta._transcript_agents(main, records=records) == expected
+    assert len(expected) == 2
+    acc = account_agents([], main, T, subagent_records=records)
+    assert acc.agents == tuple(sorted(
+        expected, key=lambda a: (a.start_ms, a.end_ms, a.agent_type)))
+
+
+def test_agent_type_still_from_path(tmp_path):
+    import scripts.time_accounting as ta
+
+    main = _session(tmp_path)
+    root = main.parent / main.stem / "subagents"
+    lines = [json.loads(json.dumps(x)) for x in _texts(T, 3)]
+    # Same record content under both keys; neither file exists on disk.
+    records = {
+        root / "workflows" / "wf_x" / "agent-a.jsonl": lines,
+        root / "agent-b.jsonl": lines,
+    }
+    agents = ta._transcript_agents(main, records=records)
+    assert [a.agent_type for a in agents] == ["workflow", "subagent"]
+
+
+def test_build_time_accounting_records_matches_disk(tmp_path):
+    from scripts.agents.claude.events import load_subagent_records, read_events
+    from scripts.time_accounting import build_time_accounting
+
+    main = _session(tmp_path, [_j_prompt(T), _j_prompt(T + 20 * MIN)])
+    _agent(main, "agent-a.jsonl", _mixed_agent_lines())
+    _agent(main, "workflows/wf_x/agent-b.jsonl", _texts(T + 2 * MIN, 6))
+    events = read_events(main)
+    window = (T, T + 20 * MIN)
+    disk = build_time_accounting(events, window, main, "available")
+    recs = build_time_accounting(
+        events, window, main, "available", subagent_records=load_subagent_records(main)
+    )
+    assert recs.to_wire() == disk.to_wire()
+    assert disk.agents_count == 2

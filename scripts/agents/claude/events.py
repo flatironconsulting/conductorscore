@@ -627,6 +627,13 @@ def read_events(jsonl_path: Path) -> list[Event]:
     discarded entirely; only structural metadata survives. Malformed lines
     are silently skipped.
     """
+    return events_from_records(_parse_records(jsonl_path), jsonl_path.stem)
+
+
+def events_from_records(records: list[dict], session_id: str) -> list[Event]:
+    """Build ``read_events``' Events from already-parsed JSON-object lines
+    (``_parse_records`` / ``parse_transcript_records`` output), in file
+    order. Opens no file."""
     # Late import to avoid a cycle: plan_signals imports Event from us.
     from scripts.plan_signals import (
         is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
@@ -635,9 +642,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
         is_structured_prompt as _plan_signals_is_structured_prompt,
     )
 
-    session_id = jsonl_path.stem
     events: list[Event] = []
-    records = _parse_records(jsonl_path)
     # Usage is attributed once per API message, to the first event of its
     # first line, whatever the block type (thinking / tool_use / text).
     folded = _fold_message_usage(records)
@@ -1044,6 +1049,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 __all__ = [
     "load_subagent_panels",
     "subagent_usage_events",
+    "events_from_records",
     "read_events",
     "read_events_and_text",
 ]
