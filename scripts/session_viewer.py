@@ -46,7 +46,6 @@ from pathlib import Path
 from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.claude.events import (
     SubagentRecords,
-    load_subagent_records,
     parse_transcript_records,
 )
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
@@ -61,7 +60,9 @@ from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.events import EventKind, _strip_synthetic_content, read_events
 from scripts.time_accounting import (
     Segment,
+    SubagentDigest,
     account_agents,
+    digest_subagent_transcripts,
     grid_seconds,
     partition_main_thread,
 )
@@ -72,7 +73,6 @@ from scripts.turn_classifier import (
     Turn,
     parallel_subagent_intervals,
     segment_turns,
-    subagent_activity_from_disk,
 )
 
 
@@ -735,6 +735,27 @@ def _parse_subagent_messages(
     return messages
 
 
+def _subagent_panel(
+    sub_jsonl: Path, records: list[dict] | None = None
+) -> tuple[str, tuple[str, list[TimelineMessage]]] | None:
+    """``(parent_tool_use_id, (description, sub_messages))`` for ONE subagent
+    transcript, or None when its ``agent-<sid>.meta.json`` is missing or has
+    no ``toolUseId``. ``records`` (its ``parse_transcript_records`` output)
+    replaces the ``.jsonl`` read."""
+    meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    tool_use_id = meta.get("toolUseId")
+    description = meta.get("description") or meta.get("agentType") or "subagent"
+    if not isinstance(tool_use_id, str):
+        return None
+    return tool_use_id, (description, _parse_subagent_messages(sub_jsonl, records))
+
+
 def _load_subagent_panels(
     jsonl_path: Path,
     *,
@@ -745,25 +766,16 @@ def _load_subagent_panels(
     Reads each ``agent-<sid>.meta.json`` to discover the parent's
     ``toolUseId`` and the subagent's ``description``, then parses the
     matching ``.jsonl`` (or takes it from ``records``,
-    ``load_subagent_records`` output).
+    ``load_subagent_records`` output). See ``_subagent_panel``;
+    ``render_session`` builds the same dict one file at a time.
     """
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
     for sub_jsonl in subagent_transcripts(jsonl_path):
-        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(meta, dict):
-            continue
-        tool_use_id = meta.get("toolUseId")
-        description = meta.get("description") or meta.get("agentType") or "subagent"
-        if not isinstance(tool_use_id, str):
-            continue
-        msgs = _parse_subagent_messages(
+        panel = _subagent_panel(
             sub_jsonl, records.get(sub_jsonl, []) if records is not None else None
         )
-        panels[tool_use_id] = (description, msgs)
+        if panel is not None:
+            panels[panel[0]] = panel[1]
     return panels
 
 
@@ -1893,12 +1905,16 @@ def _time_accounting_section(
     jsonl_path: Path,
     events: list,
     subagent_records: SubagentRecords | None = None,
+    *,
+    subagent_digest: SubagentDigest | None = None,
 ) -> str:
     """The v2 section, or "" if building it raises: a bug in time accounting
     v2 must never cost the user the rest of the viewer page (as Ruling 22
     guards the scan). The note names the exception type only."""
     try:
-        return _build_time_accounting_section(jsonl_path, events, subagent_records)
+        return _build_time_accounting_section(
+            jsonl_path, events, subagent_records, subagent_digest=subagent_digest
+        )
     except Exception as e:  # noqa: BLE001 — the page must survive any v2 bug
         print(
             f"session viewer: time accounting section skipped ({type(e).__name__}).",
@@ -1911,6 +1927,8 @@ def _build_time_accounting_section(
     jsonl_path: Path,
     events: list,
     subagent_records: SubagentRecords | None = None,
+    *,
+    subagent_digest: SubagentDigest | None = None,
 ) -> str:
     """Partition the session (window = first..last positive event timestamp,
     as the scanner bounds it) and render the v2 section."""
@@ -1926,6 +1944,7 @@ def _build_time_accounting_section(
         jsonl_path if claude else None,
         window[1],
         subagent_records=subagent_records,
+        subagent_digest=subagent_digest,
     )
     return _time_accounting_html(grid_seconds(segments, agents), segments)
 
@@ -2168,12 +2187,22 @@ def render_session(
     turns = _split_turns_at_idle(turns, events, aborted_ids)
     hitl_streaks, afk_streaks = derive_streaks(turns)
 
-    # Each subagent transcript is parsed once (plan 035); the activity spans,
-    # the panels and the v2 agent accounting all read these records. They
-    # live only for this render.
-    subagent_records = load_subagent_records(jsonl_path)
-    # Subagent spans from disk (the route stages them next to the input JSONL).
-    activity = subagent_activity_from_disk(jsonl_path, records=subagent_records)
+    # Each subagent transcript is parsed once (plan 035), one file at a time
+    # (Ruling 12): the activity spans, the panels and the v2 agent accounting
+    # each keep only their per-file result, and the records are dropped
+    # before the next file. The subagent files are staged next to the input
+    # JSONL by the route.
+    subagent_panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
+
+    def _take_panel(sub_jsonl: Path, records: list[dict]) -> None:
+        panel = _subagent_panel(sub_jsonl, records)
+        if panel is not None:
+            subagent_panels[panel[0]] = panel[1]
+
+    subagents = digest_subagent_transcripts(
+        jsonl_path, usage=False, on_file=_take_panel
+    )
+    activity = subagents.activity
     subagent_spans = {sid: (a.start_ts_ms, a.end_ts_ms) for sid, a in activity.items()}
     parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
     # The wire's subagent credit (per-agent sum of agent active time; the
@@ -2184,7 +2213,6 @@ def render_session(
     )
     main_plus_sub_seconds = sum((hi - lo) / 1000.0 for lo, hi in parallel_intervals)
 
-    subagent_panels = _load_subagent_panels(jsonl_path, records=subagent_records)
     if redact:
         subagent_panels = _redact_panels(subagent_panels)
 
@@ -2203,7 +2231,7 @@ def render_session(
     model = replace(
         model,
         time_accounting_html=_time_accounting_section(
-            jsonl_path, events, subagent_records
+            jsonl_path, events, subagent_digest=subagents
         ),
     )
 

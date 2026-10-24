@@ -126,11 +126,19 @@ def _mixed_layout(tmp_path: Path) -> Path:
 def test_usage_events_from_records_equal_path_version(tmp_path):
     from scripts.agents.claude.events import subagent_usage_events
 
+    from scripts.agents.claude.events import _parse_records, file_usage_events
+
     main = _mixed_layout(tmp_path)
     by_path = subagent_usage_events(main)
     by_records = subagent_usage_events(main, records=load_subagent_records(main))
+    # Reference: the pre-035 reader, a raw-line '"usage"' substring prefilter.
+    by_raw_prefilter = [
+        ev
+        for sub in subagent_transcripts(main)
+        for ev in file_usage_events(_parse_records(sub, prefilter='"usage"'), main.stem)
+    ]
     assert len(by_path) >= 5
-    assert by_records == by_path
+    assert by_records == by_path == by_raw_prefilter
 
 
 def test_usage_events_records_opens_no_files(tmp_path, monkeypatch):

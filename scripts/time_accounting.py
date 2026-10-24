@@ -58,12 +58,14 @@ import statistics
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.claude.events import (
     SubagentRecords,
     events_from_records,
-    read_events,
+    file_usage_events,
+    parse_transcript_records,
 )
 from scripts.core.normalized import Event, EventKind
 from scripts.core.thresholds import (
@@ -77,7 +79,9 @@ from scripts.core.thresholds import (
 from scripts.turn_classifier import (
     ASK_USER_QUESTION_TOOL,
     DISPATCH_TOOLS,
+    AgentActivity,
     Turn,
+    _agent_activity_from_records,
     segment_turns,
 )
 
@@ -640,36 +644,113 @@ def _agent_from_events(agent_type: str, events: list[Event]) -> AgentSummary | N
     )
 
 
+def _agent_type(jsonl_path: Path, path: Path) -> str:
+    """``workflow`` for a transcript under ``subagents/workflows/``, else
+    ``subagent``: the agent type always comes from the path, never the
+    records."""
+    root = jsonl_path.parent / jsonl_path.stem / "subagents"
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        parts = ()
+    return "workflow" if parts[:1] == ("workflows",) else "subagent"
+
+
+def file_agent_summary(
+    jsonl_path: Path, path: Path, records: list[dict]
+) -> AgentSummary | None:
+    """The R8 summary of ONE subagent / Workflow transcript ``path`` of the
+    session ``jsonl_path``, from its ``parse_transcript_records`` output."""
+    events = events_from_records(records, path.stem)
+    return _agent_from_events(_agent_type(Path(jsonl_path), path), events)
+
+
 def _transcript_agents(
     jsonl_path: Path, *, records: SubagentRecords | None = None
 ) -> list[AgentSummary]:
     """Every subagent / Workflow transcript of the session (R8).
 
     With ``records`` (from ``load_subagent_records``) no subagent file is
-    opened: each path's records become Events via ``events_from_records``.
-    The agent type always comes from the path (key), never the records.
+    opened; without, each file is parsed by ``parse_transcript_records``
+    (newline-only split, as the scanner reads it). Each file goes through
+    ``file_agent_summary``.
     """
     jsonl_path = Path(jsonl_path)
-    root = jsonl_path.parent / jsonl_path.stem / "subagents"
     out: list[AgentSummary] = []
     paths = subagent_transcripts(jsonl_path) if records is None else list(records)
     for path in paths:
-        try:
-            parts = path.relative_to(root).parts
-        except ValueError:
-            parts = ()
-        agent_type = "workflow" if parts[:1] == ("workflows",) else "subagent"
-        if records is not None:
-            events = events_from_records(records[path], path.stem)
-        else:
-            try:
-                events = read_events(path)
-            except OSError:
-                continue
-        summary = _agent_from_events(agent_type, events)
+        recs = parse_transcript_records(path) if records is None else records[path]
+        summary = file_agent_summary(jsonl_path, path, recs)
         if summary is not None:
             out.append(summary)
     return out
+
+
+@dataclass
+class SubagentDigest:
+    """The small per-file results of one session's subagent transcripts.
+
+    Plan 035 parses each subagent / Workflow transcript once and feeds its
+    records to every consumer; Ruling 12 bounds the peak memory by the
+    largest single file. So ``digest_subagent_transcripts`` parses one file,
+    appends each consumer's per-file result here, and drops the records
+    before the next file. All lists and dicts are in ``subagent_transcripts``
+    order, exactly as the session-wide readers produce them:
+
+    - ``usage_events``: ``subagent_usage_events`` (empty when not asked for);
+    - ``activity``: ``subagent_activity_from_disk`` (legacy, keyed by stem);
+    - ``agents``: ``_transcript_agents`` (v2 per-agent summaries).
+
+    The cross-file steps (span merging, union and peak concurrency) still
+    run in the consumers over these results. A v2 failure on a file is kept
+    in ``agents_error`` and re-raised by ``transcript_agents()`` inside the
+    v2 guard, so it never costs the session its legacy fields.
+    """
+
+    usage_events: list[Event] = field(default_factory=list)
+    activity: dict[str, AgentActivity] = field(default_factory=dict)
+    agents: list[AgentSummary] = field(default_factory=list)
+    agents_error: Exception | None = None
+
+    def transcript_agents(self) -> list[AgentSummary]:
+        if self.agents_error is not None:
+            raise self.agents_error
+        return list(self.agents)
+
+
+def digest_subagent_transcripts(
+    jsonl_path: Path,
+    session_id: str | None = None,
+    *,
+    usage: bool = True,
+    on_file: Callable[[Path, list[dict]], None] | None = None,
+) -> SubagentDigest:
+    """Parse each subagent transcript of the session ONCE, one file at a
+    time, into a ``SubagentDigest`` (see there). ``usage=False`` skips the
+    token events; ``on_file(path, records)`` lets a caller (the viewer's
+    panels) take its own per-file piece while the records are alive."""
+    jsonl_path = Path(jsonl_path)
+    sid = session_id or jsonl_path.stem
+    digest = SubagentDigest()
+    for path in subagent_transcripts(jsonl_path):
+        records = parse_transcript_records(path)
+        if usage:
+            digest.usage_events.extend(file_usage_events(records, sid))
+        act = _agent_activity_from_records(records)
+        if act is not None:
+            digest.activity[path.stem] = act
+        if digest.agents_error is None:
+            try:
+                summary = file_agent_summary(jsonl_path, path, records)
+            except Exception as e:  # noqa: BLE001 — re-raised in the v2 guard
+                digest.agents_error = e
+            else:
+                if summary is not None:
+                    digest.agents.append(summary)
+        if on_file is not None:
+            on_file(path, records)
+        del records
+    return digest
 
 
 def _background_shells(main_events: list[Event], window_end_ms: int) -> list[AgentSummary]:
@@ -743,6 +824,7 @@ def account_agents(
     main_window_end_ms: int,
     *,
     subagent_records: SubagentRecords | None = None,
+    subagent_digest: SubagentDigest | None = None,
 ) -> AgentAccounting:
     """Account every parallel agent of one session (R8, R9, R10).
 
@@ -750,14 +832,16 @@ def account_agents(
     ``subagents/`` tree (none when ``jsonl_path`` is None); background
     shells from ``main_events``. Agent-seconds are summed by the caller over
     ``agents``; ``union_s`` and ``max_concurrent`` cover their active
-    intervals. ``subagent_records`` (``load_subagent_records``) replaces the
-    subagent file reads.
+    intervals. ``subagent_digest`` (``digest_subagent_transcripts``, the
+    production path) or ``subagent_records`` (``load_subagent_records``)
+    replaces the subagent file reads.
     """
-    agents = (
-        _transcript_agents(jsonl_path, records=subagent_records)
-        if jsonl_path is not None
-        else []
-    )
+    if jsonl_path is None:
+        agents: list[AgentSummary] = []
+    elif subagent_digest is not None:
+        agents = subagent_digest.transcript_agents()
+    else:
+        agents = _transcript_agents(jsonl_path, records=subagent_records)
     agents += _background_shells(main_events, main_window_end_ms)
     agents.sort(key=lambda a: (a.start_ms, a.end_ms, a.agent_type))
     union, peak = _union_and_peak(agents)
@@ -778,8 +862,10 @@ __all__ = [
     "Piece",
     "Segment",
     "ToolSpan",
+    "SubagentDigest",
     "account_agents",
     "build_time_accounting",
+    "digest_subagent_transcripts",
     "classify_tool_calls",
     "grid_seconds",
     "identity_violations",
@@ -1236,6 +1322,7 @@ def build_time_accounting(
     permission_signal: str,
     *,
     subagent_records: SubagentRecords | None = None,
+    subagent_digest: SubagentDigest | None = None,
 ) -> TimeAccounting:
     """Build one session's wire object from ``grid_seconds``, rounding only.
 
@@ -1243,14 +1330,18 @@ def build_time_accounting(
     ended_at_ms)``; ``jsonl_path`` locates the Claude subagent / Workflow
     transcripts (None for none). ``grid_seconds`` runs ``longest_run_seconds``
     on the same segments and agents, so its ``longest_run_s`` is used as is.
-    ``subagent_records`` (``load_subagent_records``) replaces the subagent
-    file reads.
+    ``subagent_digest`` / ``subagent_records`` replace the subagent file
+    reads (see ``account_agents``).
     """
     if permission_signal not in PERMISSION_SIGNALS:
         raise ValueError(f"permission_signal must be one of {PERMISSION_SIGNALS}")
     segments = partition_main_thread(events, window)
     agents = account_agents(
-        events, jsonl_path, window[1], subagent_records=subagent_records
+        events,
+        jsonl_path,
+        window[1],
+        subagent_records=subagent_records,
+        subagent_digest=subagent_digest,
     )
     g = grid_seconds(segments, agents)
     ia, bm, ag, bt = g["interactive"], g["background_main"], g["agents"], g["between_turns"]

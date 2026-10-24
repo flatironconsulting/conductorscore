@@ -714,6 +714,7 @@ def compute_turn_aggregates(
     jsonl_path: Path | None = None,
     *,
     subagent_records: SubagentRecords | None = None,
+    subagent_activity: dict[str, AgentActivity] | None = None,
 ) -> TurnAggregates:
     """Compute the live card's leverage inputs.
 
@@ -726,6 +727,8 @@ def compute_turn_aggregates(
     When ``jsonl_path`` is provided, the on-disk subagent transcripts
     next to it are read and folded into ``afk_parallel_minutes_foreground``.
     Production scanner MUST pass it; unit tests can omit it.
+    ``subagent_activity`` (``SubagentDigest.activity``, the scanner's
+    one-file-at-a-time parse) or ``subagent_records`` replaces those reads.
     """
     turns = segment_turns(events)
     hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
@@ -733,11 +736,12 @@ def compute_turn_aggregates(
     hitl_tool_s = sum(t.tool_seconds for t in turns if t.label == "HITL")
     afk_tool_s = sum(t.tool_seconds for t in turns if t.label == "AFK")
     afk_dispatch_s = sum(t.dispatch_seconds for t in turns if t.label == "AFK")
-    activity = (
-        subagent_activity_from_disk(jsonl_path, records=subagent_records)
-        if jsonl_path
-        else None
-    )
+    if not jsonl_path:
+        activity = None
+    elif subagent_activity is not None:
+        activity = subagent_activity
+    else:
+        activity = subagent_activity_from_disk(jsonl_path, records=subagent_records)
     parallel_s = afk_parallel_subagent_seconds(turns, events, extra_activity=activity)
     streaks = top_afk_streaks(turns, n=5)
     streak_s = streaks[0].active_seconds if streaks else 0.0

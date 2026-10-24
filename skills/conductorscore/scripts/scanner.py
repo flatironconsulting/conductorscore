@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import TYPE_CHECKING, cast
 
 from scripts.agents import consent as consent_mod
-from scripts.agents.claude.events import (
-    MainThreadEvents,
-    SubagentRecords,
-    load_subagent_records,
-    subagent_usage_events,
-)
+from scripts.agents.claude.events import MainThreadEvents
 from scripts.agents.registry import adapters_for
 from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
@@ -47,7 +43,12 @@ from scripts.plan_signals import (
 from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
-from scripts.time_accounting import TimeAccounting, build_time_accounting
+from scripts.time_accounting import (
+    SubagentDigest,
+    TimeAccounting,
+    build_time_accounting,
+    digest_subagent_transcripts,
+)
 from scripts.tool_counter import (
     SessionToolFields,
     ToolCounts,
@@ -58,6 +59,10 @@ from scripts.tool_counter import (
     count_hitl_mcp_invocations_by_name,
     count_tools,
 )
+
+if TYPE_CHECKING:
+    from scripts.agents.base import AgentAdapter
+    from scripts.agents.claude import ClaudeAdapter
 
 PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
@@ -218,7 +223,7 @@ def _safe_time_accounting(
     session_id,
     provider="claude",
     *,
-    subagent_records: SubagentRecords | None = None,
+    subagent_digest: SubagentDigest | None = None,
 ):
     """``build_time_accounting``, or None (with one warning per scan) when it
     raises. The warning names the exception type and session id only.
@@ -233,7 +238,7 @@ def _safe_time_accounting(
             window,
             jsonl_path=jsonl_path,
             permission_signal=_permission_signal(provider),
-            subagent_records=subagent_records,
+            subagent_digest=subagent_digest,
         )
     except Exception as e:  # noqa: BLE001 — dual reporting must survive any bug
         if not _time_accounting_warned:
@@ -270,23 +275,26 @@ def _build_per_session(
             artifact history keyed by project_root, built once in Pass 1.
     """
     # Plan 035: each subagent transcript is parsed ONCE per Claude session,
-    # here, and the records feed all three readers: the subagent tokens, the
-    # legacy subagent activity and the v2 agent accounting. The records live
-    # only for this call: they are never cached or returned. Codex/Cursor
-    # have no subagent transcript tree.
+    # here, and its records feed all three readers: the subagent tokens, the
+    # legacy subagent activity and the v2 agent accounting. Ruling 12: the
+    # files are parsed one at a time and only each reader's small per-file
+    # result is kept (``SubagentDigest``), so the peak memory is bounded by
+    # the largest single file, not the whole tree. Nothing is cached or
+    # returned. Codex/Cursor have no subagent transcript tree.
     #
     # Token contract: this function adds the subagent USAGE events ONLY when
     # ``events`` is a ``MainThreadEvents`` (``_read_session``'s Claude output,
     # ``read_events_and_text(..., include_subagent_usage=False)``). Any other
     # list (``read_events_and_text`` defaults, hand-built events) is taken as
     # complete, so the tokens are never counted twice.
-    subagent_records: SubagentRecords | None = None
+    subagents: SubagentDigest | None = None
     if provider == "claude" and s.jsonl_path is not None:
-        subagent_records = load_subagent_records(s.jsonl_path)
-        if isinstance(events, MainThreadEvents):
-            events = events + subagent_usage_events(
-                s.jsonl_path, s.jsonl_path.stem, records=subagent_records
-            )
+        main_only = isinstance(events, MainThreadEvents)
+        subagents = digest_subagent_transcripts(
+            s.jsonl_path, s.jsonl_path.stem, usage=main_only
+        )
+        if main_only:
+            events = events + subagents.usage_events
 
     stf = SessionToolFields.from_tool_counts(tc)
 
@@ -326,10 +334,12 @@ def _build_per_session(
             s.jsonl_path,
             s.session_id,
             provider,
-            subagent_records=subagent_records,
+            subagent_digest=subagents,
         )
         agg = compute_turn_aggregates(
-            events, jsonl_path=s.jsonl_path, subagent_records=subagent_records
+            events,
+            jsonl_path=s.jsonl_path,
+            subagent_activity=subagents.activity if subagents is not None else None,
         )
         hitl_minutes = agg.hitl_minutes
         afk_minutes = agg.afk_minutes
@@ -534,7 +544,9 @@ def _build_per_session(
     )
 
 
-def _read_session(agent, s) -> tuple[list, dict, "ToolCounts | None"]:
+def _read_session(
+    agent: "AgentAdapter", s
+) -> tuple[list, dict, "ToolCounts | None"]:
     """Parse one session's transcript into ``(events, text_map, tool_counts)``.
 
     Each adapter parses its own transcript format into the shared normalized
@@ -554,7 +566,11 @@ def _read_session(agent, s) -> tuple[list, dict, "ToolCounts | None"]:
     if s.jsonl_path is None:
         return [], {}, None
     if agent.agent_id == "claude":
-        events, text_map = agent.read_events_and_text(
+        # ``include_subagent_usage`` is a Claude-only keyword: it is not on the
+        # ``AgentAdapter`` port (Codex/Cursor have no subagent tree), so narrow
+        # to the Claude adapter, which the agent_id guarantees.
+        claude = cast("ClaudeAdapter", agent)
+        events, text_map = claude.read_events_and_text(
             s.jsonl_path, include_subagent_usage=False
         )
         tc = count_tools(s.jsonl_path)

@@ -538,9 +538,6 @@ def _with_usage(ev: Event, vec: tuple[int, int, int, int]) -> Event:
     )
 
 
-_USAGE_PREFILTER = '"usage"'
-
-
 def _is_usage_token(s: str) -> bool:
     # In a JSON line, '"usage"' ends a string token (the closing quote follows
     # "e", so it is unescaped). The opening quote is either that token's own
@@ -576,45 +573,52 @@ def subagent_usage_events(
     One event per API message (max-folded usage) plus non-``message``
     iterations; lines without an id fall back to per-line usage.
 
-    With ``records`` (from ``load_subagent_records``) no file is opened; the
-    ``"usage"`` line prefilter is applied per record via ``_has_usage_token``
-    (it decides which line of a message is seen first, hence the stamped
-    timestamp)."""
+    With ``records`` (from ``load_subagent_records``) no file is opened;
+    without, each file is parsed by ``parse_transcript_records`` (newline-only
+    split, as the scanner reads it). Either way the events come out file by
+    file, in ``subagent_transcripts`` order (``file_usage_events``)."""
     jsonl_path = Path(jsonl_path)
     sid = session_id or jsonl_path.stem
+    per_file = (
+        (parse_transcript_records(sub) for sub in subagent_transcripts(jsonl_path))
+        if records is None
+        else records.values()
+    )
     out: list[Event] = []
-    if records is None:
-        per_file = (
-            _parse_records(sub, prefilter=_USAGE_PREFILTER)
-            for sub in subagent_transcripts(jsonl_path)
-        )
-    else:
-        per_file = (
-            [d for d in recs if _has_usage_token(d)] for recs in records.values()
-        )
-    for file_records in per_file:
-        folded = _fold_message_usage(file_records)
-        done: set[tuple[str, str]] = set()
-        for d in file_records:
-            message = d.get("message") if isinstance(d.get("message"), dict) else None
-            if not _is_assistant_record(d, message):
+    for recs in per_file:
+        out.extend(file_usage_events(recs, sid))
+    return out
+
+
+def file_usage_events(records: list[dict], session_id: str) -> list[Event]:
+    """``subagent_usage_events`` for ONE subagent transcript, from its
+    ``parse_transcript_records`` output. The ``"usage"`` line prefilter is
+    applied per record via ``_has_usage_token`` (it decides which line of a
+    message is seen first, hence the stamped timestamp)."""
+    file_records = [d for d in records if _has_usage_token(d)]
+    out: list[Event] = []
+    folded = _fold_message_usage(file_records)
+    done: set[tuple[str, str]] = set()
+    for d in file_records:
+        message = d.get("message") if isinstance(d.get("message"), dict) else None
+        if not _is_assistant_record(d, message):
+            continue
+        ts_ms = _parse_ts_ms(d)
+        if ts_ms is None:
+            continue
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        key = _message_key(d, message)
+        if key is not None:
+            if key in done:
                 continue
-            ts_ms = _parse_ts_ms(d)
-            if ts_ms is None:
-                continue
-            model = message.get("model") if isinstance(message.get("model"), str) else None
-            key = _message_key(d, message)
-            if key is not None:
-                if key in done:
-                    continue
-                done.add(key)
-                vec, its = folded[key].vec, folded[key].iterations
-            else:
-                vec, its = _usage_vector(message.get("usage")), _extra_iterations(message.get("usage"))
-            if any(vec):
-                out.append(_usage_event(sid, ts_ms, model, vec, is_sidechain=True))
-            for it_model, it_vec in its:
-                out.append(_usage_event(sid, ts_ms, it_model or model, it_vec, is_sidechain=True))
+            done.add(key)
+            vec, its = folded[key].vec, folded[key].iterations
+        else:
+            vec, its = _usage_vector(message.get("usage")), _extra_iterations(message.get("usage"))
+        if any(vec):
+            out.append(_usage_event(session_id, ts_ms, model, vec, is_sidechain=True))
+        for it_model, it_vec in its:
+            out.append(_usage_event(session_id, ts_ms, it_model or model, it_vec, is_sidechain=True))
     return out
 
 
@@ -1072,6 +1076,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 __all__ = [
     "MainThreadEvents",
     "load_subagent_panels",
+    "file_usage_events",
     "subagent_usage_events",
     "events_from_records",
     "read_events",

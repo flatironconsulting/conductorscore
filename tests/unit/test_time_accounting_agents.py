@@ -284,7 +284,7 @@ def test_transcript_agents_records_opens_no_files(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("subagent file opened despite records")
 
-    monkeypatch.setattr(ta, "read_events", boom)
+    monkeypatch.setattr(ta, "parse_transcript_records", boom)
     monkeypatch.setattr(Path, "open", boom)
     monkeypatch.setattr(Path, "read_text", boom)
     monkeypatch.setattr(builtins, "open", boom)
