@@ -464,6 +464,25 @@ def _parse_records(jsonl_path: Path, prefilter: str | None = None) -> list[dict]
     return out
 
 
+SubagentRecords = dict[Path, list[dict]]  # path -> parsed JSON-object lines, in file order
+
+
+def parse_transcript_records(path: Path) -> list[dict]:
+    """Every line of ``path`` that JSON-decodes to a dict, in file order.
+
+    A deliberate superset: no timestamp filter and no substring prefilter, so
+    each consumer applies its own filter and stays byte-identical. Blank,
+    invalid and truncated lines are skipped; an unreadable file gives ``[]``.
+    """
+    return _parse_records(path)
+
+
+def load_subagent_records(jsonl_path: Path) -> SubagentRecords:
+    """Parse each of a session's subagent transcripts once, keyed by path, in
+    ``subagent_transcripts`` order."""
+    return {p: parse_transcript_records(p) for p in subagent_transcripts(jsonl_path)}
+
+
 def _usage_event(
     session_id: str,
     ts_ms: int,
