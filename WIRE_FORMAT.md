@@ -1072,8 +1072,11 @@ into the Leverage table's rows and columns (plan 034). It is reported
 `afk_max_streak_minutes`, `afk_intervals`, `top_afk_streaks`), which keep
 their current values and semantics during dual reporting.
 
-Emitted for every Claude session with a foreground window. Absent for
-Cron-only sessions and (until their fallbacks land) Codex / Cursor sessions.
+Emitted for every session with a foreground window, whatever the provider.
+Absent only for Cron-only sessions (and when building it failed). Codex and
+Cursor sessions carry `permission_signal: "not_available"` (neither records
+permission grants, so `idle_by_reason.permission_wait` is zero) and
+`agents.count: 0` (agent accounting reads Claude's `subagents/` tree).
 **Absent means v1:** the server MUST treat a session without the object as
 legacy-only and render the old layout; it MUST NOT read absence as zero.
 Not covered by `session_chain`.

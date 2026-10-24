@@ -201,13 +201,20 @@ def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int
 _time_accounting_warned = False
 
 
-def _safe_time_accounting(events, window, jsonl_path, session_id):
+def _safe_time_accounting(events, window, jsonl_path, session_id, provider="claude"):
     """``build_time_accounting``, or None (with one warning per scan) when it
-    raises. The warning names the exception type and session id only."""
+    raises. The warning names the exception type and session id only.
+
+    Only Claude records permission grants; Codex persists declines but not
+    approval requests, and Cursor records neither, so both are
+    ``not_available`` and R4 classifies nothing as a permission wait."""
     global _time_accounting_warned
     try:
         return build_time_accounting(
-            events, window, jsonl_path=jsonl_path, permission_signal="available"
+            events,
+            window,
+            jsonl_path=jsonl_path,
+            permission_signal="available" if provider == "claude" else "not_available",
         )
     except Exception as e:  # noqa: BLE001 — dual reporting must survive any bug
         if not _time_accounting_warned:
@@ -270,13 +277,12 @@ def _build_per_session(
     time_accounting = None
 
     if window is not None:
-        # Time accounting v2 (plan 034), over the #10 bounds above. Claude
-        # only for now: Codex/Cursor get their permission_signal and
-        # fallbacks in Task 9.
-        if provider == "claude":
-            time_accounting = _safe_time_accounting(
-                events, (started_at_ms, ended_at_ms), s.jsonl_path, s.session_id
-            )
+        # Time accounting v2 (plan 034), over the #10 bounds above, for every
+        # provider. Codex/Cursor have no subagent transcript tree, so they
+        # report zero agents.
+        time_accounting = _safe_time_accounting(
+            events, (started_at_ms, ended_at_ms), s.jsonl_path, s.session_id, provider
+        )
         agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
         hitl_minutes = agg.hitl_minutes
         afk_minutes = agg.afk_minutes
