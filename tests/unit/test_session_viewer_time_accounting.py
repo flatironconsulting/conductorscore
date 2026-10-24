@@ -309,3 +309,28 @@ def test_viewer_grid_matches_partition(tmp_path):
     assert m
     assert float(m.group(1)) == pytest.approx(
         col("background", "active") / col("interactive", "active"), rel=1e-3)
+
+
+def test_viewer_survives_a_time_accounting_failure(tmp_path, monkeypatch, capsys):
+    """A bug in the v2 section costs only that section, never the page."""
+    import scripts.session_viewer as sv
+
+    path = _write_session(tmp_path)
+    good = tmp_path / "good.html"
+    render_session(path, good)
+    good_page = good.read_text(encoding="utf-8")
+
+    def boom(*a, **k):
+        raise RuntimeError("secret transcript text")
+
+    monkeypatch.setattr(sv, "partition_main_thread", boom)
+    out = tmp_path / "out.html"
+    render_session(path, out)
+    page = out.read_text(encoding="utf-8")
+    assert 'class="time-accounting"' not in page
+    assert 'class="time-accounting"' in good_page
+    # The rest of the page still renders.
+    assert len(page) > 1000 and page.rstrip().endswith("</html>")
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err
+    assert "secret transcript text" not in err and str(tmp_path) not in err

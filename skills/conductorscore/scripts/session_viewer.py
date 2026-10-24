@@ -1853,6 +1853,20 @@ def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
 
 
 def _time_accounting_section(jsonl_path: Path, events: list) -> str:
+    """The v2 section, or "" if building it raises: a bug in time accounting
+    v2 must never cost the user the rest of the viewer page (as Ruling 22
+    guards the scan). The note names the exception type only."""
+    try:
+        return _build_time_accounting_section(jsonl_path, events)
+    except Exception as e:  # noqa: BLE001 — the page must survive any v2 bug
+        print(
+            f"session viewer: time accounting section skipped ({type(e).__name__}).",
+            file=sys.stderr,
+        )
+        return ""
+
+
+def _build_time_accounting_section(jsonl_path: Path, events: list) -> str:
     """Partition the session (window = first..last positive event timestamp,
     as the scanner bounds it) and render the v2 section."""
     ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
