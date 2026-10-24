@@ -712,3 +712,93 @@ __all__ = [
     "partition_main_thread",
     "tool_pieces_union",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Longest run (decision 11)
+# ---------------------------------------------------------------------------
+
+_RUN_BRIDGE_KINDS: frozenset[Activity | IdleReason] = frozenset(
+    {IdleReason.DISPATCH_WAIT, IdleReason.TOOL_OVER_CAP, IdleReason.POLLING}
+)
+
+
+def _merge_intervals(items: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for s, e in sorted(items):
+        if e <= s:
+            continue
+        if out and s <= out[-1][1]:
+            if e > out[-1][1]:
+                out[-1] = (out[-1][0], e)
+        else:
+            out.append((s, e))
+    return out
+
+
+def _subtract(items: list[tuple[int, int]], cuts: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """items minus cuts; both merged and sorted."""
+    out: list[tuple[int, int]] = []
+    for s, e in items:
+        cur = s
+        for cs, ce in cuts:
+            if ce <= cur:
+                continue
+            if cs >= e:
+                break
+            if cs > cur:
+                out.append((cur, cs))
+            cur = max(cur, ce)
+        if cur < e:
+            out.append((cur, e))
+    return out
+
+
+def longest_run_seconds(segments: list[Segment], agents: AgentAccounting) -> float:
+    """Longest unattended stretch of system activity, in seconds.
+
+    Timeline = union of Background MODEL/TOOL segments and every agent's
+    active intervals, minus Interactive segments (which also cut runs).
+    A gap <= K_BRIDGE_IDLE_SECONDS bridges. A longer gap bridges only if no
+    continuous stretch of it longer than that is outside main-thread
+    DISPATCH_WAIT / TOOL_OVER_CAP / POLLING (so NO_ACTIVITY, PERMISSION_WAIT,
+    BETWEEN and uncovered time break). Length counts timeline minutes only.
+    """
+    interactive = _merge_intervals(
+        [(s.start_ms, s.end_ms) for s in segments if s.owner is Owner.INTERACTIVE]
+    )
+    raw = [
+        (s.start_ms, s.end_ms)
+        for s in segments
+        if s.owner is Owner.BACKGROUND and s.kind in (Activity.MODEL, Activity.TOOL)
+    ]
+    for a in agents.agents:
+        raw.extend(a.active_intervals)
+    timeline = _subtract(_merge_intervals(raw), interactive)
+    if not timeline:
+        return 0.0
+    bridging = _merge_intervals(
+        [
+            (s.start_ms, s.end_ms)
+            for s in segments
+            if s.owner is Owner.BACKGROUND and s.kind in _RUN_BRIDGE_KINDS
+        ]
+    )
+
+    def bridges(g0: int, g1: int) -> bool:
+        if any(i_s < g1 and i_e > g0 for i_s, i_e in interactive):
+            return False
+        if g1 - g0 <= _BRIDGE_MS:
+            return True
+        return all(e - s <= _BRIDGE_MS for s, e in _subtract([(g0, g1)], bridging))
+
+    best = 0
+    cur = timeline[0][1] - timeline[0][0]
+    for (_, pe), (ns, ne) in zip(timeline, timeline[1:]):
+        if bridges(pe, ns):
+            cur += ne - ns
+        else:
+            best = max(best, cur)
+            cur = ne - ns
+    best = max(best, cur)
+    return best / 1000.0
