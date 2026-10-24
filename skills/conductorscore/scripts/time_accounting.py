@@ -39,6 +39,7 @@ a Background turn or the time between turns:
 
 from __future__ import annotations
 
+import bisect
 import statistics
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -397,7 +398,47 @@ def _main_turns(main: list[Event]) -> list[Turn]:
             )
         else:
             merged.append(t)
-    return merged
+    # A session_end "turn" with no assistant output is an unanswered final
+    # prompt (segment_turns emits it when any later line exists): not a turn,
+    # so no credit and no model time.
+    replied = {
+        e.timestamp_ms for e in main
+        if e.kind in (
+            EventKind.ASSISTANT_TEXT,
+            EventKind.ASSISTANT_TOOL,
+            EventKind.ASSISTANT_THINKING,
+        )
+    }
+    return [
+        t for t in merged
+        if t.end_reason != "session_end"
+        or any(t.start_ts_ms < ts <= t.end_ts_ms for ts in replied)
+    ]
+
+
+def _pieces_by_turn(spans: list[ToolSpan], turns: list[Turn]) -> list[list[Piece]]:
+    """Per turn: the union of the tool pieces of calls made in that turn.
+
+    A span belongs to the turn holding its call (start <= call < end) and is
+    cut at that turn's end, so a call with no result (which runs to the
+    scope end) never spills into later turns. Calls outside every turn are
+    dropped. Spans are classified over the whole session first, so R4's
+    permission baseline and R6's poll runs stay session-wide.
+    """
+    owned: list[list[ToolSpan]] = [[] for _ in turns]
+    starts = [t.start_ts_ms for t in turns]
+    for span in spans:
+        i = bisect.bisect_right(starts, span.start_ms) - 1
+        if i < 0 or span.start_ms >= turns[i].end_ts_ms:
+            continue
+        end = turns[i].end_ts_ms
+        pieces = tuple(
+            Piece(p.start_ms, min(p.end_ms, end), p.kind)
+            for p in span.pieces
+            if p.start_ms < end
+        )
+        owned[i].append(replace(span, end_ms=min(span.end_ms, end), pieces=pieces))
+    return [tool_pieces_union(group) for group in owned]
 
 
 def _turn_pieces(
@@ -451,7 +492,7 @@ def partition_main_thread(
         return []
     main = _clip_main_events(events, ws, we)
     turns = _main_turns(main)
-    tool_pieces = tool_pieces_union(classify_tool_calls(main, we))
+    tool_pieces = _pieces_by_turn(classify_tool_calls(main, we), turns)
     event_ts = sorted({e.timestamp_ms for e in main})
 
     out: list[Segment] = []
@@ -461,14 +502,14 @@ def partition_main_thread(
             out.append(Segment(lo, hi, owner, kind))
 
     cursor = ws
-    for t in turns:
+    for t, turn_tools in zip(turns, tool_pieces):
         # Between turns: idle, except the R5 credit right before the prompt.
         gap_start, gap_end = cursor, t.start_ts_ms
         credit = 0 if t.is_scripted else min(gap_end - gap_start, _PROMPT_CREDIT_MS)
         emit(gap_start, gap_end - credit, Owner.BETWEEN, IdleReason.NO_ACTIVITY)
         emit(gap_end - credit, gap_end, Owner.INTERACTIVE, Activity.READ_WRITE)
 
-        pieces = _turn_pieces(t.start_ts_ms, t.end_ts_ms, event_ts, tool_pieces)
+        pieces = _turn_pieces(t.start_ts_ms, t.end_ts_ms, event_ts, turn_tools)
         active = sum(hi - lo for lo, hi, k in pieces if k in _AGENT_ACTIVE)
         owner = (
             Owner.BACKGROUND

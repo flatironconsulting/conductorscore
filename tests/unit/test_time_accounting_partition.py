@@ -378,3 +378,63 @@ def test_fully_scripted_zero_interactive():
         (X, IdleReason.NO_ACTIVITY): 1 + 18 + 8,
         (B, Activity.MODEL): 1 + 2,
     }
+
+
+# ---- review fixes -----------------------------------------------------------
+
+
+def test_unpaired_call_stays_in_its_turn():
+    # Turn 1's Bash call never gets a result. It must not spill into turn 2,
+    # an hour later, whose 40 min of steady output make it Background MODEL.
+    t2 = T + 62 * MIN
+    ev = [
+        _prompt(T),
+        _call("orphan", T + 1 * MIN),
+        _end(T + 2 * MIN),
+        _prompt(t2),
+        *_model_minutes(t2, 40, step=2),
+        _end(t2 + 40 * MIN),
+    ]
+    segs = _run(ev, (T, t2 + 40 * MIN))
+    turn2 = [s for s in segs if s.start_ms >= t2]
+    assert turn2 == [Segment(t2, t2 + 40 * MIN, B, Activity.MODEL)]
+    assert _totals(segs)[(I, Activity.TOOL)] == 1  # orphan clipped to turn 1
+
+
+def test_unpaired_call_cap_minutes_do_not_reach_next_turn():
+    # The orphan is < 30 min before turn 2: its TOOL cap minutes must not
+    # count toward turn 2's threshold either.
+    t2 = T + 10 * MIN
+    ev = [
+        _prompt(T), _call("orphan", T + 1 * MIN), _end(T + 2 * MIN),
+        _prompt(t2), _end(t2 + 4 * MIN),
+    ]
+    segs = _run(ev, (T, t2 + 4 * MIN))
+    assert [s for s in segs if s.start_ms >= t2] == [
+        Segment(t2, t2 + 4 * MIN, I, Activity.MODEL)
+    ]
+
+
+def test_unanswered_final_prompt_with_trailing_event():
+    # The last prompt gets no reply; a later SYSTEM line makes segment_turns
+    # emit a session_end turn. It is not a turn: no credit, no model time.
+    ev = [
+        _prompt(T), _end(T + 1 * MIN),
+        _prompt(T + 20 * MIN),
+        _ev(EventKind.SYSTEM, T + 22 * MIN),
+    ]
+    segs = _run(ev, (T, T + 22 * MIN))
+    assert segs == [
+        Segment(T, T + 1 * MIN, I, Activity.MODEL),
+        Segment(T + 1 * MIN, T + 22 * MIN, X, IdleReason.NO_ACTIVITY),
+    ]
+
+
+def test_session_end_turn_with_reply_is_kept():
+    ev = [_prompt(T + 10 * MIN), _text(T + 12 * MIN)]  # no end_turn, but a reply
+    segs = _run(ev, (T, T + 12 * MIN))
+    assert _totals(segs) == {
+        (X, IdleReason.NO_ACTIVITY): 5,
+        (I, Activity.READ_WRITE): 5,
+        (I, Activity.MODEL): 2,
+    }
