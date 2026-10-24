@@ -314,6 +314,14 @@ def test_permission_wait_in_long_turn_is_interactive_idle():
              + bg["idle_minutes"] + bt["idle_minutes"])
     assert total == w["wall_clock_minutes"] == 31
     assert bg["model_minutes"] == 11
+    # Decision 13 is grid-only: the longest run is computed from the unchanged
+    # by-location segments, so the attribution change must not touch it.
+    from scripts.time_accounting import (
+        account_agents, longest_run_seconds, partition_main_thread)
+    segs = partition_main_thread(ev, window)
+    expected = round(longest_run_seconds(segs, account_agents(ev, None, window[1])) / 60)
+    assert w["longest_run_minutes"] == expected
+    assert expected > 0
 
 
 def test_dispatch_wait_in_short_turn_is_background_idle():
