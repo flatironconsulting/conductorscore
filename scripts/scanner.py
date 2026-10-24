@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 
 from scripts.agents import consent as consent_mod
@@ -195,6 +196,31 @@ def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int
     return tokens_by_model
 
 
+# Time accounting v2 is dual-reported: a failure in it must never cost the
+# session its legacy fields. One stderr line per scan (reset by ``extract``).
+_time_accounting_warned = False
+
+
+def _safe_time_accounting(events, window, jsonl_path, session_id):
+    """``build_time_accounting``, or None (with one warning per scan) when it
+    raises. The warning names the exception type and session id only."""
+    global _time_accounting_warned
+    try:
+        return build_time_accounting(
+            events, window, jsonl_path=jsonl_path, permission_signal="available"
+        )
+    except Exception as e:  # noqa: BLE001 — dual reporting must survive any bug
+        if not _time_accounting_warned:
+            _time_accounting_warned = True
+            print(
+                "ConductorScore: time accounting v2 skipped "
+                f"({type(e).__name__}, session {session_id}); "
+                "legacy time fields unaffected.",
+                file=sys.stderr,
+            )
+        return None
+
+
 def _build_per_session(
     s,
     provider: str,
@@ -248,11 +274,8 @@ def _build_per_session(
         # only for now: Codex/Cursor get their permission_signal and
         # fallbacks in Task 9.
         if provider == "claude":
-            time_accounting = build_time_accounting(
-                events,
-                (started_at_ms, ended_at_ms),
-                jsonl_path=s.jsonl_path,
-                permission_signal="available",
+            time_accounting = _safe_time_accounting(
+                events, (started_at_ms, ended_at_ms), s.jsonl_path, s.session_id
             )
         agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
         hitl_minutes = agg.hitl_minutes
@@ -515,6 +538,8 @@ def extract(
     # .claude dir; the config scanner expects the *parent* of .claude.
     home_dot_claude = claude_home()
     home = home_dot_claude.parent
+    global _time_accounting_warned
+    _time_accounting_warned = False  # one time-accounting warning per scan
 
     # Resolve the cross-provider consent decision: which providers we are
     # allowed to scan. The launch provider is always scanned; the OTHER

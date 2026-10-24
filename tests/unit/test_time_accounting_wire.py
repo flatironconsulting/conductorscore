@@ -334,6 +334,28 @@ def test_legacy_fields_unchanged(tmp_path, monkeypatch):
     assert off == legacy
 
 
+def test_time_accounting_failure_keeps_legacy_fields(tmp_path, monkeypatch, capsys):
+    """Ruling 22: an exception in the v2 build never fails the session scan."""
+    def boom(*a, **k):
+        raise RuntimeError("secret transcript text")
+    monkeypatch.setattr(scanner, "build_time_accounting", boom)
+    monkeypatch.setattr(scanner, "_time_accounting_warned", False)
+    _, ps = _scan(tmp_path, monkeypatch)
+    assert ps.time_accounting is None
+    d = _wire_session(ps)
+    assert "time_accounting" not in d
+    before = json.loads(GOLDEN.read_text())
+    assert set(d) == set(before)
+    for key in before:
+        assert d[key] == before[key], key
+    # A second failing session in the same scan does not warn again.
+    _scan(tmp_path / "again", monkeypatch)
+    err = capsys.readouterr().err
+    assert err.count("time accounting v2 skipped") == 1
+    assert "RuntimeError" in err and "session s1" in err
+    assert "secret transcript text" not in err and str(tmp_path) not in err
+
+
 def test_scanner_uses_session_bounds(tmp_path, monkeypatch):
     meta, ps = _scan(tmp_path, monkeypatch)
     ta = ps.time_accounting
