@@ -5,6 +5,7 @@ import time
 
 from scripts.agents import consent as consent_mod
 from scripts.agents.claude.events import (
+    MainThreadEvents,
     SubagentRecords,
     load_subagent_records,
     subagent_usage_events,
@@ -260,24 +261,32 @@ def _build_per_session(
         s: the session's ``SessionMeta`` (from Pass 1).
         provider: the adapter's ``agent_id`` that discovered this session.
         events, text_map: the normalized events + user-text map read in
-            Pass 1 for this session.
+            Pass 1 for this session. A ``MainThreadEvents`` list (Claude,
+            from ``_read_session``) gets the subagent token events added
+            here; any other list must already hold them.
         tc: this session's ``ToolCounts`` (``None`` when ``s.jsonl_path`` was
             ``None`` — nothing to parse).
         artifact_times_by_project: cross-session (session_id, ts_ms) plan-
             artifact history keyed by project_root, built once in Pass 1.
     """
     # Plan 035: each subagent transcript is parsed ONCE per Claude session,
-    # here, and the records feed all three readers: the subagent tokens
-    # (appended to ``events``, which ``_read_session`` left main-thread
-    # only), the legacy subagent activity and the v2 agent accounting. The
-    # records live only for this call: they are never cached or returned.
-    # Codex/Cursor have no subagent transcript tree.
+    # here, and the records feed all three readers: the subagent tokens, the
+    # legacy subagent activity and the v2 agent accounting. The records live
+    # only for this call: they are never cached or returned. Codex/Cursor
+    # have no subagent transcript tree.
+    #
+    # Token contract: this function adds the subagent USAGE events ONLY when
+    # ``events`` is a ``MainThreadEvents`` (``_read_session``'s Claude output,
+    # ``read_events_and_text(..., include_subagent_usage=False)``). Any other
+    # list (``read_events_and_text`` defaults, hand-built events) is taken as
+    # complete, so the tokens are never counted twice.
     subagent_records: SubagentRecords | None = None
     if provider == "claude" and s.jsonl_path is not None:
         subagent_records = load_subagent_records(s.jsonl_path)
-        events = events + subagent_usage_events(
-            s.jsonl_path, s.jsonl_path.stem, records=subagent_records
-        )
+        if isinstance(events, MainThreadEvents):
+            events = events + subagent_usage_events(
+                s.jsonl_path, s.jsonl_path.stem, records=subagent_records
+            )
 
     stf = SessionToolFields.from_tool_counts(tc)
 
@@ -536,16 +545,17 @@ def _read_session(agent, s) -> tuple[list, dict, "ToolCounts | None"]:
     builtin_tool_invocations / distinct_mcp_tools) drive the Customization +
     Tools surfaces.
 
-    Claude events are main-thread only: ``_build_per_session`` adds the
+    Claude events are a main-thread-only ``MainThreadEvents`` list
+    (``include_subagent_usage=False``): ``_build_per_session`` adds the
     subagent token events from its single subagent load (plan 035), so Pass 1
     never opens a subagent transcript and holds no subagent records across
-    sessions. An empty ``subagent_records`` means "read none here".
+    sessions.
     """
     if s.jsonl_path is None:
         return [], {}, None
     if agent.agent_id == "claude":
         events, text_map = agent.read_events_and_text(
-            s.jsonl_path, subagent_records={}
+            s.jsonl_path, include_subagent_usage=False
         )
         tc = count_tools(s.jsonl_path)
         return events, text_map, tc

@@ -26,13 +26,16 @@ class ClaudeAdapter:
         self,
         jsonl_path: Path,
         *,
+        include_subagent_usage: bool = True,
         subagent_records: events.SubagentRecords | None = None,
     ) -> tuple[list[Event], dict[int, str]]:
-        """``subagent_records`` (``events.load_subagent_records``) replaces
-        the subagent transcript reads for the token events; None reads them
-        from disk."""
+        """See ``events.read_events_and_text``: ``include_subagent_usage=False``
+        returns main-thread ``MainThreadEvents`` and opens no subagent file;
+        ``subagent_records`` replaces the subagent reads otherwise."""
         return events.read_events_and_text(
-            jsonl_path, subagent_records=subagent_records
+            jsonl_path,
+            include_subagent_usage=include_subagent_usage,
+            subagent_records=subagent_records,
         )
 
     def preflight(self, now_ms: int, window_ms: int) -> dict:

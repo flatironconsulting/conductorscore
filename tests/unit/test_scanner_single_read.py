@@ -12,7 +12,9 @@ from collections import Counter
 from pathlib import Path
 
 from scripts.agents.claude import ClaudeAdapter
+from scripts.agents.claude.events import MainThreadEvents, read_events_and_text
 from scripts.scanner import _build_per_session, _read_session
+from scripts.tool_counter import count_tools
 from scripts.session_viewer import render_session
 from tests.unit import test_time_accounting_agents as ag
 from tests.unit import test_time_accounting_wire as wire
@@ -136,3 +138,29 @@ def test_raw_separator_subagent_counts_end_to_end(tmp_path, monkeypatch):
     assert ta.subagent_minutes == 9
     # Legacy subagent activity folds into the foreground parallel minutes.
     assert ps.afk_parallel_minutes_foreground > no_sub.afk_parallel_minutes_foreground
+
+
+def test_subagent_tokens_counted_once_on_every_path(tmp_path, monkeypatch):
+    """The scanner path (main-thread events; ``_build_per_session`` adds the
+    subagent tokens) and the public default path (``read_events_and_text``
+    events already holding them) build the same session. Neither may count
+    the subagent tokens twice (a review probe once got 490 for 290)."""
+    agent, meta = _session(tmp_path, monkeypatch, _THREE_AGENTS)
+    via_scanner = _score(agent, meta)
+    events, text_map = read_events_and_text(meta.jsonl_path)
+    assert not isinstance(events, MainThreadEvents)
+    via_public = _build_per_session(
+        meta, "claude", events, text_map, count_tools(meta.jsonl_path), {}
+    )
+    no_sub = _score(*_session(tmp_path / "bare", monkeypatch, {}))
+    assert via_public.total_input_tokens - no_sub.total_input_tokens == 200
+    assert wire._wire_session(via_public) == wire._wire_session(via_scanner)
+
+
+def test_main_thread_events_carry_no_subagent_usage(tmp_path, monkeypatch):
+    agent, meta = _session(tmp_path, monkeypatch, _THREE_AGENTS)
+    main, _ = read_events_and_text(meta.jsonl_path, include_subagent_usage=False)
+    full, _ = read_events_and_text(meta.jsonl_path)
+    assert isinstance(main, MainThreadEvents)
+    assert len(full) - len(main) == 2  # agent-a and agent-b each one message
+    assert full[: len(main)] == list(main)

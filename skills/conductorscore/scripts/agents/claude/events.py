@@ -947,12 +947,31 @@ def events_from_records(records: list[dict], session_id: str) -> list[Event]:
     return events
 
 
+class MainThreadEvents(list):
+    """A Claude session's events WITHOUT its subagent token events: what
+    ``read_events_and_text(..., include_subagent_usage=False)`` returns.
+
+    The type is the marker: the scanner's ``_build_per_session`` appends the
+    subagent USAGE events (from its single subagent load) only to a
+    ``MainThreadEvents`` list, so they can never be added twice. Concatenating
+    it with another list yields a plain ``list`` (already complete)."""
+
+
 def read_events_and_text(
-    jsonl_path: Path, *, subagent_records: SubagentRecords | None = None
+    jsonl_path: Path,
+    *,
+    include_subagent_usage: bool = True,
+    subagent_records: SubagentRecords | None = None,
 ) -> tuple[list[Event], dict[int, str]]:
     """Like ``read_events`` but also returns an in-memory map of
     ``id(user_event) -> raw_user_text`` for the Feature 7 detectors that
     need the raw text (frustration / prompt similarity).
+
+    By default the events end with the session's subagent / Workflow token
+    events (from ``subagent_records`` when given, else read from disk).
+    ``include_subagent_usage=False`` opens no subagent transcript and returns
+    a ``MainThreadEvents`` list instead, for a caller that adds them itself
+    (the scanner); ``subagent_records`` must then be None.
 
     The map is keyed on Python ``id()`` so callers can pair it with the
     returned event list. The map MUST be discarded as soon as the
@@ -969,6 +988,8 @@ def read_events_and_text(
         is_structured_prompt as _plan_signals_is_structured_prompt,
     )
 
+    if not include_subagent_usage and subagent_records is not None:
+        raise ValueError("subagent_records needs include_subagent_usage=True")
     events = read_events(jsonl_path)
     text_map: dict[int, str] = {}
 
@@ -1007,6 +1028,8 @@ def read_events_and_text(
     # #13 — subagent / Workflow transcript tokens belong to this session.
     # USAGE events only (sidechain-tagged), so turns, HITL/AFK, plan and edit
     # detectors are unchanged; only the token aggregators read them.
+    if not include_subagent_usage:
+        return MainThreadEvents(events), text_map
     events.extend(
         subagent_usage_events(
             jsonl_path, jsonl_path.stem, records=subagent_records
@@ -1047,6 +1070,7 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 
 
 __all__ = [
+    "MainThreadEvents",
     "load_subagent_panels",
     "subagent_usage_events",
     "events_from_records",
