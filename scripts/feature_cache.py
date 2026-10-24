@@ -33,6 +33,7 @@ from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.core.normalized import SessionMeta
 from scripts.core.text import sha16
 from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
+from scripts.time_accounting import TimeAccounting
 
 # Bump when the entry layout changes or a session's features must be
 # recomputed without a client-version change (independent of the client
@@ -42,7 +43,10 @@ from scripts.output_schema import AfkInterval, AfkStreakWire, PerSession
 # of distinct_skills / the typed by-name maps into
 # model_skill_invocations_by_name (#11 follow-up). 5: parallel subagent time
 # (afk_parallel_minutes_foreground) is the per-agent SUM again, not the union.
-CACHE_FORMAT = 5
+# 6: PerSession gained the time accounting v2 object (time_accounting).
+# 7: windowless sessions carry a zero-valued time_accounting object (was None).
+# 8: time_accounting idle_by_reason moved into the rows; between_turns gained with_agents.
+CACHE_FORMAT = 8
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 
@@ -86,6 +90,8 @@ def session_from_dict(d: dict) -> PerSession:
         v = d[f.name]
         if f.name in _NESTED:
             v = tuple(_NESTED[f.name](**item) for item in v)
+        elif f.name == "time_accounting":
+            v = None if v is None else TimeAccounting(**v)
         elif isinstance(v, list):
             v = tuple(v)
         kwargs[f.name] = v

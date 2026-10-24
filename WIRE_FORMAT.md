@@ -1061,3 +1061,138 @@ already transmitted; it carries no new content.
   (main thread), not JSONL lines. Codex / Cursor accounting is unchanged.
 
 Not covered by `session_chain`.
+
+## `sessions[].time_accounting` — time accounting v2, additive, no schema bump
+
+One optional per-session object that partitions the session's wall clock
+into the Leverage table's rows and columns (plans 034, 036). It is reported
+**alongside** the legacy time fields (`hitl_minutes`, `afk_minutes`,
+`idle_minutes`, `hitl_tool_minutes`, `afk_tool_minutes`,
+`afk_dispatch_minutes`, `afk_parallel_minutes_foreground`,
+`afk_max_streak_minutes`, `afk_intervals`, `top_afk_streaks`), which keep
+their current values and semantics during dual reporting.
+
+Emitted for every session, whatever the provider. A session with no
+foreground window (Cron-only, or zero events) carries a **zero-valued**
+object: `wall_clock_minutes: 0`, every leaf 0, `version: 2`, and
+`permission_signal` by provider. Absent therefore means only "legacy
+client" or "building it failed". Codex and Cursor sessions carry
+`permission_signal: "not_available"` (neither records permission grants, so
+`interactive.idle_by_reason.permission_wait` is zero) and `agents.count: 0` (agent
+accounting reads Claude's `subagents/` tree). Codex persists a declined
+approval but not the request, so a decline is classified as an interrupt
+(10-min tool cap), not as a permission wait.
+**Absent means v1:** the server MUST NOT read absence as zero for a session
+with real legacy time. A session without the object whose legacy time is
+zero (`hitl_minutes + afk_minutes + idle_minutes == 0`) contributes nothing
+and is skipped; if any session with real legacy time lacks the object, the
+server renders the old layout.
+Not covered by `session_chain`.
+
+Example (the synthetic session in `tests/unit/test_time_accounting_wire.py`:
+two Background turns with a 38-min Bash call and a 14-min blocking subagent
+dispatch, then a short Interactive turn):
+
+```jsonc
+"time_accounting": {
+  "version": 2,
+  "wall_clock_minutes": 94,
+  "interactive":  { "turns": 1, "read_write_minutes": 10, "model_minutes": 2, "tool_minutes": 2, "idle_minutes": 0,
+                    "idle_by_reason": { "permission_wait": {"count": 0, "minutes": 0},
+                                        "no_activity":     {"count": 0, "minutes": 0} } },
+  "background":   { "turns": 2, "model_minutes": 5, "tool_minutes": 30, "idle_minutes": 22,
+                    "idle_by_reason": { "dispatch_wait":   {"count": 1, "minutes": 14},
+                                        "tool_over_cap":   {"count": 1, "minutes": 8},
+                                        "polling":         {"count": 0, "minutes": 0},
+                                        "no_activity":     {"count": 0, "minutes": 0} } },
+  "agents":       { "count": 1, "model_minutes": 14, "tool_minutes": 0, "idle_minutes": 0,
+                    "union_minutes": 14, "max_concurrent_agents": 1,
+                    "by_type": { "subagent": {"count": 1, "minutes": 14},
+                                 "workflow": {"count": 0, "minutes": 0},
+                                 "background_shell": {"count": 0, "minutes": 0} } },
+  "between_turns": { "gaps": 2, "idle_minutes": 23, "with_agents_minutes": 0 },
+  "longest_run_minutes": 33,
+  "permission_signal": "available"
+}
+```
+
+There is no top-level `idle_by_reason` (removed in plan 036; `version` stays 2).
+Idle is attributed to a row
+**by reason**, not by where it happened: `permission_wait` is Interactive
+idle (waiting on you) even inside a Background turn; `dispatch_wait`,
+`tool_over_cap` and `polling` are Background idle (the agent's side) even
+inside an Interactive turn; `no_activity` stays with the turn it was in.
+The grid has two timeline rows, Interactive and Background: the server
+shows Interactive idle as `interactive.idle_minutes +
+between_turns.idle_minutes`. The wire keeps between-turns time in its own
+field so that no two leaves overlap.
+
+### Units
+
+Every `*_minutes` value is an integer number of minutes: the client sums
+seconds per field, then rounds **once per field** (`round(seconds / 60)`).
+Fields are therefore individually rounded, and a sum of n fields may differ
+from the matching total by up to n minutes. Counts are exact integers.
+The rounding is biased slightly low in practice, because many leaves are
+under 30 seconds and round to 0: summed over sessions, the grid's Wall clock
+row (built from the leaves) runs a little under Σ `wall_clock_minutes`
+(about −0.3% on real data), well inside the server's reconcile tolerance
+of 1 minute per session.
+
+### Fields
+
+| Field                              | Type    | Notes |
+|------------------------------------|---------|-------|
+| `version`                          | int     | `2`. Bumped when the meaning of any field changes. |
+| `wall_clock_minutes`               | int     | The session window, `ended_at_ms − started_at_ms` (the same #10 bounds as the session's `started_at_ms` / `ended_at_ms`). |
+| `interactive.turns`                | int     | Turns whose agent-active time (model + tool + dispatch wait) is ≤ 5 min and that are not scripted. A turn with only a reading & typing credit counts here. |
+| `interactive.read_write_minutes`   | int     | "You reading & typing": the last ≤ 5 min before each typed prompt (or AskUserQuestion answer) that opens a turn — including the prompt of a turn that turns out Background. |
+| `interactive.model_minutes`        | int     | Agent thinking inside Interactive turns (gaps between events ≤ 5 min). |
+| `interactive.tool_minutes`         | int     | Agent tool time inside Interactive turns (each call capped at 30 min, 10 min when interrupted). |
+| `interactive.idle_minutes`         | int     | In-turn Interactive idle = Σ `interactive.idle_by_reason`: permission waits in any turn plus no-activity inside short (Interactive) turns. Excludes between-turns time. |
+| `interactive.idle_by_reason.<reason>.count`   | int | Distinct idle pieces of `<reason>`: `permission_wait` (prompts), `no_activity` (gaps). Both keys always present. |
+| `interactive.idle_by_reason.<reason>.minutes` | int | `permission_wait`: waiting on your permission decision, in any turn. `no_activity`: mid-turn gaps > 5 min inside Interactive turns. |
+| `background.turns`                 | int     | Main-thread turns with > 5 min agent-active time, plus every scripted turn. |
+| `background.model_minutes`         | int     | Agent thinking inside Background turns, main thread only. |
+| `background.tool_minutes`          | int     | Agent tool time inside Background turns, main thread only. |
+| `background.idle_minutes`          | int     | Background idle = Σ `background.idle_by_reason`: dispatch waits, tool time over cap and polling in any turn, plus no-activity inside long (Background) turns. |
+| `background.idle_by_reason.<reason>.count`   | int | Distinct idle pieces of `<reason>`: `dispatch_wait` (dispatches), `tool_over_cap` (calls), `polling` (calls), `no_activity` (gaps). All four keys always present. |
+| `background.idle_by_reason.<reason>.minutes` | int | `dispatch_wait`: waiting on a blocking subagent dispatch. `tool_over_cap`: tool runtime past the cap. `polling`: wait tools and repeated identical calls past a 5-min grace. `no_activity`: mid-turn gaps > 5 min inside Background turns. |
+| `agents.count`                     | int     | Parallel agents: subagent and Workflow transcripts plus main-thread background shell commands. |
+| `agents.model_minutes`             | int     | Agent-hours of thinking, **summed** across agents (they overlap the timeline and each other). |
+| `agents.tool_minutes`              | int     | Agent-hours of tool time, summed across agents. |
+| `agents.idle_minutes`              | int     | Agents' own idle, summed. Reported for integrity; not shown in the grid. |
+| `agents.union_minutes`             | int     | Wall clock with ≥ 1 agent active (union of active intervals). |
+| `agents.max_concurrent_agents`     | int     | Peak number of agents active at one instant. Addition to the spec object, for the server's R11 integrity signal. |
+| `agents.by_type.<type>.count`      | int     | Agents of `<type>`: `subagent`, `workflow`, `background_shell`. All three keys are always present. |
+| `agents.by_type.<type>.minutes`    | int     | That type's active minutes (model + tool). |
+| `between_turns.gaps`               | int     | Maximal stretches of the window outside every turn. |
+| `between_turns.idle_minutes`       | int     | Time between turns, minus the reading & typing credit. Shown in the grid as Interactive idle ("between turns"). |
+| `between_turns.with_agents_minutes` | int    | The part of `between_turns.idle_minutes` during which at least one parallel agent was active (union of the agents' active intervals, clipped to the window): "while your agents worked". The rest is "nothing running". |
+| `longest_run_minutes`              | int     | Longest unattended stretch of Background main-thread and agent activity; Interactive time ends a run. |
+| `permission_signal`                | string  | `"available"` when the provider marks who decided a permission prompt (Claude). `"not_available"` when it does not: the table shows "not available" on the permission line instead of zero. |
+
+### Identities
+
+The grid's derived cells (Active, Total, and the Total / Wall clock rows) are
+not on the wire; the server computes them from the fields above. With
+Interactive total = `read_write + model + tool + idle` and Background total =
+`model + tool + idle`, the client asserts on every emitted object, allowing
+±1 minute per summed field for rounding:
+
+- `wall_clock_minutes = interactive total + background total + between_turns.idle_minutes`
+  (Wall clock = Total − parallel agents; it equals the session window). The
+  grid's Interactive total is `interactive total + between_turns.idle_minutes`,
+  so grid Interactive + Background main thread = Wall clock.
+- `interactive.idle_minutes = Σ interactive.idle_by_reason.*.minutes` and
+  `background.idle_minutes = Σ background.idle_by_reason.*.minutes`.
+- `between_turns.with_agents_minutes ≤ between_turns.idle_minutes` and
+  `≤ agents.union_minutes` (exact: rounding is monotone).
+- `Σ agents.by_type.*.minutes = agents.model_minutes + agents.tool_minutes`, and
+  `Σ agents.by_type.*.count = agents.count` exactly.
+- `agents.union_minutes ≤ agents.model_minutes + agents.tool_minutes`;
+  `0 ≤ max_concurrent_agents ≤ agents.count`.
+- Headline leverage = Background active ÷ Interactive active, where
+  Background active = `background.model + background.tool + agents.model + agents.tool`
+  and Interactive active = `interactive.read_write + model + tool`. Computed by
+  the consumer, never sent.

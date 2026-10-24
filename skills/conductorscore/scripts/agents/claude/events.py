@@ -12,6 +12,7 @@ entirely; only structural metadata survives.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -84,6 +85,69 @@ def _tool_result_text(block: dict) -> str:
                     parts.append(t)
         return " ".join(parts)
     return ""
+
+
+_BG_ID_RE = re.compile(r"Command running in background with ID: ([a-z0-9]+)")
+_TASK_ID_RE = re.compile(r"<task-id>\s*([A-Za-z0-9_-]+)\s*</task-id>")
+# Dialogs that are human judgment, not permission waits.
+_NON_PERMISSION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+_WAIT_TOOLS = frozenset({"Monitor", "ScheduleWakeup"})
+_WAIT_CMD_PREFIXES = ("sleep", "timeout", "watch")
+
+
+def _permission_flags(d: dict, tool_name: str | None) -> tuple[bool, bool, bool]:
+    """(by_user, rejected, auto) from the line's top-level permissionDecision."""
+    pd = d.get("permissionDecision")
+    if not isinstance(pd, dict) or tool_name in _NON_PERMISSION_TOOLS:
+        return False, False, False
+    source = pd.get("source")
+    decision = pd.get("decision")
+    by_user = isinstance(source, str) and source.startswith("user_")
+    rejected = by_user and decision == "reject"
+    auto = source == "config" and decision == "accept"
+    return by_user, rejected, auto
+
+
+def _is_wait_call(name: str | None, inp: dict) -> bool:
+    if name in _WAIT_TOOLS:
+        return True
+    if name != "Bash":
+        return False
+    cmd = inp.get("command")
+    if not isinstance(cmd, str):
+        return False
+    cmd = cmd.lstrip()
+    first = cmd.split(None, 1)[0] if cmd else ""
+    return first in _WAIT_CMD_PREFIXES or "gh run watch" in cmd
+
+
+def _call_signature(name: str | None, inp: dict) -> str | None:
+    if not name:
+        return None
+    try:
+        canon = json.dumps(inp, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return _sha16(name + canon)
+
+
+def _notification_task_id(raw_text: str) -> str | None:
+    """Opaque id from a ``<task-notification>``; no other text is kept."""
+    if "<task-notification>" not in raw_text:
+        return None
+    m = _TASK_ID_RE.search(raw_text)
+    return m.group(1) if m else None
+
+
+def _background_result_id(d: dict, text: str) -> str | None:
+    """Background shell id on a launch's tool_result (id only)."""
+    tur = d.get("toolUseResult")
+    if isinstance(tur, dict):
+        bid = tur.get("backgroundTaskId")
+        if isinstance(bid, str) and bid:
+            return bid
+    m = _BG_ID_RE.search(text) if text else None
+    return m.group(1) if m else None
 
 
 def _strip_synthetic_content(text: str) -> str:
@@ -383,9 +447,11 @@ def _fold_message_usage(records: list[dict]) -> dict[tuple[str, str], _MessageUs
 
 
 def _parse_records(jsonl_path: Path, prefilter: str | None = None) -> list[dict]:
-    """JSON-decode each line to a dict with a parseable timestamp. With
-    ``prefilter`` set, lines not containing that substring are skipped
-    before decoding (cheap; used for the usage-only subagent pass)."""
+    """JSON-decode each line, keeping those that decode to a dict, in file
+    order. No timestamp filter: consumers skip timestamp-less records
+    themselves. With ``prefilter`` set, lines not containing that substring
+    are skipped before decoding (cheap; used for the usage-only subagent
+    pass)."""
     out: list[dict] = []
     for raw in _read_lines(jsonl_path):
         line = raw.strip()
@@ -398,6 +464,44 @@ def _parse_records(jsonl_path: Path, prefilter: str | None = None) -> list[dict]
         if isinstance(d, dict):
             out.append(d)
     return out
+
+
+SubagentRecords = dict[Path, list[dict]]  # path -> parsed JSON-object lines, in file order
+
+
+def parse_transcript_records(path: Path) -> list[dict]:
+    """Every line of ``path`` that JSON-decodes to a dict, in file order.
+
+    A deliberate superset: no timestamp filter and no substring prefilter, so
+    each consumer applies its own filter and stays byte-identical. Blank,
+    invalid and truncated lines are skipped; an unreadable file gives ``[]``.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict] = []
+    # Split on "\n" only (read_text already folds \r and \r\n to "\n"), NOT
+    # str.splitlines(): that also cuts at U+2028/2029/0085/\x0b/\x0c/\x1c-\x1e,
+    # which JSON allows raw inside strings. The legacy file-iteration reader
+    # never split there, so neither may this shared parse.
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def load_subagent_records(jsonl_path: Path) -> SubagentRecords:
+    """Parse each of a session's subagent transcripts once, keyed by path, in
+    ``subagent_transcripts`` order."""
+    return {p: parse_transcript_records(p) for p in subagent_transcripts(jsonl_path)}
 
 
 def _usage_event(
@@ -434,39 +538,87 @@ def _with_usage(ev: Event, vec: tuple[int, int, int, int]) -> Event:
     )
 
 
-def subagent_usage_events(jsonl_path: Path, session_id: str | None = None) -> list[Event]:
+def _is_usage_token(s: str) -> bool:
+    # In a JSON line, '"usage"' ends a string token (the closing quote follows
+    # "e", so it is unescaped). The opening quote is either that token's own
+    # (s == "usage") or an escaped \" inside it (s ends with '"usage').
+    return s == "usage" or s.endswith('"usage')
+
+
+def _has_usage_token(obj) -> bool:
+    """Record-level equivalent of ``'"usage"' in raw_line``: some key or
+    string value, at any depth, serialises with a ``"usage"`` tail. Exact for
+    standard JSON writers, which escape ``"`` as ``\\"`` and never escape
+    ASCII letters."""
+    if isinstance(obj, str):
+        return _is_usage_token(obj)
+    if isinstance(obj, dict):
+        return any(
+            _is_usage_token(k) or _has_usage_token(v) for k, v in obj.items()
+        )
+    if isinstance(obj, list):
+        return any(_has_usage_token(v) for v in obj)
+    return False
+
+
+def subagent_usage_events(
+    jsonl_path: Path,
+    session_id: str | None = None,
+    *,
+    records: SubagentRecords | None = None,
+) -> list[Event]:
     """Token-only USAGE events for every subagent / Workflow transcript of a
     session (``discovery.subagent_transcripts``), attributed to the parent
     session and tagged ``is_sidechain`` so no turn/HITL logic reads them.
     One event per API message (max-folded usage) plus non-``message``
-    iterations; lines without an id fall back to per-line usage."""
+    iterations; lines without an id fall back to per-line usage.
+
+    With ``records`` (from ``load_subagent_records``) no file is opened;
+    without, each file is parsed by ``parse_transcript_records`` (newline-only
+    split, as the scanner reads it). Either way the events come out file by
+    file, in ``subagent_transcripts`` order (``file_usage_events``)."""
     jsonl_path = Path(jsonl_path)
     sid = session_id or jsonl_path.stem
+    per_file = (
+        (parse_transcript_records(sub) for sub in subagent_transcripts(jsonl_path))
+        if records is None
+        else records.values()
+    )
     out: list[Event] = []
-    for sub in subagent_transcripts(jsonl_path):
-        records = _parse_records(sub, prefilter='"usage"')
-        folded = _fold_message_usage(records)
-        done: set[tuple[str, str]] = set()
-        for d in records:
-            message = d.get("message") if isinstance(d.get("message"), dict) else None
-            if not _is_assistant_record(d, message):
+    for recs in per_file:
+        out.extend(file_usage_events(recs, sid))
+    return out
+
+
+def file_usage_events(records: list[dict], session_id: str) -> list[Event]:
+    """``subagent_usage_events`` for ONE subagent transcript, from its
+    ``parse_transcript_records`` output. The ``"usage"`` line prefilter is
+    applied per record via ``_has_usage_token`` (it decides which line of a
+    message is seen first, hence the stamped timestamp)."""
+    file_records = [d for d in records if _has_usage_token(d)]
+    out: list[Event] = []
+    folded = _fold_message_usage(file_records)
+    done: set[tuple[str, str]] = set()
+    for d in file_records:
+        message = d.get("message") if isinstance(d.get("message"), dict) else None
+        if not _is_assistant_record(d, message):
+            continue
+        ts_ms = _parse_ts_ms(d)
+        if ts_ms is None:
+            continue
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        key = _message_key(d, message)
+        if key is not None:
+            if key in done:
                 continue
-            ts_ms = _parse_ts_ms(d)
-            if ts_ms is None:
-                continue
-            model = message.get("model") if isinstance(message.get("model"), str) else None
-            key = _message_key(d, message)
-            if key is not None:
-                if key in done:
-                    continue
-                done.add(key)
-                vec, its = folded[key].vec, folded[key].iterations
-            else:
-                vec, its = _usage_vector(message.get("usage")), _extra_iterations(message.get("usage"))
-            if any(vec):
-                out.append(_usage_event(sid, ts_ms, model, vec, is_sidechain=True))
-            for it_model, it_vec in its:
-                out.append(_usage_event(sid, ts_ms, it_model or model, it_vec, is_sidechain=True))
+            done.add(key)
+            vec, its = folded[key].vec, folded[key].iterations
+        else:
+            vec, its = _usage_vector(message.get("usage")), _extra_iterations(message.get("usage"))
+        if any(vec):
+            out.append(_usage_event(session_id, ts_ms, model, vec, is_sidechain=True))
+        for it_model, it_vec in its:
+            out.append(_usage_event(session_id, ts_ms, it_model or model, it_vec, is_sidechain=True))
     return out
 
 
@@ -479,6 +631,13 @@ def read_events(jsonl_path: Path) -> list[Event]:
     discarded entirely; only structural metadata survives. Malformed lines
     are silently skipped.
     """
+    return events_from_records(_parse_records(jsonl_path), jsonl_path.stem)
+
+
+def events_from_records(records: list[dict], session_id: str) -> list[Event]:
+    """Build ``read_events``' Events from already-parsed JSON-object lines
+    (``_parse_records`` / ``parse_transcript_records`` output), in file
+    order. Opens no file."""
     # Late import to avoid a cycle: plan_signals imports Event from us.
     from scripts.plan_signals import (
         is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
@@ -487,13 +646,13 @@ def read_events(jsonl_path: Path) -> list[Event]:
         is_structured_prompt as _plan_signals_is_structured_prompt,
     )
 
-    session_id = jsonl_path.stem
     events: list[Event] = []
-    records = _parse_records(jsonl_path)
     # Usage is attributed once per API message, to the first event of its
     # first line, whatever the block type (thinking / tool_use / text).
     folded = _fold_message_usage(records)
     attributed: set[tuple[str, str]] = set()
+    # tool_use_id -> tool name, so a tool_result can be attributed to its call.
+    tool_names_by_id: dict[str, str] = {}
 
     for d in records:
         ts_ms = _parse_ts_ms(d)
@@ -532,6 +691,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             text, token_count
                         ),
                         is_scripted_prompt=origin == "scripted",
+                        background_task_id=_notification_task_id(raw_text),
                     )
                 )
             elif AUTO_COMPACT_BANNER in raw_text and not (
@@ -560,7 +720,19 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     _tu_id = block.get("tool_use_id")
                     # Denial detection: flatten the result text in-memory,
                     # test it against the markers, keep ONLY the boolean.
-                    _is_denied = _is_denial_text(_tool_result_text(block))
+                    _res_text = _tool_result_text(block)
+                    _is_denied = _is_denial_text(_res_text)
+                    _res_name = (
+                        tool_names_by_id.get(_tu_id)
+                        if isinstance(_tu_id, str)
+                        else None
+                    )
+                    if _res_name is None and isinstance(
+                        block.get("tool_use_name"), str
+                    ):
+                        _res_name = block["tool_use_name"]
+                    _p_user, _p_rej, _p_auto = _permission_flags(d, _res_name)
+                    _bg_id = _background_result_id(d, _res_text)
                     events.append(
                         Event(
                             kind=EventKind.TOOL_RESULT,
@@ -574,6 +746,10 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             subagent_id=subagent_id,
                             tool_use_id=_tu_id if isinstance(_tu_id, str) else None,
                             is_denied=_is_denied,
+                            permission_by_user=_p_user,
+                            permission_rejected=_p_rej,
+                            permission_auto=_p_auto,
+                            background_task_id=_bg_id,
                         )
                     )
             continue
@@ -648,6 +824,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         _block_id if isinstance(_block_id, str) else None
                     )
                     inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    if tool_use_id_val and name:
+                        tool_names_by_id[tool_use_id_val] = name
                     # Default-safe v0.4 plan/edit flags.
                     skill_name_val: str | None = None
                     todo_count_val = 0
@@ -703,6 +881,12 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             raw_input=raw_input_val,
                             stop_reason=stop_reason_val,
                             tool_use_id=tool_use_id_val,
+                            is_background_launch=(
+                                name == "Bash"
+                                and inp.get("run_in_background") is True
+                            ),
+                            is_wait_tool=_is_wait_call(name, inp),
+                            call_signature=_call_signature(name, inp),
                         )
                     )
             elif isinstance(content, str):
@@ -767,10 +951,31 @@ def read_events(jsonl_path: Path) -> list[Event]:
     return events
 
 
-def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]:
+class MainThreadEvents(list):
+    """A Claude session's events WITHOUT its subagent token events: what
+    ``read_events_and_text(..., include_subagent_usage=False)`` returns.
+
+    The type is the marker: the scanner's ``_build_per_session`` appends the
+    subagent USAGE events (from its single subagent load) only to a
+    ``MainThreadEvents`` list, so they can never be added twice. Concatenating
+    it with another list yields a plain ``list`` (already complete)."""
+
+
+def read_events_and_text(
+    jsonl_path: Path,
+    *,
+    include_subagent_usage: bool = True,
+    subagent_records: SubagentRecords | None = None,
+) -> tuple[list[Event], dict[int, str]]:
     """Like ``read_events`` but also returns an in-memory map of
     ``id(user_event) -> raw_user_text`` for the Feature 7 detectors that
     need the raw text (frustration / prompt similarity).
+
+    By default the events end with the session's subagent / Workflow token
+    events (from ``subagent_records`` when given, else read from disk).
+    ``include_subagent_usage=False`` opens no subagent transcript and returns
+    a ``MainThreadEvents`` list instead, for a caller that adds them itself
+    (the scanner); ``subagent_records`` must then be None.
 
     The map is keyed on Python ``id()`` so callers can pair it with the
     returned event list. The map MUST be discarded as soon as the
@@ -787,6 +992,8 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
         is_structured_prompt as _plan_signals_is_structured_prompt,
     )
 
+    if not include_subagent_usage and subagent_records is not None:
+        raise ValueError("subagent_records needs include_subagent_usage=True")
     events = read_events(jsonl_path)
     text_map: dict[int, str] = {}
 
@@ -825,7 +1032,13 @@ def read_events_and_text(jsonl_path: Path) -> tuple[list[Event], dict[int, str]]
     # #13 — subagent / Workflow transcript tokens belong to this session.
     # USAGE events only (sidechain-tagged), so turns, HITL/AFK, plan and edit
     # detectors are unchanged; only the token aggregators read them.
-    events.extend(subagent_usage_events(jsonl_path, jsonl_path.stem))
+    if not include_subagent_usage:
+        return MainThreadEvents(events), text_map
+    events.extend(
+        subagent_usage_events(
+            jsonl_path, jsonl_path.stem, records=subagent_records
+        )
+    )
     return events, text_map
 
 
@@ -861,8 +1074,11 @@ def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
 
 
 __all__ = [
+    "MainThreadEvents",
     "load_subagent_panels",
+    "file_usage_events",
     "subagent_usage_events",
+    "events_from_records",
     "read_events",
     "read_events_and_text",
 ]

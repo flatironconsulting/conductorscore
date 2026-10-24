@@ -32,8 +32,9 @@ from enum import Enum
 from pathlib import Path
 
 from scripts.agents.claude.discovery import subagent_transcripts
+from scripts.agents.claude.events import SubagentRecords, parse_transcript_records
 from scripts.agents.codex.taxonomy import multi_agent_action
-from scripts.core.thresholds import K_TURN_SECONDS
+from scripts.core.thresholds import K_BRIDGE_IDLE_SECONDS, K_TURN_SECONDS
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
 from scripts.events import Event, EventKind
 
@@ -49,9 +50,6 @@ class MinuteBucket(str, Enum):
     HITL = "hitl"
     AFK = "afk"
     IDLE = "idle"
-
-# Idle longer than this between same-label turns splits the streak.
-K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AFK streak
 
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.
@@ -436,43 +434,30 @@ def _active_intervals(
     return tuple(out)
 
 
-def _read_agent_activity(sub_jsonl: Path) -> AgentActivity | None:
+def _agent_activity_from_records(records: list[dict]) -> AgentActivity | None:
     timestamps: list[int] = []
     calls: dict[str, int] = {}
     tool_intervals: list[tuple[int, int]] = []
-    try:
-        with sub_jsonl.open(encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = _json.loads(line)
-                except _json.JSONDecodeError:
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                msg = d.get("message")
-                if not isinstance(msg, dict) or msg.get("role") not in ("assistant", "user"):
-                    continue
-                ts_ms = _parse_iso_ts_ms(d.get("timestamp"))
-                if ts_ms is None:
-                    continue
-                timestamps.append(ts_ms)
-                content = msg.get("content")
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
-                        calls[block["id"]] = ts_ms
-                    elif block.get("type") == "tool_result":
-                        c = calls.pop(block.get("tool_use_id"), None)
-                        if c is not None and ts_ms > c:
-                            tool_intervals.append((c, ts_ms))
-    except OSError:
-        return None
+    for d in records:
+        msg = d.get("message")
+        if not isinstance(msg, dict) or msg.get("role") not in ("assistant", "user"):
+            continue
+        ts_ms = _parse_iso_ts_ms(d.get("timestamp"))
+        if ts_ms is None:
+            continue
+        timestamps.append(ts_ms)
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                calls[block["id"]] = ts_ms
+            elif block.get("type") == "tool_result":
+                c = calls.pop(block.get("tool_use_id"), None)
+                if c is not None and ts_ms > c:
+                    tool_intervals.append((c, ts_ms))
     if not timestamps:
         return None
     return AgentActivity(
@@ -482,7 +467,13 @@ def _read_agent_activity(sub_jsonl: Path) -> AgentActivity | None:
     )
 
 
-def subagent_activity_from_disk(jsonl_path: Path) -> dict[str, AgentActivity]:
+def _read_agent_activity(sub_jsonl: Path) -> AgentActivity | None:
+    return _agent_activity_from_records(parse_transcript_records(sub_jsonl))
+
+
+def subagent_activity_from_disk(
+    jsonl_path: Path, *, records: SubagentRecords | None = None
+) -> dict[str, AgentActivity]:
     """Per-subagent activity from the session's on-disk subagent transcripts.
 
     Claude Code writes subagent (sidechain) transcripts to a sibling
@@ -499,7 +490,11 @@ def subagent_activity_from_disk(jsonl_path: Path) -> dict[str, AgentActivity]:
     """
     out: dict[str, AgentActivity] = {}
     for sub_jsonl in subagent_transcripts(jsonl_path):
-        act = _read_agent_activity(sub_jsonl)
+        act = (
+            _agent_activity_from_records(records.get(sub_jsonl, []))
+            if records is not None
+            else _read_agent_activity(sub_jsonl)
+        )
         if act is not None:
             out[sub_jsonl.stem] = act
     return out
@@ -717,6 +712,9 @@ class TurnAggregates:
 def compute_turn_aggregates(
     events: list[Event],
     jsonl_path: Path | None = None,
+    *,
+    subagent_records: SubagentRecords | None = None,
+    subagent_activity: dict[str, AgentActivity] | None = None,
 ) -> TurnAggregates:
     """Compute the live card's leverage inputs.
 
@@ -729,6 +727,8 @@ def compute_turn_aggregates(
     When ``jsonl_path`` is provided, the on-disk subagent transcripts
     next to it are read and folded into ``afk_parallel_minutes_foreground``.
     Production scanner MUST pass it; unit tests can omit it.
+    ``subagent_activity`` (``SubagentDigest.activity``, the scanner's
+    one-file-at-a-time parse) or ``subagent_records`` replaces those reads.
     """
     turns = segment_turns(events)
     hitl_s = sum(t.active_seconds for t in turns if t.label == "HITL")
@@ -736,7 +736,12 @@ def compute_turn_aggregates(
     hitl_tool_s = sum(t.tool_seconds for t in turns if t.label == "HITL")
     afk_tool_s = sum(t.tool_seconds for t in turns if t.label == "AFK")
     afk_dispatch_s = sum(t.dispatch_seconds for t in turns if t.label == "AFK")
-    activity = subagent_activity_from_disk(jsonl_path) if jsonl_path else None
+    if not jsonl_path:
+        activity = None
+    elif subagent_activity is not None:
+        activity = subagent_activity
+    else:
+        activity = subagent_activity_from_disk(jsonl_path, records=subagent_records)
     parallel_s = afk_parallel_subagent_seconds(turns, events, extra_activity=activity)
     streaks = top_afk_streaks(turns, n=5)
     streak_s = streaks[0].active_seconds if streaks else 0.0

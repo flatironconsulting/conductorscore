@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from scripts.core.text import sha16 as _sha16
+
+if TYPE_CHECKING:
+    from scripts.time_accounting import TimeAccounting
 
 SCHEMA_VERSION = "0.13"
 
@@ -263,6 +266,14 @@ class PerSession:
     # See TOKEN_ACCOUNTING_VERSION. Always emitted. Not in
     # ``compute_session_chain`` (it only covers integrity-checked counts).
     token_accounting_version: int = TOKEN_ACCOUNTING_VERSION
+    # Time accounting v2 (plan 034): the per-session ``time_accounting``
+    # object, reported alongside the legacy time fields above (dual
+    # reporting), for every provider (Codex/Cursor with permission_signal
+    # "not_available"). Windowless sessions (Cron-only, zero events) carry a
+    # zero-valued object. None only when building it failed (or for
+    # hand-built sessions); emitted only when set. Not in
+    # ``compute_session_chain``.
+    time_accounting: "TimeAccounting | None" = None
 
 
 @dataclass(frozen=True)
@@ -369,6 +380,9 @@ class ExtractorOutput:
                 d["model_skill_invocations_by_name"] = dict(
                     s.model_skill_invocations_by_name
                 )
+            # Time accounting v2: emitted only when built (absent = v1).
+            if s.time_accounting is not None:
+                d["time_accounting"] = s.time_accounting.to_wire()
             # Emit ``provider`` only for non-default (codex) sessions so the
             # Claude-only payload is byte-identical to v0.11.
             if s.provider != _DEFAULT_PROVIDER:

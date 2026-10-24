@@ -1,0 +1,98 @@
+{
+  "afk_dispatch_minutes": 14,
+  "afk_intervals": [
+    {
+      "end_minute_exclusive": 29333375,
+      "is_cron": false,
+      "start_minute": 29333333
+    },
+    {
+      "end_minute_exclusive": 29333410,
+      "is_cron": false,
+      "start_minute": 29333393
+    },
+    {
+      "end_minute_exclusive": 29333427,
+      "is_cron": true,
+      "start_minute": 29333426
+    }
+  ],
+  "afk_max_streak_minutes": 41,
+  "afk_minutes": 57,
+  "afk_parallel_minutes_foreground": 14,
+  "afk_tool_minutes": 52,
+  "agent_dispatches": 1,
+  "assistant_msgs_by_model": {
+    "claude-opus-4-1": 9
+  },
+  "auto_compaction_events": 0,
+  "builtin_tool_invocations": 4,
+  "cache_creation_input_tokens": 0,
+  "cache_input_tokens": 0,
+  "commit_count": 0,
+  "cron_parallel_minutes": 1,
+  "distinct_builtin_tools": [
+    "Agent",
+    "Bash",
+    "CronCreate",
+    "Read"
+  ],
+  "distinct_mcp_tools": [
+    "mcp__github__get_me"
+  ],
+  "distinct_skills": [],
+  "ended_at_ms": 1760005640000,
+  "files_modified": 0,
+  "hitl_mcp_invocations": 1,
+  "hitl_minutes": 4,
+  "hitl_tool_minutes": 2,
+  "idle_minutes": 33,
+  "is_planned": false,
+  "is_scripted_session": false,
+  "is_significant_edit_session": false,
+  "mcp_invocations_by_name": {
+    "mcp__github__get_me": 1
+  },
+  "plugin_invocations": 0,
+  "plugin_invocations_by_name": {},
+  "project_hash": "87217f2b700377d8",
+  "qualifying_pairs": 0,
+  "rage_quit_event": false,
+  "redundant_approvals_per_signature": {
+    "Bash::make": 1
+  },
+  "repetitive_pairs": 0,
+  "revert_count": 0,
+  "session_hash": "e8bc163c82eee187",
+  "skill_invocations_by_name": {},
+  "started_at_ms": 1760000000000,
+  "strong_plan_signals": [],
+  "token_accounting_version": 2,
+  "tokens_by_model": {
+    "claude-opus-4-1": {
+      "input_hit": 0,
+      "input_miss": 0,
+      "output": 45
+    }
+  },
+  "tool_error_count": 0,
+  "top_afk_streaks": [
+    {
+      "active_minutes": 41,
+      "end_ts_ms": 1760002440000,
+      "start_ts_ms": 1759999980000,
+      "turn_count": 1
+    },
+    {
+      "active_minutes": 16,
+      "end_ts_ms": 1760004540000,
+      "start_ts_ms": 1760003580000,
+      "turn_count": 1
+    }
+  ],
+  "total_input_tokens": 90,
+  "total_lines_edited": 0,
+  "total_output_tokens": 45,
+  "user_skill_invocations": 0,
+  "weak_plan_signals": []
+}

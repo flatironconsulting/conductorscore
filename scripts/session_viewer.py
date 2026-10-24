@@ -44,6 +44,10 @@ from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
 from scripts.agents.claude.discovery import subagent_transcripts
+from scripts.agents.claude.events import (
+    SubagentRecords,
+    parse_transcript_records,
+)
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
@@ -54,6 +58,14 @@ from scripts.core.text import flatten_content
 from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.events import EventKind, _strip_synthetic_content, read_events
+from scripts.time_accounting import (
+    Segment,
+    SubagentDigest,
+    account_agents,
+    digest_subagent_transcripts,
+    grid_seconds,
+    partition_main_thread,
+)
 from scripts.turn_classifier import (
     ASK_USER_QUESTION_TOOL,
     K_BRIDGE_IDLE_SECONDS,
@@ -61,7 +73,6 @@ from scripts.turn_classifier import (
     Turn,
     parallel_subagent_intervals,
     segment_turns,
-    subagent_activity_from_disk,
 )
 
 
@@ -657,102 +668,114 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_subagent_messages(sub_jsonl_path: Path) -> list[TimelineMessage]:
-    """Parse a subagent JSONL into a flat list of bubbles."""
+def _parse_subagent_messages(
+    sub_jsonl_path: Path, records: list[dict] | None = None
+) -> list[TimelineMessage]:
+    """Parse a subagent JSONL into a flat list of bubbles. ``records`` (its
+    ``parse_transcript_records`` output) replaces the file read."""
     messages: list[TimelineMessage] = []
     pending_tools: dict[str, tuple[int, str]] = {}
-    with sub_jsonl_path.open(encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(d, dict):
-                continue
-            ts_ms = _parse_ts_ms(d)
-            if ts_ms is None:
-                continue
-            msg = d.get("message") if isinstance(d.get("message"), dict) else None
-            if msg is None:
-                continue
-            role = msg.get("role")
-            content = msg.get("content")
-            if role == "user":
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            tid = block.get("tool_use_id")
-                            if isinstance(tid, str) and tid in pending_tools:
-                                idx, _ = pending_tools.pop(tid)
-                                messages[idx].end_ts_ms = ts_ms
-                text = _flatten_text(content)
-                if text and _AUTO_COMPACT_BANNER not in text and not d.get("isMeta"):
-                    messages.append(
-                        TimelineMessage(ts_ms=ts_ms, role="user", text=_truncate(text))
-                    )
-            elif role == "assistant":
-                if not isinstance(content, list):
-                    continue
-                is_end_turn = msg.get("stop_reason") == "end_turn"
+    if records is None:
+        records = parse_transcript_records(sub_jsonl_path)
+    for d in records:
+        ts_ms = _parse_ts_ms(d)
+        if ts_ms is None:
+            continue
+        msg = d.get("message") if isinstance(d.get("message"), dict) else None
+        if msg is None:
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user":
+            if isinstance(content, list):
                 for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "text":
-                        text = block.get("text", "")
-                        if text:
-                            messages.append(
-                                TimelineMessage(
-                                    ts_ms=ts_ms,
-                                    role="assistant_text",
-                                    text=_truncate(text),
-                                    is_end_turn=is_end_turn,
-                                )
-                            )
-                    elif btype == "tool_use":
-                        name = block.get("name") or "?"
-                        tid = block.get("id") if isinstance(block.get("id"), str) else None
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id")
+                        if isinstance(tid, str) and tid in pending_tools:
+                            idx, _ = pending_tools.pop(tid)
+                            messages[idx].end_ts_ms = ts_ms
+            text = _flatten_text(content)
+            if text and _AUTO_COMPACT_BANNER not in text and not d.get("isMeta"):
+                messages.append(
+                    TimelineMessage(ts_ms=ts_ms, role="user", text=_truncate(text))
+                )
+        elif role == "assistant":
+            if not isinstance(content, list):
+                continue
+            is_end_turn = msg.get("stop_reason") == "end_turn"
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
                         messages.append(
                             TimelineMessage(
                                 ts_ms=ts_ms,
-                                role="assistant_tool",
-                                tool_name=name,
-                                text=_truncate(_tool_input_summary(block.get("input"))),
+                                role="assistant_text",
+                                text=_truncate(text),
+                                is_end_turn=is_end_turn,
                             )
                         )
-                        if tid:
-                            pending_tools[tid] = (len(messages) - 1, name)
+                elif btype == "tool_use":
+                    name = block.get("name") or "?"
+                    tid = block.get("id") if isinstance(block.get("id"), str) else None
+                    messages.append(
+                        TimelineMessage(
+                            ts_ms=ts_ms,
+                            role="assistant_tool",
+                            tool_name=name,
+                            text=_truncate(_tool_input_summary(block.get("input"))),
+                        )
+                    )
+                    if tid:
+                        pending_tools[tid] = (len(messages) - 1, name)
     messages.sort(key=lambda m: m.ts_ms)
     return messages
 
 
+def _subagent_panel(
+    sub_jsonl: Path, records: list[dict] | None = None
+) -> tuple[str, tuple[str, list[TimelineMessage]]] | None:
+    """``(parent_tool_use_id, (description, sub_messages))`` for ONE subagent
+    transcript, or None when its ``agent-<sid>.meta.json`` is missing or has
+    no ``toolUseId``. ``records`` (its ``parse_transcript_records`` output)
+    replaces the ``.jsonl`` read."""
+    meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    tool_use_id = meta.get("toolUseId")
+    description = meta.get("description") or meta.get("agentType") or "subagent"
+    if not isinstance(tool_use_id, str):
+        return None
+    return tool_use_id, (description, _parse_subagent_messages(sub_jsonl, records))
+
+
 def _load_subagent_panels(
     jsonl_path: Path,
+    *,
+    records: SubagentRecords | None = None,
 ) -> dict[str, tuple[str, list[TimelineMessage]]]:
     """Return ``{parent_tool_use_id: (description, sub_messages)}``.
 
     Reads each ``agent-<sid>.meta.json`` to discover the parent's
     ``toolUseId`` and the subagent's ``description``, then parses the
-    matching ``.jsonl``.
+    matching ``.jsonl`` (or takes it from ``records``,
+    ``load_subagent_records`` output). See ``_subagent_panel``;
+    ``render_session`` builds the same dict one file at a time.
     """
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
     for sub_jsonl in subagent_transcripts(jsonl_path):
-        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(meta, dict):
-            continue
-        tool_use_id = meta.get("toolUseId")
-        description = meta.get("description") or meta.get("agentType") or "subagent"
-        if not isinstance(tool_use_id, str):
-            continue
-        msgs = _parse_subagent_messages(sub_jsonl)
-        panels[tool_use_id] = (description, msgs)
+        panel = _subagent_panel(
+            sub_jsonl, records.get(sub_jsonl, []) if records is not None else None
+        )
+        if panel is not None:
+            panels[panel[0]] = panel[1]
     return panels
 
 
@@ -1148,6 +1171,35 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .wire-trace { margin-top: 28px; padding: 12px 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--rule); border-radius: 8px; }
 .wire-trace h2 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; color: var(--text); }
 .wire-trace pre { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.time-accounting { margin-top: 28px; }
+.time-accounting h2 { margin: 0 0 4px 0; font-size: 13px; font-weight: 600; color: var(--text); display: flex; justify-content: space-between; }
+.time-accounting h2 .ta-leverage { color: var(--green); font-family: var(--mono); }
+.time-accounting .ta-sub { font-size: 12px; color: var(--muted); margin: 0 0 8px 0; }
+.time-accounting .summary-table th, .time-accounting .summary-table td { padding: 6px 10px; }
+.time-accounting .summary-table thead th { font-size: 11px; color: var(--muted); }
+.time-accounting tr[data-row="total"] > *, .time-accounting tr[data-row="wall_clock"] > * { border-top: 2px solid var(--rule); }
+.time-accounting tr[data-row="background_main"] > th, .time-accounting tr[data-row="agents"] > th { padding-left: 24px; color: var(--muted); }
+.time-accounting td.ta-count { color: var(--muted); }
+.time-accounting .ta-subtable th.ta-child { padding-left: 24px; color: var(--muted); font-weight: normal; }
+.time-accounting td.ta-note { color: var(--muted); text-align: left; font-size: 11px; }
+.time-accounting .ta-formula { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 6px 0 12px 0; }
+.ta-bar { display: flex; height: 18px; width: 100%; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; margin: 10px 0 4px 0; background: var(--panel); }
+.ta-seg { display: block; height: 100%; flex: none; }
+.ta-seg.o-interactive { box-shadow: inset 0 3px 0 var(--hitl); }
+.ta-seg.o-background { box-shadow: inset 0 3px 0 var(--afk); }
+.ta-seg.k-read_write { background: #86efac; }
+.ta-seg.o-interactive.k-model { background: var(--hitl); }
+.ta-seg.o-background.k-model { background: var(--afk); }
+.ta-seg.k-tool { background: var(--tool); }
+.ta-seg.k-dispatch_wait { background: #64748b; }
+.ta-seg.k-permission_wait { background: #f97316; }
+.ta-seg.k-tool_over_cap { background: #78716c; }
+.ta-seg.k-polling { background: #a78bfa; }
+.ta-seg.k-no_activity { background: var(--idle); }
+.ta-seg.o-between_turns.k-no_activity { background: #262a36; }
+.ta-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.ta-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--muted); margin: 6px 0 0 0; }
+.ta-legend .ta-seg { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 footer { margin-top: 32px; color: var(--muted); font-size: 12px; font-family: var(--mono); border-top: 1px solid var(--rule); padding-top: 12px; }
 """
 
@@ -1411,6 +1463,8 @@ class RenderModel:
     streak_members: dict[int, list[int]]
     streak_table_html: str
     wire_trace_html: str
+    # Time accounting v2 section (grid + timeline bar); filled by render_session.
+    time_accounting_html: str = ""
 
 
 def _compute_render_model(
@@ -1582,6 +1636,319 @@ def _compute_render_model(
     )
 
 
+# ---------------------------------------------------------------------------
+# Time accounting v2 section (plan 034): Leverage grid + timeline bar
+# ---------------------------------------------------------------------------
+
+_TA_COLS = ("read_write", "model", "tool", "active", "idle", "total")
+
+# Idle sub-tables, one per row (decision 13: idle lands in a row by reason).
+# (reason, label, count unit or "" for none, note)
+_TA_IA_IDLE_LINES = (
+    ("permission_wait", "waiting on your permission", "prompts",
+     "a wait over 5 min ends your longest run"),
+    ("no_activity", "no activity inside a short turn", "", ""),
+)
+_TA_BG_IDLE_LINES = (
+    ("dispatch_wait", "waiting on a subagent you dispatched", "dispatches",
+     "counted under parallel agents"),
+    ("tool_over_cap", "tool time over cap", "calls",
+     "30 min per call, 10 if you interrupted"),
+    ("polling", "polling / sleeping", "calls", ""),
+    ("no_activity", "no activity inside a long turn", "gaps", ""),
+)
+
+_TA_AGENT_LINES = (
+    ("subagent", "subagents", "agents"),
+    ("workflow", "Workflow agents", "agents"),
+    ("background_shell", "background shell commands", "commands"),
+)
+
+_TA_KIND_LABELS = {
+    "read_write": "you reading & typing",
+    "model": "agent thinking",
+    "tool": "agent tools",
+    "dispatch_wait": "waiting on a subagent",
+    "permission_wait": "waiting on your permission",
+    "tool_over_cap": "tool over cap",
+    "polling": "polling / sleeping",
+    "no_activity": "no activity",
+}
+
+_TA_OWNER_LABELS = {
+    "interactive": "Interactive",
+    "background": "Background",
+    "between_turns": "Between turns",
+}
+
+
+def _ta_hours(seconds: float) -> str:
+    return f"{seconds / 3600:.2f}"
+
+
+def _ta_plural(n: int, unit: str) -> str:
+    """``unit`` is plural; drop the trailing s for one."""
+    return f"{n} {unit[:-1] if n == 1 and unit.endswith('s') else unit}"
+
+
+def _ta_grid_rows(g: dict) -> list[tuple[str, str, str, dict[str, float | None]]]:
+    """(row id, label, count text, {col: seconds or None for blank}).
+
+    Every total is computed here from the parts in ``g`` (spec: the
+    component computes totals, never reads one it could compute).
+    """
+    ia, bm, ag, bt = (
+        g["interactive"], g["background_main"], g["agents"], g["between_turns"]
+    )
+
+    def row(rw, model, tool, idle, *, show_idle=True):
+        active = (rw or 0.0) + (model or 0.0) + (tool or 0.0)
+        return {
+            "read_write": rw, "model": model, "tool": tool, "active": active,
+            "idle": idle if show_idle else None,
+            "total": active + (idle or 0.0),
+        }
+
+    # Interactive idle = in-turn Interactive idle + between turns (decision 12).
+    r_ia = row(ia["read_write_s"], ia["model_s"], ia["tool_s"], ia["idle_s"] + bt["idle_s"])
+    r_bm = row(None, bm["model_s"], bm["tool_s"], bm["idle_s"])
+    r_ag = row(None, ag["model_s"], ag["tool_s"], None, show_idle=False)
+    r_bg = row(None, bm["model_s"] + ag["model_s"], bm["tool_s"] + ag["tool_s"], bm["idle_s"])
+
+    def add(*rows):
+        return {c: sum((r[c] or 0.0) for r in rows) for c in _TA_COLS}
+
+    r_total = add(r_ia, r_bg)
+    r_minus = dict(r_ag)
+    r_wall = {c: r_total[c] - (r_ag[c] or 0.0) for c in _TA_COLS}
+    return [
+        ("interactive", "Interactive", _ta_plural(ia["turns"], "turns"), r_ia),
+        ("background", "Background", "", r_bg),
+        ("background_main", "├ main thread", _ta_plural(bm["turns"], "turns"), r_bm),
+        ("agents", "└ parallel agents", _ta_plural(ag["count"], "agents"), r_ag),
+        ("total", "Total", "", r_total),
+        ("minus_agents", "− parallel agents", "", r_minus),
+        ("wall_clock", "Wall clock", "", r_wall),
+    ]
+
+
+def _ta_bar_html(segments: list[Segment]) -> str:
+    """One bar, a span per segment, widths proportional to duration."""
+    if not segments:
+        return ""
+    ws, we = segments[0].start_ms, segments[-1].end_ms
+    span = max(1, we - ws)
+    spans = []
+    for s in segments:
+        ms = s.end_ms - s.start_ms
+        owner, kind = s.owner.value, s.kind.value
+        title = (
+            f"{_TA_OWNER_LABELS[owner]} · {_TA_KIND_LABELS[kind]} · "
+            f"{_fmt_dur(ms / 1000)} · {_fmt_clock(s.start_ms)} → {_fmt_clock(s.end_ms)}"
+        )
+        spans.append(
+            f'<span class="ta-seg o-{owner} k-{kind}" data-ms="{ms}" '
+            f'style="width:{100 * ms / span:.4f}%" title="{html.escape(title)}"></span>'
+        )
+    legend_items = [
+        ("o-interactive k-read_write", "you reading & typing"),
+        ("o-interactive k-model", "Interactive thinking"),
+        ("o-background k-model", "Background thinking"),
+        ("o-background k-tool", "agent tools"),
+        ("o-background k-dispatch_wait", "waiting on a subagent"),
+        ("o-background k-permission_wait", "waiting on permission"),
+        ("o-background k-tool_over_cap", "tool over cap"),
+        ("o-background k-polling", "polling"),
+        ("o-background k-no_activity", "no activity in a turn"),
+        ("o-between_turns k-no_activity", "between turns"),
+    ]
+    legend = "".join(
+        f'<span><span class="ta-seg {cls}"></span>{html.escape(label)}</span>'
+        for cls, label in legend_items
+    )
+    return (
+        f'<div class="ta-bar" data-ms="{we - ws}">{"".join(spans)}</div>'
+        f'<div class="ta-axis"><span>{_fmt_clock(ws)}</span>'
+        f'<span>{_fmt_dur((we - ws) / 1000)}</span><span>{_fmt_clock(we)}</span></div>'
+        f'<div class="ta-legend">{legend}<span>top stripe: '
+        f'<span style="color:var(--hitl)">Interactive</span> / '
+        f'<span style="color:var(--afk)">Background</span> turn</span></div>'
+    )
+
+
+def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
+    """The time accounting v2 section: Leverage grid, sub-tables, bar.
+
+    Layout follows the spec's "The table" (single-session numbers, hours to
+    two decimals). Each numeric cell carries ``data-col`` and ``data-s``
+    (seconds) so tests can check the identities without rounding.
+    """
+    rows = _ta_grid_rows(g)
+    by_id = {r[0]: r[3] for r in rows}
+    bg_active = by_id["background"]["active"]
+    ia_active = by_id["interactive"]["active"]
+    leverage = bg_active / ia_active if ia_active > 0 else math.inf
+    lev_attr = "inf" if math.isinf(leverage) else f"{leverage:.6f}"
+
+    body = []
+    for rid, label, count, cells in rows:
+        tds = [f'<td class="ta-count">{html.escape(count)}</td>']
+        for c in _TA_COLS:
+            v = cells.get(c)
+            if v is None:
+                tds.append('<td class="muted"></td>')
+            else:
+                tds.append(
+                    f'<td data-col="{c}" data-s="{v:.3f}" title="{_fmt_dur(v)}">'
+                    f"{_ta_hours(v)}</td>"
+                )
+        body.append(
+            f'<tr class="ta-row" data-row="{rid}">'
+            f'<th>{html.escape(label)}</th>{"".join(tds)}</tr>'
+        )
+
+    def idle_line(table: str, line: str, label: str, count: str, secs: float,
+                  note: str = "", child: bool = False) -> str:
+        cls = ' class="ta-child"' if child else ""
+        return (
+            f'<tr class="ta-line" data-table="{table}" data-line="{line}" '
+            f'data-s="{secs:.3f}"><th{cls}>{html.escape(label)}</th>'
+            f'<td class="ta-count">{html.escape(count)}</td>'
+            f'<td title="{_fmt_dur(secs)}">{_ta_hours(secs)}</td>'
+            f'<td class="ta-note">{html.escape(note)}</td></tr>'
+        )
+
+    # Sub-table lines hide at zero.
+    bt = g["between_turns"]
+    ia_lines = []
+    if bt["idle_s"] > 0:
+        with_agents = min(bt["with_agents_s"], bt["idle_s"])
+        ia_lines.append(idle_line(
+            "ia", "between_turns", "between turns", _ta_plural(bt["gaps"], "gaps"),
+            bt["idle_s"]))
+        if with_agents > 0:
+            ia_lines.append(idle_line(
+                "ia", "with_agents", "├ while your agents worked", "", with_agents,
+                child=True))
+        if bt["idle_s"] - with_agents > 0:
+            ia_lines.append(idle_line(
+                "ia", "nothing_running", "└ nothing running", "",
+                bt["idle_s"] - with_agents, child=True))
+
+    def reason_lines(table: str, lines: tuple, cells: dict) -> list[str]:
+        out = []
+        for reason, label, unit, note in lines:
+            v = cells.get(reason, {"count": 0, "s": 0.0})
+            if v["s"] > 0:
+                count = _ta_plural(v["count"], unit) if unit else ""
+                out.append(idle_line(table, reason, label, count, v["s"], note))
+        return out
+
+    ia_lines += reason_lines("ia", _TA_IA_IDLE_LINES, g["interactive"]["idle_by_reason"])
+    bg_lines = reason_lines("bg", _TA_BG_IDLE_LINES, g["background_main"]["idle_by_reason"])
+    ag = g["agents"]
+    agent_lines = []
+    for atype, label, unit in _TA_AGENT_LINES:
+        v = ag["by_type"].get(atype)
+        if not v or v["active_s"] <= 0:
+            continue
+        agent_lines.append(
+            f'<tr><th>{html.escape(label)}</th>'
+            f'<td class="ta-count">{_ta_plural(v["count"], unit)}</td>'
+            f'<td title="{_fmt_dur(v["active_s"])}">{_ta_hours(v["active_s"])}</td>'
+            f'<td class="ta-note"></td></tr>'
+        )
+    if ag["union_s"] > 0:
+        conc = ag["active_s"] / ag["union_s"]
+        agent_lines.append(
+            f'<tr><th>wall clock with ≥ 1 running</th><td class="ta-count"></td>'
+            f'<td title="{_fmt_dur(ag["union_s"])}">{_ta_hours(ag["union_s"])}</td>'
+            f'<td class="ta-note">{conc:.1f}× concurrency · peak {ag["max_concurrent"]} at once'
+            f' · agent idle {_ta_hours(ag["idle_s"])} h (not in the grid)</td></tr>'
+        )
+
+    def sub_table(title: str, lines: list[str]) -> str:
+        if not lines:
+            return ""
+        return (
+            '<table class="summary-table ta-subtable"><thead><tr>'
+            f'<th>{title}</th><th>Count</th><th>Hours</th><th></th>'
+            f'</tr></thead><tbody>{"".join(lines)}</tbody></table>'
+        )
+
+    head = "".join(
+        f"<th>{h}</th>"
+        for h in ("", "Count", "You reading &amp; typing", "Agent thinking",
+                  "Agent tools", "Active hours", "Idle hours", "Total hours")
+    )
+    return (
+        '<section class="time-accounting">'
+        f'<h2><span>Agent Leverage · time accounting v2 (preview)</span>'
+        f'<span class="ta-leverage" data-x="{lev_attr}">{_fmt_leverage(leverage)}</span></h2>'
+        '<p class="ta-sub">Background hours for every Interactive hour. Every '
+        'wall-clock minute of the session lands in exactly one row and column; '
+        'parallel agents sit on top of the timeline (agent-hours).</p>'
+        f'<table class="summary-table ta-grid"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table>'
+        f'<div class="ta-formula">Leverage = Background active ÷ Interactive active = '
+        f'{_ta_hours(bg_active)} ÷ {_ta_hours(ia_active)} = {_fmt_leverage(leverage)}'
+        f' · longest run {_fmt_dur(g["longest_run_s"])}</div>'
+        f'{sub_table("Where the Interactive idle hours went", ia_lines)}'
+        f'{sub_table("Where the Background idle hours went", bg_lines)}'
+        f'{sub_table("Parallel agents", agent_lines)}'
+        f"{_ta_bar_html(segments)}"
+        "</section>"
+    )
+
+
+def _time_accounting_section(
+    jsonl_path: Path,
+    events: list,
+    subagent_records: SubagentRecords | None = None,
+    *,
+    subagent_digest: SubagentDigest | None = None,
+) -> str:
+    """The v2 section, or "" if building it raises: a bug in time accounting
+    v2 must never cost the user the rest of the viewer page (as Ruling 22
+    guards the scan). The note names the exception type only."""
+    try:
+        return _build_time_accounting_section(
+            jsonl_path, events, subagent_records, subagent_digest=subagent_digest
+        )
+    except Exception as e:  # noqa: BLE001 — the page must survive any v2 bug
+        print(
+            f"session viewer: time accounting section skipped ({type(e).__name__}).",
+            file=sys.stderr,
+        )
+        return ""
+
+
+def _build_time_accounting_section(
+    jsonl_path: Path,
+    events: list,
+    subagent_records: SubagentRecords | None = None,
+    *,
+    subagent_digest: SubagentDigest | None = None,
+) -> str:
+    """Partition the session (window = first..last positive event timestamp,
+    as the scanner bounds it) and render the v2 section."""
+    ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
+    if not ts:
+        return ""
+    window = (min(ts), max(ts))
+    segments = partition_main_thread(events, window)
+    # Subagent / Workflow transcripts are a Claude layout.
+    claude = not (_is_cursor_locator(jsonl_path) or _is_codex_jsonl(jsonl_path))
+    agents = account_agents(
+        events,
+        jsonl_path if claude else None,
+        window[1],
+        subagent_records=subagent_records,
+        subagent_digest=subagent_digest,
+    )
+    return _time_accounting_html(grid_seconds(segments, agents), segments)
+
+
 def _render_html(model: RenderModel) -> str:
     """Render phase: assemble the self-contained HTML page from a
     already-computed ``RenderModel``. Pure string-building — no aggregation
@@ -1651,6 +2018,7 @@ def _render_html(model: RenderModel) -> str:
   </table>
   {model.streak_table_html}
   {model.wire_trace_html}
+  {model.time_accounting_html}
 </header>
 <div class="timeline">
 """)
@@ -1819,8 +2187,22 @@ def render_session(
     turns = _split_turns_at_idle(turns, events, aborted_ids)
     hitl_streaks, afk_streaks = derive_streaks(turns)
 
-    # Subagent spans from disk (the route stages them next to the input JSONL).
-    activity = subagent_activity_from_disk(jsonl_path)
+    # Each subagent transcript is parsed once (plan 035), one file at a time
+    # (Ruling 12): the activity spans, the panels and the v2 agent accounting
+    # each keep only their per-file result, and the records are dropped
+    # before the next file. The subagent files are staged next to the input
+    # JSONL by the route.
+    subagent_panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
+
+    def _take_panel(sub_jsonl: Path, records: list[dict]) -> None:
+        panel = _subagent_panel(sub_jsonl, records)
+        if panel is not None:
+            subagent_panels[panel[0]] = panel[1]
+
+    subagents = digest_subagent_transcripts(
+        jsonl_path, usage=False, on_file=_take_panel
+    )
+    activity = subagents.activity
     subagent_spans = {sid: (a.start_ts_ms, a.end_ts_ms) for sid, a in activity.items()}
     parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
     # The wire's subagent credit (per-agent sum of agent active time; the
@@ -1831,7 +2213,6 @@ def render_session(
     )
     main_plus_sub_seconds = sum((hi - lo) / 1000.0 for lo, hi in parallel_intervals)
 
-    subagent_panels = _load_subagent_panels(jsonl_path)
     if redact:
         subagent_panels = _redact_panels(subagent_panels)
 
@@ -1846,6 +2227,12 @@ def render_session(
         parallel_seconds,
         main_plus_sub_seconds,
         parallel_intervals,
+    )
+    model = replace(
+        model,
+        time_accounting_html=_time_accounting_section(
+            jsonl_path, events, subagent_digest=subagents
+        ),
     )
 
     output_path.write_text(_render_html(model), encoding="utf-8")

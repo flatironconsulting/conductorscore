@@ -44,7 +44,12 @@ class AgentAdapter(Protocol):
     ) -> tuple[list[Event], dict[int, str]]:
         """Parse one session transcript into normalized ``Event``s plus the
         in-memory ``id(event) -> raw_user_text`` side-channel map used by the
-        in-process detectors."""
+        in-process detectors.
+
+        This is the whole port. ``ClaudeAdapter`` adds Claude-only keywords
+        (``include_subagent_usage``, ``subagent_records``) for its subagent
+        transcript tree; callers that pass them narrow to ``ClaudeAdapter``
+        first (``scanner._read_session``)."""
         ...
 
     def preflight(self, now_ms: int, window_ms: int) -> dict:
