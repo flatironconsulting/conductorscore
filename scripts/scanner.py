@@ -41,7 +41,7 @@ from scripts.plan_signals import (
 from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
-from scripts.time_accounting import build_time_accounting
+from scripts.time_accounting import TimeAccounting, build_time_accounting
 from scripts.tool_counter import (
     SessionToolFields,
     ToolCounts,
@@ -201,6 +201,10 @@ def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int
 _time_accounting_warned = False
 
 
+def _permission_signal(provider: str) -> str:
+    return "available" if provider == "claude" else "not_available"
+
+
 def _safe_time_accounting(events, window, jsonl_path, session_id, provider="claude"):
     """``build_time_accounting``, or None (with one warning per scan) when it
     raises. The warning names the exception type and session id only.
@@ -214,7 +218,7 @@ def _safe_time_accounting(events, window, jsonl_path, session_id, provider="clau
             events,
             window,
             jsonl_path=jsonl_path,
-            permission_signal="available" if provider == "claude" else "not_available",
+            permission_signal=_permission_signal(provider),
         )
     except Exception as e:  # noqa: BLE001 — dual reporting must survive any bug
         if not _time_accounting_warned:
@@ -315,6 +319,11 @@ def _build_per_session(
                     turn_count=st.turn_count,
                 )
             )
+    else:
+        # Windowless (Cron-only or zero events): zero legacy time, so a
+        # zero-valued object. Absent then means only "legacy client" or
+        # "build failed" (Ruling 35).
+        time_accounting = TimeAccounting(permission_signal=_permission_signal(provider))
 
     cron_parallel = cron_parallel_minutes(events)
     for start, end_excl in cron_intervals(events):

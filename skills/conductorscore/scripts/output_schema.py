@@ -268,9 +268,10 @@ class PerSession:
     token_accounting_version: int = TOKEN_ACCOUNTING_VERSION
     # Time accounting v2 (plan 034): the per-session ``time_accounting``
     # object, reported alongside the legacy time fields above (dual
-    # reporting). None for sessions without a foreground window (Cron-only)
-    # and, until their fallbacks land, non-Claude providers; emitted only
-    # when set, so those payloads stay byte-identical. Not in
+    # reporting), for every provider (Codex/Cursor with permission_signal
+    # "not_available"). Windowless sessions (Cron-only, zero events) carry a
+    # zero-valued object. None only when building it failed (or for
+    # hand-built sessions); emitted only when set. Not in
     # ``compute_session_chain``.
     time_accounting: "TimeAccounting | None" = None
 

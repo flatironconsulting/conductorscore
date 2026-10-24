@@ -44,7 +44,8 @@ from scripts.time_accounting import TimeAccounting
 # model_skill_invocations_by_name (#11 follow-up). 5: parallel subagent time
 # (afk_parallel_minutes_foreground) is the per-agent SUM again, not the union.
 # 6: PerSession gained the time accounting v2 object (time_accounting).
-CACHE_FORMAT = 6
+# 7: windowless sessions carry a zero-valued time_accounting object (was None).
+CACHE_FORMAT = 7
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 

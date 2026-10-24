@@ -383,13 +383,44 @@ def test_scanner_uses_session_bounds(tmp_path, monkeypatch):
     assert identity_violations(ta) == []
 
 
-def test_cron_only_session_has_no_object():
+def _zero_wire(signal: str) -> dict:
+    return TimeAccounting(permission_signal=signal).to_wire()
+
+
+def test_cron_only_session_has_zero_object():
+    """Ruling 35: a windowless session carries a zero-valued object, so the
+    server never mistakes it for a legacy session."""
     events = [Event(kind=EventKind.ASSISTANT_TOOL, session_id="s", timestamp_ms=T,
                     tool_name="CronCreate", tool_use_id="c")]
     meta = SessionMeta(session_id="s", project_root="/p", first_ts_ms=T, last_ts_ms=T)
     ps = _build_per_session(meta, "claude", events, {}, None, {})
-    assert ps.time_accounting is None
-    assert "time_accounting" not in _wire_session(ps)
+    assert ps.hitl_minutes == ps.afk_minutes == ps.idle_minutes == 0
+    wire = _wire_session(ps)
+    assert wire["time_accounting"] == _zero_wire("available")
+    ta = wire["time_accounting"]
+    assert ta["version"] == 2 and ta["wall_clock_minutes"] == 0
+    assert identity_violations(ps.time_accounting) == []
+
+
+@pytest.mark.parametrize("provider,signal", [
+    ("claude", "available"), ("codex", "not_available"), ("cursor", "not_available"),
+])
+def test_zero_event_session_has_zero_object(provider, signal):
+    meta = SessionMeta(session_id="s", project_root="/p", first_ts_ms=T, last_ts_ms=T)
+    ps = _build_per_session(meta, provider, [], {}, None, {})
+    assert _wire_session(ps)["time_accounting"] == _zero_wire(signal)
+
+
+def test_zero_object_leaves_are_all_zero():
+    def leaves(d):
+        for v in d.values():
+            if isinstance(v, dict):
+                yield from leaves(v)
+            elif isinstance(v, int):
+                yield v
+    w = _zero_wire("not_available")
+    w.pop("version")
+    assert set(leaves(w)) == {0}
 
 
 def test_wire_session_carries_object(tmp_path, monkeypatch):
@@ -401,7 +432,7 @@ def test_wire_session_carries_object(tmp_path, monkeypatch):
 
 
 def test_cache_format_bumped():
-    assert CACHE_FORMAT == 6
+    assert CACHE_FORMAT == 7
 
 
 def test_cache_round_trips_time_accounting(tmp_path, monkeypatch):

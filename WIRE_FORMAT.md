@@ -1072,13 +1072,21 @@ into the Leverage table's rows and columns (plan 034). It is reported
 `afk_max_streak_minutes`, `afk_intervals`, `top_afk_streaks`), which keep
 their current values and semantics during dual reporting.
 
-Emitted for every session with a foreground window, whatever the provider.
-Absent only for Cron-only sessions (and when building it failed). Codex and
-Cursor sessions carry `permission_signal: "not_available"` (neither records
-permission grants, so `idle_by_reason.permission_wait` is zero) and
-`agents.count: 0` (agent accounting reads Claude's `subagents/` tree).
-**Absent means v1:** the server MUST treat a session without the object as
-legacy-only and render the old layout; it MUST NOT read absence as zero.
+Emitted for every session, whatever the provider. A session with no
+foreground window (Cron-only, or zero events) carries a **zero-valued**
+object: `wall_clock_minutes: 0`, every leaf 0, `version: 2`, and
+`permission_signal` by provider. Absent therefore means only "legacy
+client" or "building it failed". Codex and Cursor sessions carry
+`permission_signal: "not_available"` (neither records permission grants, so
+`idle_by_reason.permission_wait` is zero) and `agents.count: 0` (agent
+accounting reads Claude's `subagents/` tree). Codex persists a declined
+approval but not the request, so a decline is classified as an interrupt
+(10-min tool cap), not as a permission wait.
+**Absent means v1:** the server MUST NOT read absence as zero for a session
+with real legacy time. A session without the object whose legacy time is
+zero (`hitl_minutes + afk_minutes + idle_minutes == 0`) contributes nothing
+and is skipped; if any session with real legacy time lacks the object, the
+server renders the old layout.
 Not covered by `session_chain`.
 
 Example (the synthetic session in `tests/unit/test_time_accounting_wire.py`:
@@ -1113,6 +1121,11 @@ Every `*_minutes` value is an integer number of minutes: the client sums
 seconds per field, then rounds **once per field** (`round(seconds / 60)`).
 Fields are therefore individually rounded, and a sum of n fields may differ
 from the matching total by up to n minutes. Counts are exact integers.
+The rounding is biased slightly low in practice, because many leaves are
+under 30 seconds and round to 0: summed over sessions, the grid's Wall clock
+row (built from the leaves) runs a little under Σ `wall_clock_minutes`
+(about −0.3% on real data), well inside the server's reconcile tolerance
+of 1 minute per session.
 
 ### Fields
 
