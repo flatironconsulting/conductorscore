@@ -290,6 +290,15 @@ def _rich_session_rows() -> list[dict]:
         _line("assistant", T + 61 * MIN, tu("a1", "Agent", {"prompt": "go", "description": "d"})),
         _line("user", T + 75 * MIN, tr("a1")),
         _line("assistant", T + 76 * MIN, text, stop="end_turn"),
+        # A short typed (HITL) turn: a tool call, an MCP call, a Cron call.
+        _line("user", T + 90 * MIN, "third synthetic prompt about the release notes"),
+        _line("assistant", T + 90 * MIN + 30 * SEC, tu("r1", "Read", {"file_path": "/x/notes.md"})),
+        _line("user", T + 91 * MIN + 30 * SEC, tr("r1")),
+        _line("assistant", T + 92 * MIN, tu("m1", "mcp__github__get_me", {})),
+        _line("user", T + 92 * MIN + 40 * SEC, tr("m1")),
+        _line("assistant", T + 93 * MIN, tu("c1", "CronCreate", {"cron": "0 9 * * *", "prompt": "p"})),
+        _line("user", T + 93 * MIN + 5 * SEC, tr("c1")),
+        _line("assistant", T + 94 * MIN, text, stop="end_turn"),
     ]
 
 
@@ -320,6 +329,10 @@ def test_legacy_fields_unchanged(tmp_path, monkeypatch):
     _, ps = _scan(tmp_path, monkeypatch)
     after = _wire_session(ps)
     assert "time_accounting" in after
+    # The fixture exercises the HITL and Cron paths, not only AFK.
+    for key in ("hitl_minutes", "hitl_tool_minutes", "hitl_mcp_invocations",
+                "cron_parallel_minutes", "afk_minutes", "idle_minutes"):
+        assert after[key] > 0, key
     legacy = {k: v for k, v in after.items() if k != "time_accounting"}
     # Before: the payload the pre-Task-8 client emitted for this session.
     before = json.loads(GOLDEN.read_text())
@@ -363,8 +376,8 @@ def test_scanner_uses_session_bounds(tmp_path, monkeypatch):
     # Discovery's first line is the late queue-operation; the object spans the
     # #10 bounds (true min..max), like the legacy wall clock.
     assert meta.first_ts_ms == T + 11 * MIN
-    assert (ps.started_at_ms, ps.ended_at_ms) == (T, T + 76 * MIN)
-    assert ta.wall_clock_minutes == 76
+    assert (ps.started_at_ms, ps.ended_at_ms) == (T, T + 94 * MIN)
+    assert ta.wall_clock_minutes == 94
     assert ta.permission_signal == "available"
     assert ta.subagent_count == 1
     assert identity_violations(ta) == []

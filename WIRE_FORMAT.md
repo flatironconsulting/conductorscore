@@ -1079,25 +1079,26 @@ legacy-only and render the old layout; it MUST NOT read absence as zero.
 Not covered by `session_chain`.
 
 Example (the synthetic session in `tests/unit/test_time_accounting_wire.py`:
-two typed turns, a 38-min Bash call, a 14-min blocking subagent dispatch):
+two Background turns with a 38-min Bash call and a 14-min blocking subagent
+dispatch, then a short Interactive turn):
 
 ```jsonc
 "time_accounting": {
   "version": 2,
-  "wall_clock_minutes": 76,
-  "interactive":  { "turns": 0, "read_write_minutes": 5, "model_minutes": 0, "tool_minutes": 0, "idle_minutes": 0 },
+  "wall_clock_minutes": 94,
+  "interactive":  { "turns": 1, "read_write_minutes": 10, "model_minutes": 2, "tool_minutes": 2, "idle_minutes": 0 },
   "background":   { "turns": 2, "model_minutes": 5, "tool_minutes": 30, "idle_minutes": 22 },
   "agents":       { "count": 1, "model_minutes": 14, "tool_minutes": 0, "idle_minutes": 0,
                     "union_minutes": 14, "max_concurrent_agents": 1,
                     "by_type": { "subagent": {"count": 1, "minutes": 14},
                                  "workflow": {"count": 0, "minutes": 0},
                                  "background_shell": {"count": 0, "minutes": 0} } },
-  "between_turns": { "gaps": 1, "idle_minutes": 14 },
+  "between_turns": { "gaps": 2, "idle_minutes": 23 },
   "idle_by_reason": { "dispatch_wait":   {"count": 1, "minutes": 14},
                       "permission_wait": {"count": 0, "minutes": 0},
                       "tool_over_cap":   {"count": 1, "minutes": 8},
                       "polling":         {"count": 0, "minutes": 0},
-                      "no_activity":     {"count": 1, "minutes": 14} },
+                      "no_activity":     {"count": 2, "minutes": 23} },
   "longest_run_minutes": 33,
   "permission_signal": "available"
 }
