@@ -43,16 +43,17 @@ GOLDEN = Path(__file__).parent.parent / "fixtures" / "time_accounting" / "legacy
 SPEC_KEYS = {
     "version": None,
     "wall_clock_minutes": None,
-    "interactive": {"turns", "read_write_minutes", "model_minutes", "tool_minutes", "idle_minutes"},
-    "background": {"turns", "model_minutes", "tool_minutes", "idle_minutes"},
+    "interactive": {"turns", "read_write_minutes", "model_minutes", "tool_minutes", "idle_minutes",
+                    "idle_by_reason"},
+    "background": {"turns", "model_minutes", "tool_minutes", "idle_minutes", "idle_by_reason"},
     "agents": {"count", "model_minutes", "tool_minutes", "idle_minutes", "union_minutes",
                "max_concurrent_agents", "by_type"},
-    "between_turns": {"gaps", "idle_minutes"},
-    "idle_by_reason": {"dispatch_wait", "permission_wait", "tool_over_cap", "polling",
-                       "no_activity"},
+    "between_turns": {"gaps", "idle_minutes", "with_agents_minutes"},
     "longest_run_minutes": None,
     "permission_signal": None,
 }
+IA_REASONS = {"permission_wait", "no_activity"}
+BG_REASONS = {"dispatch_wait", "tool_over_cap", "polling", "no_activity"}
 
 
 # ---- fixtures from Tasks 3-5 ------------------------------------------------
@@ -171,22 +172,28 @@ def _all_fixtures(tmp_path):
 # ---- wire shape -------------------------------------------------------------
 
 
-def test_wire_shape(tmp_path):
+def test_wire_shape_v2_two_rows(tmp_path):
+    """Plan 036: per-row idle_by_reason, between_turns.with_agents_minutes,
+    no top-level idle_by_reason."""
     events, window, jsonl = _agent_fixtures(tmp_path)[0]
     ta = build_time_accounting(events, window, jsonl, "available")
     assert isinstance(ta, TimeAccounting)
     w = ta.to_wire()
     assert set(w) == set(SPEC_KEYS)
+    assert "idle_by_reason" not in w
     for key, sub in SPEC_KEYS.items():
         if sub is not None:
             assert set(w[key]) == sub, key
+    assert set(w["interactive"]["idle_by_reason"]) == IA_REASONS
+    assert set(w["background"]["idle_by_reason"]) == BG_REASONS
+    for row in ("interactive", "background"):
+        for r in w[row]["idle_by_reason"].values():
+            assert set(r) == {"count", "minutes"}
     assert w["version"] == 2
     assert w["permission_signal"] == "available"
     assert set(w["agents"]["by_type"]) == {"subagent", "workflow", "background_shell"}
     for t in w["agents"]["by_type"].values():
         assert set(t) == {"count", "minutes"}
-    for r in w["idle_by_reason"].values():
-        assert set(r) == {"count", "minutes"}
     # Every leaf is an int except the signal; JSON-serializable as is.
     def leaves(d):
         for v in d.values():
@@ -203,6 +210,9 @@ def test_wire_shape(tmp_path):
     assert w["agents"]["by_type"]["workflow"]["count"] == 1
     assert w["agents"]["by_type"]["background_shell"]["count"] == 1
     assert w["agents"]["max_concurrent_agents"] >= 2
+    # Agents run across the 48-min between-turns gap.
+    bt = w["between_turns"]
+    assert 0 < bt["with_agents_minutes"] <= bt["idle_minutes"]
 
 
 def test_wire_values_are_rounded_grid_seconds(tmp_path):
@@ -219,10 +229,12 @@ def test_wire_values_are_rounded_grid_seconds(tmp_path):
     assert w["agents"]["union_minutes"] == m(g["agents"]["union_s"])
     assert w["agents"]["by_type"]["subagent"]["minutes"] == m(
         g["agents"]["by_type"]["subagent"]["active_s"])
-    assert w["idle_by_reason"]["no_activity"] == {
-        "count": g["idle_by_reason"]["no_activity"]["count"],
-        "minutes": m(g["idle_by_reason"]["no_activity"]["s"]),
+    assert w["background"]["idle_by_reason"]["no_activity"] == {
+        "count": g["background_main"]["idle_by_reason"]["no_activity"]["count"],
+        "minutes": m(g["background_main"]["idle_by_reason"]["no_activity"]["s"]),
     }
+    assert w["interactive"]["idle_minutes"] == m(g["interactive"]["idle_s"])
+    assert w["between_turns"]["with_agents_minutes"] == m(g["between_turns"]["with_agents_s"])
     assert w["longest_run_minutes"] == m(g["longest_run_s"])
 
 
@@ -237,14 +249,126 @@ def test_permission_signal_passed_through_and_validated():
 # ---- identities -------------------------------------------------------------
 
 
-def test_identities_hold_on_fixtures(tmp_path):
+def _sum_reasons(row: dict) -> int:
+    return sum(v["minutes"] for v in row["idle_by_reason"].values())
+
+
+def test_identities_hold_two_rows(tmp_path):
+    """Ruling 1 (plan 036): wire leaves stay non-overlapping."""
     fixtures = _all_fixtures(tmp_path)
     assert len(fixtures) > 40
     for events, window, jsonl in fixtures:
         ta = build_time_accounting(events, window, jsonl, "available")
         assert identity_violations(ta) == [], (window, ta)
+        w = ta.to_wire()
+        ia, bg, bt = w["interactive"], w["background"], w["between_turns"]
         # Wall clock total = the session window.
-        assert ta.to_wire()["wall_clock_minutes"] == round((window[1] - window[0]) / MIN)
+        assert w["wall_clock_minutes"] == round((window[1] - window[0]) / MIN)
+        # Timeline: the leaves partition the window (±1 per rounded leaf).
+        timeline = [ia["read_write_minutes"], ia["model_minutes"], ia["tool_minutes"],
+                    ia["idle_minutes"], bg["model_minutes"], bg["tool_minutes"],
+                    bg["idle_minutes"], bt["idle_minutes"]]
+        assert abs(sum(timeline) - w["wall_clock_minutes"]) <= len(timeline) + 1
+        # Row idle = Σ its own idle_by_reason.
+        assert abs(ia["idle_minutes"] - _sum_reasons(ia)) <= 3
+        assert abs(bg["idle_minutes"] - _sum_reasons(bg)) <= 5
+        assert bt["with_agents_minutes"] <= bt["idle_minutes"]
+
+
+def test_identities_exact_in_seconds(tmp_path):
+    """The same identities, unrounded, on grid_seconds."""
+    from scripts.time_accounting import account_agents, grid_seconds, partition_main_thread
+
+    for events, window, jsonl in _all_fixtures(tmp_path):
+        segs = partition_main_thread(events, window)
+        g = grid_seconds(segs, account_agents(events, jsonl, max(window[1], window[0])))
+        ia, bm, bt = g["interactive"], g["background_main"], g["between_turns"]
+        assert ia["idle_s"] == pytest.approx(sum(v["s"] for v in ia["idle_by_reason"].values()))
+        assert bm["idle_s"] == pytest.approx(sum(v["s"] for v in bm["idle_by_reason"].values()))
+        assert ia["total_s"] + bm["total_s"] + bt["total_s"] == pytest.approx(
+            (window[1] - window[0]) / 1000)
+        assert 0 <= bt["with_agents_s"] <= bt["idle_s"] + 1e-9
+        assert "idle_by_reason" not in g
+
+
+def test_permission_wait_in_long_turn_is_interactive_idle():
+    """Review Focus 1: a Background turn's 20-min permission wait is
+    Interactive idle; Background idle excludes it; rows still sum to the window."""
+    ev = [
+        pt._prompt(T), *pt._model_minutes(T, 10),
+        pt._call("u", T + 10 * MIN),
+        pt._result("u", T + 30 * MIN, permission_by_user=True, permission_rejected=True,
+                   is_denied=True),
+        pt._text(T + 30 * MIN + 30 * SEC), pt._end(T + 31 * MIN),
+    ]
+    window = (T, T + 31 * MIN)
+    w = build_time_accounting(ev, window, None, "available").to_wire()
+    ia, bg, bt = w["interactive"], w["background"], w["between_turns"]
+    assert bg["turns"] == 1 and ia["turns"] == 0
+    assert ia["idle_by_reason"]["permission_wait"] == {"count": 1, "minutes": 20}
+    assert ia["idle_minutes"] == 20
+    assert bg["idle_minutes"] == 0
+    assert _sum_reasons(bg) == 0
+    total = (ia["read_write_minutes"] + ia["model_minutes"] + ia["tool_minutes"]
+             + ia["idle_minutes"] + bg["model_minutes"] + bg["tool_minutes"]
+             + bg["idle_minutes"] + bt["idle_minutes"])
+    assert total == w["wall_clock_minutes"] == 31
+    assert bg["model_minutes"] == 11
+
+
+def test_dispatch_wait_in_short_turn_is_background_idle():
+    ev = [
+        pt._prompt(T), pt._call("d", T + 1 * MIN, name="Agent"),
+        pt._result("d", T + 3 * MIN), pt._end(T + 4 * MIN),
+    ]
+    w = build_time_accounting(ev, (T, T + 4 * MIN), None, "available").to_wire()
+    ia, bg = w["interactive"], w["background"]
+    assert ia["turns"] == 1 and bg["turns"] == 0
+    assert bg["idle_by_reason"]["dispatch_wait"] == {"count": 1, "minutes": 2}
+    assert bg["idle_minutes"] == 2
+    assert ia["idle_minutes"] == 0
+    assert ia["model_minutes"] == 2
+
+
+def test_between_turns_with_agents_overlap():
+    """Review Focus 2: with_agents = BETWEEN time under the union of agents'
+    active intervals, clipped to the window; never counted twice."""
+    from scripts.time_accounting import (
+        Activity, AgentAccounting, AgentSummary, IdleReason, Owner, Segment, grid_seconds,
+    )
+
+    def seg(a, b, owner, kind, turn=None):
+        return Segment(T + a * MIN, T + b * MIN, owner, kind, turn=turn)
+
+    def agent(ivs):
+        return AgentSummary("subagent", T, T + 1, 60.0, 0.0, 0.0,
+                            tuple((T + a * MIN, T + b * MIN) for a, b in ivs))
+
+    BT, IA = Owner.BETWEEN, Owner.INTERACTIVE
+    segs = [
+        seg(0, 10, BT, IdleReason.NO_ACTIVITY),
+        seg(10, 12, IA, Activity.READ_WRITE, turn=0),
+        seg(12, 14, IA, Activity.MODEL, turn=0),
+        seg(14, 30, BT, IdleReason.NO_ACTIVITY),
+        seg(30, 31, IA, Activity.MODEL, turn=1),
+        seg(31, 40, BT, IdleReason.NO_ACTIVITY),
+    ]
+    agents = AgentAccounting(
+        (
+            agent([(-20, 4)]),          # before the window: clipped to 0..4
+            agent([(8, 20)]),           # 8..10 and 14..20 between turns
+            agent([(16, 22)]),          # overlaps the previous: union, not sum
+            agent([(35, 90)]),          # past the window end: clipped to 35..40
+        ),
+        union_s=0.0, max_concurrent=2,
+    )
+    g = grid_seconds(segs, agents)
+    bt = g["between_turns"]
+    assert bt["idle_s"] == 35 * 60.0
+    # 4 + 2 + (14..22 = 8) + 5 = 19 minutes.
+    assert bt["with_agents_s"] == pytest.approx(19 * 60.0)
+    # No agents: zero.
+    assert grid_seconds(segs, AgentAccounting((), 0.0, 0))["between_turns"]["with_agents_s"] == 0.0
 
 
 def test_identity_violations_flags_a_broken_object(tmp_path):
@@ -253,8 +377,12 @@ def test_identity_violations_flags_a_broken_object(tmp_path):
     assert identity_violations(ta) == []
     broken = replace(ta, wall_clock_minutes=ta.wall_clock_minutes + 50)
     assert any("wall_clock" in v for v in identity_violations(broken))
-    broken = replace(ta, no_activity_minutes=ta.no_activity_minutes + 50)
-    assert any("idle" in v for v in identity_violations(broken))
+    broken = replace(ta, background_no_activity_minutes=ta.background_no_activity_minutes + 50)
+    assert any("background.idle" in v for v in identity_violations(broken))
+    broken = replace(ta, interactive_permission_wait_minutes=ta.interactive_permission_wait_minutes + 50)
+    assert any("interactive.idle" in v for v in identity_violations(broken))
+    broken = replace(ta, between_turns_with_agents_minutes=ta.between_turns_idle_minutes + 1)
+    assert any("with_agents" in v for v in identity_violations(broken))
     broken = replace(ta, subagent_count=ta.subagent_count + 1)
     assert any("count" in v for v in identity_violations(broken))
     broken = replace(ta, subagent_minutes=ta.subagent_minutes + 50)
@@ -431,8 +559,9 @@ def test_wire_session_carries_object(tmp_path, monkeypatch):
 # ---- cache ------------------------------------------------------------------
 
 
-def test_cache_format_bumped():
-    assert CACHE_FORMAT == 7
+def test_cache_format_is_8():
+    """8: the wire object moved idle_by_reason into the rows (plan 036)."""
+    assert CACHE_FORMAT == 8
 
 
 def test_cache_round_trips_time_accounting(tmp_path, monkeypatch):

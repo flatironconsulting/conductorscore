@@ -45,7 +45,8 @@ from scripts.time_accounting import TimeAccounting
 # (afk_parallel_minutes_foreground) is the per-agent SUM again, not the union.
 # 6: PerSession gained the time accounting v2 object (time_accounting).
 # 7: windowless sessions carry a zero-valued time_accounting object (was None).
-CACHE_FORMAT = 7
+# 8: time_accounting idle_by_reason moved into the rows; between_turns gained with_agents.
+CACHE_FORMAT = 8
 
 _NESTED = {"afk_intervals": AfkInterval, "top_afk_streaks": AfkStreakWire}
 

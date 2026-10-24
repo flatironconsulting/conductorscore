@@ -741,6 +741,8 @@ def account_agents(
 
 
 __all__ = [
+    "BG_IDLE_REASONS",
+    "IA_IDLE_REASONS",
     "PERMISSION_SIGNALS",
     "TIME_ACCOUNTING_VERSION",
     "TimeAccounting",
@@ -901,41 +903,96 @@ def _turn_keys(segments: list[Segment]) -> list[object | None]:
     return keys
 
 
+# Idle attribution by reason (decision 13). permission_wait is Interactive
+# idle (waiting on you) and dispatch_wait / tool_over_cap / polling are
+# Background idle (the agent's side), wherever they occurred; no_activity
+# stays with its turn. Grid attribution only: ``Segment.owner`` keeps the
+# by-location owner, so the partition and the longest run are unchanged.
+IA_IDLE_REASONS: tuple[IdleReason, ...] = (IdleReason.PERMISSION_WAIT, IdleReason.NO_ACTIVITY)
+BG_IDLE_REASONS: tuple[IdleReason, ...] = (
+    IdleReason.DISPATCH_WAIT, IdleReason.TOOL_OVER_CAP, IdleReason.POLLING,
+    IdleReason.NO_ACTIVITY,
+)
+_IDLE_ROW: dict[IdleReason, Owner] = {
+    IdleReason.PERMISSION_WAIT: Owner.INTERACTIVE,
+    IdleReason.DISPATCH_WAIT: Owner.BACKGROUND,
+    IdleReason.TOOL_OVER_CAP: Owner.BACKGROUND,
+    IdleReason.POLLING: Owner.BACKGROUND,
+}
+
+
+def _between_with_agents_ms(segments: list[Segment], agents: AgentAccounting) -> int:
+    """Between-turns ms overlapped by the union of all agents' active
+    intervals, clipped to the window (decision 14)."""
+    if not segments or not agents.agents:
+        return 0
+    ws, we = segments[0].start_ms, segments[-1].end_ms
+    union = _merge_intervals([
+        (max(lo, ws), min(hi, we))
+        for a in agents.agents for lo, hi in a.active_intervals
+    ])
+    between = _merge_intervals(
+        [(s.start_ms, s.end_ms) for s in segments if s.owner is Owner.BETWEEN]
+    )
+    total = 0
+    i = j = 0
+    while i < len(union) and j < len(between):
+        lo = max(union[i][0], between[j][0])
+        hi = min(union[i][1], between[j][1])
+        if hi > lo:
+            total += hi - lo
+        if union[i][1] < between[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
 def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
     """Seconds behind every cell of one session's Leverage grid.
 
-    The viewer renders from this dict and the wire object (Task 8) is built
-    from it, rounding only. Every value is seconds (float) or a count (int)::
+    The viewer renders from this dict and the wire object is built from it,
+    rounding only. Every value is seconds (float) or a count (int)::
 
         {
           "interactive":     {"turns", "read_write_s", "model_s", "tool_s",
-                              "idle_s", "active_s", "total_s"},
+                              "idle_s", "active_s", "total_s",
+                              "idle_by_reason": {permission_wait, no_activity}},
           "background_main": {"turns", "model_s", "tool_s", "idle_s",
-                              "active_s", "total_s"},
+                              "active_s", "total_s",
+                              "idle_by_reason": {dispatch_wait, tool_over_cap,
+                                                 polling, no_activity}},
           "agents":          {"count", "model_s", "tool_s", "idle_s",
                               "active_s", "total_s", "union_s",
                               "max_concurrent",
                               "by_type": {agent_type: {"count", "active_s"}}},
-          "between_turns":   {"gaps", "idle_s", "total_s"},
-          "idle_by_reason":  {reason.value: {"count", "s"}},  # every reason
+          "between_turns":   {"gaps", "idle_s", "total_s", "with_agents_s"},
           "wall_clock_s":    float,
           "longest_run_s":   float,
         }
 
-    Rows: ``interactive`` holds every R5 reading & typing credit (also the
-    credit of a prompt that opens a Background turn) and the Interactive
-    turns' time; ``background_main`` the Background turns' time on the main
-    thread; ``between_turns`` the rest. These three partition the timeline:
-    their ``total_s`` sum to ``wall_clock_s`` (the window). ``agents`` sits on
-    top of the timeline: ``active_s`` is agent-seconds (model + tool, summed
-    over agents) and ``total_s == active_s``, because agent idle
-    (``idle_s``) is reported but not shown in the grid.
+    with each ``idle_by_reason`` cell ``{"count", "s"}``.
+
+    Rows (decisions 12-13): active time goes to the row of its turn; R5
+    reading & typing credit is Interactive (also the credit of a prompt that
+    opens a Background turn). Idle goes to a row by reason: permission_wait
+    to ``interactive``, dispatch_wait / tool_over_cap / polling to
+    ``background_main``, wherever they occurred; no_activity to its turn's
+    row. ``interactive.idle_s`` is in-turn idle only; between-turns time is
+    kept apart in ``between_turns`` (the grid shows it as Interactive idle:
+    grid Interactive idle = ``interactive.idle_s + between_turns.idle_s``).
+    The three ``total_s`` partition the timeline and sum to ``wall_clock_s``
+    (the window). ``between_turns.with_agents_s`` is the between-turns time
+    under the union of the agents' active intervals (decision 14), so it is
+    <= ``between_turns.idle_s``. ``agents`` sits on top of the timeline:
+    ``active_s`` is agent-seconds (model + tool, summed over agents) and
+    ``total_s == active_s``, because agent idle (``idle_s``) is reported but
+    not shown in the grid.
 
     Identities: ``read_write_s + model_s + tool_s == active_s`` and
-    ``active_s + idle_s == total_s`` on the timeline rows;
-    ``Σ idle_by_reason[*].s`` = main-thread idle (interactive +
-    background_main + between_turns); ``Σ by_type[*].active_s ==
-    agents.active_s``.
+    ``active_s + idle_s == total_s`` on the timeline rows; ``idle_s == Σ
+    idle_by_reason[*].s`` on ``interactive`` and ``background_main``;
+    ``Σ by_type[*].active_s == agents.active_s``.
 
     Counts: ``turns`` = distinct turns of that owner (a turn's owner is that
     of its non-credit segments; a turn with only a credit is Interactive);
@@ -947,10 +1004,11 @@ def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
     the consumer, is (``background_main.active_s`` + ``agents.active_s``) ÷
     ``interactive.active_s``.
     """
-    ia = {"turns": 0, "read_write_s": 0.0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0}
-    bm = {"turns": 0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0}
-    bt = {"gaps": 0, "idle_s": 0.0}
-    idle: dict[str, dict] = {r.value: {"count": 0, "s": 0.0} for r in IdleReason}
+    ia: dict = {"turns": 0, "read_write_s": 0.0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0,
+                "idle_by_reason": {r.value: {"count": 0, "s": 0.0} for r in IA_IDLE_REASONS}}
+    bm: dict = {"turns": 0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0,
+                "idle_by_reason": {r.value: {"count": 0, "s": 0.0} for r in BG_IDLE_REASONS}}
+    bt: dict = {"gaps": 0, "idle_s": 0.0}
 
     col = {
         Activity.READ_WRITE: "read_write_s",
@@ -968,19 +1026,19 @@ def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
             if not (contiguous and prev.owner is Owner.BETWEEN):
                 bt["gaps"] += 1
         else:
-            row = ia if s.owner is Owner.INTERACTIVE else bm
             if isinstance(s.kind, Activity):
+                row = ia if s.owner is Owner.INTERACTIVE else bm
                 row[col[s.kind]] += secs
             else:
+                row = ia if _IDLE_ROW.get(s.kind, s.owner) is Owner.INTERACTIVE else bm
                 row["idle_s"] += secs
+                bucket = row["idle_by_reason"][s.kind.value]
+                bucket["s"] += secs
+                if not (contiguous and prev.kind is s.kind and prev.owner is s.owner):
+                    bucket["count"] += 1
             # A turn's owner is that of its first non-credit segment.
             if turn_owner.get(key) is None:
                 turn_owner[key] = None if s.kind is Activity.READ_WRITE else s.owner
-        if isinstance(s.kind, IdleReason):
-            bucket = idle[s.kind.value]
-            bucket["s"] += secs
-            if not (contiguous and prev.kind is s.kind and prev.owner is s.owner):
-                bucket["count"] += 1
         prev = s
     for owner in turn_owner.values():
         if owner is Owner.BACKGROUND:
@@ -993,6 +1051,7 @@ def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
     bm["active_s"] = bm["model_s"] + bm["tool_s"]
     bm["total_s"] = bm["active_s"] + bm["idle_s"]
     bt["total_s"] = bt["idle_s"]
+    bt["with_agents_s"] = _between_with_agents_ms(segments, agents) / 1000.0
 
     by_type: dict[str, dict] = {}
     model_s = tool_s = idle_s = 0.0
@@ -1019,7 +1078,6 @@ def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
         "background_main": bm,
         "agents": ag,
         "between_turns": bt,
-        "idle_by_reason": idle,
         "wall_clock_s": ia["total_s"] + bm["total_s"] + bt["total_s"],
         "longest_run_s": longest_run_seconds(segments, agents),
     }
@@ -1068,19 +1126,33 @@ class TimeAccounting:
     background_shell_minutes: int = 0
     between_turns_gaps: int = 0
     between_turns_idle_minutes: int = 0
-    dispatch_wait_count: int = 0
-    dispatch_wait_minutes: int = 0
-    permission_wait_count: int = 0
-    permission_wait_minutes: int = 0
-    tool_over_cap_count: int = 0
-    tool_over_cap_minutes: int = 0
-    polling_count: int = 0
-    polling_minutes: int = 0
-    no_activity_count: int = 0
-    no_activity_minutes: int = 0
+    between_turns_with_agents_minutes: int = 0
+    # Idle by reason, per row (decision 13): ``<row>_<reason>_count|minutes``
+    # for each reason in IA_IDLE_REASONS / BG_IDLE_REASONS.
+    interactive_permission_wait_count: int = 0
+    interactive_permission_wait_minutes: int = 0
+    interactive_no_activity_count: int = 0
+    interactive_no_activity_minutes: int = 0
+    background_dispatch_wait_count: int = 0
+    background_dispatch_wait_minutes: int = 0
+    background_tool_over_cap_count: int = 0
+    background_tool_over_cap_minutes: int = 0
+    background_polling_count: int = 0
+    background_polling_minutes: int = 0
+    background_no_activity_count: int = 0
+    background_no_activity_minutes: int = 0
     longest_run_minutes: int = 0
     permission_signal: str = "available"
     version: int = TIME_ACCOUNTING_VERSION
+
+    def _idle_by_reason(self, row: str, reasons: tuple[IdleReason, ...]) -> dict:
+        return {
+            r.value: {
+                "count": getattr(self, f"{row}_{r.value}_count"),
+                "minutes": getattr(self, f"{row}_{r.value}_minutes"),
+            }
+            for r in reasons
+        }
 
     def to_wire(self) -> dict:
         """Exactly the spec's ``time_accounting`` JSON object, plus
@@ -1094,12 +1166,14 @@ class TimeAccounting:
                 "model_minutes": self.interactive_model_minutes,
                 "tool_minutes": self.interactive_tool_minutes,
                 "idle_minutes": self.interactive_idle_minutes,
+                "idle_by_reason": self._idle_by_reason("interactive", IA_IDLE_REASONS),
             },
             "background": {
                 "turns": self.background_turns,
                 "model_minutes": self.background_model_minutes,
                 "tool_minutes": self.background_tool_minutes,
                 "idle_minutes": self.background_idle_minutes,
+                "idle_by_reason": self._idle_by_reason("background", BG_IDLE_REASONS),
             },
             "agents": {
                 "count": self.agents_count,
@@ -1119,13 +1193,7 @@ class TimeAccounting:
             "between_turns": {
                 "gaps": self.between_turns_gaps,
                 "idle_minutes": self.between_turns_idle_minutes,
-            },
-            "idle_by_reason": {
-                r.value: {
-                    "count": getattr(self, f"{r.value}_count"),
-                    "minutes": getattr(self, f"{r.value}_minutes"),
-                }
-                for r in IdleReason
+                "with_agents_minutes": self.between_turns_with_agents_minutes,
             },
             "longest_run_minutes": self.longest_run_minutes,
             "permission_signal": self.permission_signal,
@@ -1175,6 +1243,7 @@ def build_time_accounting(
         "agents_max_concurrent": ag["max_concurrent"],
         "between_turns_gaps": bt["gaps"],
         "between_turns_idle_minutes": _minutes(bt["idle_s"]),
+        "between_turns_with_agents_minutes": _minutes(bt["with_agents_s"]),
         "longest_run_minutes": _minutes(g["longest_run_s"]),
         "permission_signal": permission_signal,
     }
@@ -1182,9 +1251,11 @@ def build_time_accounting(
         cell = ag["by_type"].get(t, {"count": 0, "active_s": 0.0})
         kw[f"{t}_count"] = cell["count"]
         kw[f"{t}_minutes"] = _minutes(cell["active_s"])
-    for reason, cell in g["idle_by_reason"].items():
-        kw[f"{reason}_count"] = cell["count"]
-        kw[f"{reason}_minutes"] = _minutes(cell["s"])
+    for row, cells in (("interactive", ia["idle_by_reason"]),
+                       ("background", bm["idle_by_reason"])):
+        for reason, cell in cells.items():
+            kw[f"{row}_{reason}_count"] = cell["count"]
+            kw[f"{row}_{reason}_minutes"] = _minutes(cell["s"])
     return TimeAccounting(**kw)
 
 
@@ -1212,21 +1283,29 @@ def identity_violations(ta: TimeAccounting) -> list[str]:
         ta.background_model_minutes, ta.background_tool_minutes,
         ta.background_idle_minutes,
     ]
-    timeline_idle = [
-        ta.interactive_idle_minutes, ta.background_idle_minutes,
-        ta.between_turns_idle_minutes,
-    ]
-    reasons = [getattr(ta, f"{r.value}_minutes") for r in IdleReason]
+    ia_reasons = [getattr(ta, f"interactive_{r.value}_minutes") for r in IA_IDLE_REASONS]
+    bg_reasons = [getattr(ta, f"background_{r.value}_minutes") for r in BG_IDLE_REASONS]
     by_type_minutes = [getattr(ta, f"{t}_minutes") for t in _WIRE_AGENT_TYPES]
     by_type_counts = [getattr(ta, f"{t}_count") for t in _WIRE_AGENT_TYPES]
 
-    # Down: Interactive + Background (main thread) + Between turns = Wall
-    # clock (= Total − parallel agents) = the session window.
-    check("wall_clock = interactive + background + between_turns totals",
+    # Timeline (Ruling 1, plan 036): the wire leaves do not overlap.
+    # interactive.idle is in-turn only; the grid's Interactive idle is
+    # interactive.idle + between_turns.idle. Interactive + Background (main
+    # thread) = Wall clock (= Total − parallel agents) = the session window.
+    check("wall_clock = interactive + background + between_turns.idle",
           interactive_total + background_total + [ta.between_turns_idle_minutes],
           [ta.wall_clock_minutes])
-    # Idle column: Total idle = Wall clock idle = Σ idle sub-lines.
-    check("idle total = Σ idle_by_reason", timeline_idle, reasons)
+    # Each row's idle = Σ its idle sub-lines (decision 13).
+    check("interactive.idle = Σ interactive.idle_by_reason",
+          [ta.interactive_idle_minutes], ia_reasons)
+    check("background.idle = Σ background.idle_by_reason",
+          [ta.background_idle_minutes], bg_reasons)
+    # while your agents worked <= between turns (decision 14); it lies under
+    # the agents' union too. Rounding is monotone, so no slack is needed.
+    if ta.between_turns_with_agents_minutes > ta.between_turns_idle_minutes:
+        out.append("between_turns.with_agents_minutes exceeds between_turns.idle_minutes")
+    if ta.between_turns_with_agents_minutes > ta.agents_union_minutes:
+        out.append("between_turns.with_agents_minutes exceeds agents.union_minutes")
     # Σ parallel-agent sub-lines = parallel agents active total.
     check("Σ agents.by_type minutes = agents model + tool",
           by_type_minutes, [ta.agents_model_minutes, ta.agents_tool_minutes])

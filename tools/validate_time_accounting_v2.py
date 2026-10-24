@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only real-data validation for Time Accounting v2 (plan 034, Task 10).
+"""Read-only real-data validation for Time Accounting v2 (plan 034 Task 10; plan 036).
 
 Usage: python3 -I tools/validate_time_accounting_v2.py <claude_projects_dir> [days=30]
 
@@ -119,20 +119,29 @@ def main():
     print("%-34s %12.1f %12.1f" % ("Longest run (mean)",
                                     statistics.mean(lr_b or [0]), statistics.mean(lr_a or [0])))
     print()
-    print("Idle by reason (after): count / minutes")
-    for r in ("between_turns", "dispatch_wait", "permission_wait", "tool_over_cap",
-              "polling", "no_activity"):
-        if r == "between_turns":
-            c = S(lambda ps, ta: ta.between_turns_gaps)
-            mi = S(lambda ps, ta: ta.between_turns_idle_minutes)
-        else:
-            c = S(lambda ps, ta, r=r: getattr(ta, r + "_count"))
-            mi = S(lambda ps, ta, r=r: getattr(ta, r + "_minutes"))
-        print("  %-18s %8d %10d" % (r, c, mi))
-    print("  interactive idle=%d background idle=%d agents idle=%d" % (
-        S(lambda ps, ta: ta.interactive_idle_minutes),
-        S(lambda ps, ta: ta.background_idle_minutes),
-        S(lambda ps, ta: ta.agents_idle_minutes)))
+    # Two rows, idle by reason (plan 036). Grid Interactive idle =
+    # interactive.idle (in-turn) + between_turns.idle.
+    bt_idle = S(lambda ps, ta: ta.between_turns_idle_minutes)
+    bt_agents = S(lambda ps, ta: ta.between_turns_with_agents_minutes)
+    ia_in = S(lambda ps, ta: ta.interactive_idle_minutes)
+    print("Interactive idle (after): count / minutes  total=%d" % (ia_in + bt_idle))
+    print("  %-30s %8d %10d" % ("between turns", S(lambda ps, ta: ta.between_turns_gaps), bt_idle))
+    print("  %-30s %8s %10d" % ("  while your agents worked", "", bt_agents))
+    print("  %-30s %8s %10d" % ("  nothing running", "", bt_idle - bt_agents))
+    for r in ("permission_wait", "no_activity"):
+        print("  %-30s %8d %10d" % (
+            r, S(lambda ps, ta, r=r: getattr(ta, "interactive_%s_count" % r)),
+            S(lambda ps, ta, r=r: getattr(ta, "interactive_%s_minutes" % r))))
+    print("  (in-turn interactive.idle_minutes=%d)" % ia_in)
+    print("  with_agents share of between turns: %.1f%% (%d / %d min)" % (
+        100.0 * bt_agents / bt_idle if bt_idle else 0.0, bt_agents, bt_idle))
+    print("Background idle (after): count / minutes  total=%d"
+          % S(lambda ps, ta: ta.background_idle_minutes))
+    for r in ("dispatch_wait", "tool_over_cap", "polling", "no_activity"):
+        print("  %-30s %8d %10d" % (
+            r, S(lambda ps, ta, r=r: getattr(ta, "background_%s_count" % r)),
+            S(lambda ps, ta, r=r: getattr(ta, "background_%s_minutes" % r))))
+    print("  agents idle=%d (not in the grid)" % S(lambda ps, ta: ta.agents_idle_minutes))
     print("  permission_signal: %s" % dict(Counter(ta.permission_signal for _, _, ta in rows)))
     print()
     bad = [(sid, identity_violations(ta)) for sid, _, ta in rows]

@@ -81,9 +81,14 @@ def _assert_identities(g: dict, window_s: float | None = None) -> None:
     assert ia["total_s"] + bm["total_s"] + bt["total_s"] == approx(g["wall_clock_s"])
     if window_s is not None:
         assert g["wall_clock_s"] == approx(window_s)
-    # Σ idle_by_reason = main-thread idle (agent idle is reported apart).
-    main_idle = ia["idle_s"] + bm["idle_s"] + bt["idle_s"]
-    assert sum(v["s"] for v in g["idle_by_reason"].values()) == approx(main_idle)
+    # Each row's idle = Σ its own idle_by_reason (decision 13).
+    assert set(ia["idle_by_reason"]) == {"permission_wait", "no_activity"}
+    assert set(bm["idle_by_reason"]) == {"dispatch_wait", "tool_over_cap", "polling",
+                                         "no_activity"}
+    assert sum(v["s"] for v in ia["idle_by_reason"].values()) == approx(ia["idle_s"])
+    assert sum(v["s"] for v in bm["idle_by_reason"].values()) == approx(bm["idle_s"])
+    assert 0 <= bt["with_agents_s"] <= bt["idle_s"] + 1e-9
+    assert "idle_by_reason" not in g
     # Σ by-type = agents active.
     assert sum(v["active_s"] for v in ag["by_type"].values()) == approx(ag["active_s"])
 
@@ -122,14 +127,18 @@ def test_grid_seconds_cells_and_counts():
 
     ia = g["interactive"]
     assert ia["turns"] == 2
+    # Idle by reason: both permission waits (one inside the Background turn)
+    # are Interactive idle.
     assert (ia["read_write_s"], ia["model_s"], ia["tool_s"], ia["idle_s"]) == (
-        600.0, 180.0, 60.0, 60.0,
+        600.0, 180.0, 60.0, 360.0,
     )
     bm = g["background_main"]
     assert bm["turns"] == 1
-    assert (bm["model_s"], bm["tool_s"], bm["idle_s"]) == (600.0, 2400.0, 3900.0)
+    assert (bm["model_s"], bm["tool_s"], bm["idle_s"]) == (600.0, 2400.0, 3600.0)
     bt = g["between_turns"]
     assert bt["gaps"] == 3 and bt["idle_s"] == 30 * 60.0
+    # No agent is active between turns here.
+    assert bt["with_agents_s"] == 0.0
 
     ag = g["agents"]
     assert ag["count"] == 3
@@ -140,13 +149,14 @@ def test_grid_seconds_cells_and_counts():
         "workflow": {"count": 1, "active_s": 3 * 60.0},
     }
 
-    ibr = g["idle_by_reason"]
-    assert ibr["permission_wait"] == {"count": 2, "s": 6 * 60.0}
-    assert ibr["tool_over_cap"] == {"count": 1, "s": 10 * 60.0}
-    assert ibr["dispatch_wait"] == {"count": 1, "s": 30 * 60.0}
-    assert ibr["polling"] == {"count": 1, "s": 10 * 60.0}
-    # no_activity: three between-turn gaps plus one mid-turn gap.
-    assert ibr["no_activity"] == {"count": 4, "s": 40 * 60.0}
+    iar, bmr = ia["idle_by_reason"], bm["idle_by_reason"]
+    assert iar["permission_wait"] == {"count": 2, "s": 6 * 60.0}
+    assert iar["no_activity"] == {"count": 0, "s": 0.0}
+    assert bmr["tool_over_cap"] == {"count": 1, "s": 10 * 60.0}
+    assert bmr["dispatch_wait"] == {"count": 1, "s": 30 * 60.0}
+    assert bmr["polling"] == {"count": 1, "s": 10 * 60.0}
+    # no_activity: the one mid-turn gap (between-turns time is its own row).
+    assert bmr["no_activity"] == {"count": 1, "s": 10 * 60.0}
     assert g["longest_run_s"] > 0
 
 
@@ -158,7 +168,9 @@ def test_grid_seconds_empty():
     assert g["agents"]["count"] == 0
     assert g["longest_run_s"] == 0.0
     # Every reason is present, at zero, so the shape is stable.
-    assert set(g["idle_by_reason"]) == {r.value for r in IdleReason}
+    reasons = set(g["interactive"]["idle_by_reason"]) | set(g["background_main"]["idle_by_reason"])
+    assert reasons == {r.value for r in IdleReason}
+    assert g["between_turns"]["with_agents_s"] == 0.0
 
 
 def test_grid_seconds_infers_turns_without_ids():
@@ -263,6 +275,65 @@ def _grid_rows(page: str) -> dict[str, dict[str, float]]:
     return rows
 
 
+_SUB_RE = re.compile(r'<tr class="ta-line" data-table="([a-z]+)" data-line="([a-z_]+)" data-s="([0-9.]+)"')
+_IA_TOP = {"between_turns", "permission_wait", "no_activity"}
+
+
+def _sub_lines(page: str, table: str) -> dict[str, float]:
+    return {line: float(v) for t, line, v in _SUB_RE.findall(page) if t == table}
+
+
+def _viewer_page(g: dict) -> str:
+    from scripts.session_viewer import _time_accounting_html
+    return _time_accounting_html(g, [])
+
+
+def test_viewer_idle_subtables_copy_and_sums():
+    """Every Interactive and Background idle line, with the spec's copy."""
+    segs = [
+        seg(0, 10, BT, NA),
+        seg(10, 11, IA, RW, turn=0),
+        seg(11, 12, IA, M, turn=0),
+        seg(12, 14, IA, PW, turn=0),
+        seg(14, 22, IA, NA, turn=0),
+        seg(22, 23, IA, DW, turn=0),
+        seg(23, 40, BT, NA),
+        seg(40, 41, IA, RW, turn=1),
+        seg(41, 60, BG, M, turn=1),
+        seg(60, 63, BG, PW, turn=1),
+        seg(63, 70, BG, OC, turn=1),
+        seg(70, 75, BG, PO, turn=1),
+        seg(75, 85, BG, NA, turn=1),
+        seg(85, 90, BG, DW, turn=1),
+    ]
+    agents = AgentAccounting((_agent("subagent", 5, 0, 0, [(25, 30)]),), 300.0, 1)
+    g = grid_seconds(segs, agents)
+    page = _viewer_page(g)
+    ia_lines, bg_lines = _sub_lines(page, "ia"), _sub_lines(page, "bg")
+    assert ia_lines == pytest.approx({
+        "between_turns": 27 * 60.0, "with_agents": 5 * 60.0, "nothing_running": 22 * 60.0,
+        "permission_wait": 5 * 60.0, "no_activity": 8 * 60.0,
+    })
+    assert bg_lines == pytest.approx({
+        "dispatch_wait": 6 * 60.0, "tool_over_cap": 7 * 60.0, "polling": 5 * 60.0,
+        "no_activity": 10 * 60.0,
+    })
+    for text in (
+        "Where the Interactive idle hours went", "Where the Background idle hours went",
+        "between turns", "while your agents worked", "nothing running",
+        "waiting on your permission", "no activity inside a short turn",
+        "waiting on a subagent you dispatched", "tool time over cap",
+        "polling / sleeping", "no activity inside a long turn",
+    ):
+        assert f">{text}<" in page.replace("├ ", "").replace("└ ", ""), text
+    rows = _grid_rows(page)
+    # Interactive idle = in-turn Interactive idle + between turns.
+    assert rows["interactive"]["idle"] == pytest.approx((5 + 8 + 27) * 60.0, abs=1e-3)
+    assert rows["background_main"]["idle"] == pytest.approx(28 * 60.0, abs=1e-3)
+    assert rows["wall_clock"]["total"] == pytest.approx(90 * 60.0, abs=1e-3)
+    assert "between_turns" not in rows
+
+
 def test_viewer_grid_matches_partition(tmp_path):
     path = _write_session(tmp_path)
     out = tmp_path / "out.html"
@@ -271,9 +342,10 @@ def test_viewer_grid_matches_partition(tmp_path):
 
     assert 'class="time-accounting"' in page
     rows = _grid_rows(page)
+    # Two timeline rows (decision 12): between turns folds into Interactive idle.
     assert set(rows) == {
         "interactive", "background", "background_main", "agents",
-        "between_turns", "total", "minus_agents", "wall_clock",
+        "total", "minus_agents", "wall_clock",
     }
     cols = ("read_write", "model", "tool", "active", "idle", "total")
     for name, cells in rows.items():
@@ -288,7 +360,7 @@ def test_viewer_grid_matches_partition(tmp_path):
         assert col("background", k) == pytest.approx(
             col("background_main", k) + col("agents", k), abs=1e-3)
         assert col("total", k) == pytest.approx(
-            col("interactive", k) + col("background", k) + col("between_turns", k), abs=1e-3)
+            col("interactive", k) + col("background", k), abs=1e-3)
         assert col("wall_clock", k) == pytest.approx(
             col("total", k) - col("minus_agents", k), abs=1e-3)
 
@@ -296,6 +368,25 @@ def test_viewer_grid_matches_partition(tmp_path):
     ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
     window_ms = max(ts) - min(ts)
     assert col("wall_clock", "total") == pytest.approx(window_ms / 1000, abs=1e-3)
+
+    # Interactive total + Background main thread = Wall clock.
+    assert col("interactive", "total") + col("background_main", "total") == pytest.approx(
+        col("wall_clock", "total"), abs=1e-3)
+
+    # The two idle sub-tables add up to their grid cells.
+    ia_lines = _sub_lines(page, "ia")
+    bg_lines = _sub_lines(page, "bg")
+    assert "Where the Interactive idle hours went" in page
+    assert "Where the Background idle hours went" in page
+    top_ia = {k: v for k, v in ia_lines.items() if k in _IA_TOP}
+    assert sum(top_ia.values()) == pytest.approx(col("interactive", "idle"), abs=1e-3)
+    assert sum(bg_lines.values()) == pytest.approx(col("background_main", "idle"), abs=1e-3)
+    assert ia_lines["between_turns"] == pytest.approx(900.0, abs=1e-3)
+    # The two subagents run inside the Background turn, not between turns.
+    assert "with_agents" not in ia_lines
+    assert ia_lines["nothing_running"] == pytest.approx(900.0, abs=1e-3)
+    assert "between turns" in page and "nothing running" in page
+    assert "waiting on a subagent you dispatched" in page
 
     bars = _BAR_RE.findall(page)
     assert len(bars) == 1

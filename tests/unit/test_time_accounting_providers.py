@@ -94,7 +94,7 @@ def _assert_no_permission_wait(ps):
     assert ta is not None
     wire = ta.to_wire()
     assert wire["permission_signal"] == "not_available"
-    assert wire["idle_by_reason"]["permission_wait"] == {"count": 0, "minutes": 0}
+    assert wire["interactive"]["idle_by_reason"]["permission_wait"] == {"count": 0, "minutes": 0}
     assert wire["agents"]["count"] == 0
     assert identity_violations(ta) == []
     assert wire["wall_clock_minutes"] == 41

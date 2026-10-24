@@ -1163,6 +1163,7 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .time-accounting tr[data-row="total"] > *, .time-accounting tr[data-row="wall_clock"] > * { border-top: 2px solid var(--rule); }
 .time-accounting tr[data-row="background_main"] > th, .time-accounting tr[data-row="agents"] > th { padding-left: 24px; color: var(--muted); }
 .time-accounting td.ta-count { color: var(--muted); }
+.time-accounting .ta-subtable th.ta-child { padding-left: 24px; color: var(--muted); font-weight: normal; }
 .time-accounting td.ta-note { color: var(--muted); text-align: left; font-size: 11px; }
 .time-accounting .ta-formula { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 6px 0 12px 0; }
 .ta-bar { display: flex; height: 18px; width: 100%; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; margin: 10px 0 4px 0; background: var(--panel); }
@@ -1624,16 +1625,20 @@ def _compute_render_model(
 
 _TA_COLS = ("read_write", "model", "tool", "active", "idle", "total")
 
-_TA_IDLE_LINES = (
-    # (reason, label, count unit, note)
-    ("dispatch_wait", "waiting on a subagent you dispatched", "dispatches",
-     "counted under parallel agents"),
+# Idle sub-tables, one per row (decision 13: idle lands in a row by reason).
+# (reason, label, count unit or "" for none, note)
+_TA_IA_IDLE_LINES = (
     ("permission_wait", "waiting on your permission", "prompts",
      "a wait over 5 min ends your longest run"),
+    ("no_activity", "no activity inside a short turn", "", ""),
+)
+_TA_BG_IDLE_LINES = (
+    ("dispatch_wait", "waiting on a subagent you dispatched", "dispatches",
+     "counted under parallel agents"),
     ("tool_over_cap", "tool time over cap", "calls",
      "30 min per call, 10 if you interrupted"),
     ("polling", "polling / sleeping", "calls", ""),
-    ("no_activity", "no activity", "gaps", ""),
+    ("no_activity", "no activity inside a long turn", "gaps", ""),
 )
 
 _TA_AGENT_LINES = (
@@ -1687,17 +1692,16 @@ def _ta_grid_rows(g: dict) -> list[tuple[str, str, str, dict[str, float | None]]
             "total": active + (idle or 0.0),
         }
 
-    r_ia = row(ia["read_write_s"], ia["model_s"], ia["tool_s"], ia["idle_s"])
+    # Interactive idle = in-turn Interactive idle + between turns (decision 12).
+    r_ia = row(ia["read_write_s"], ia["model_s"], ia["tool_s"], ia["idle_s"] + bt["idle_s"])
     r_bm = row(None, bm["model_s"], bm["tool_s"], bm["idle_s"])
     r_ag = row(None, ag["model_s"], ag["tool_s"], None, show_idle=False)
     r_bg = row(None, bm["model_s"] + ag["model_s"], bm["tool_s"] + ag["tool_s"], bm["idle_s"])
-    r_bt = {"read_write": None, "model": None, "tool": None, "active": None,
-            "idle": bt["idle_s"], "total": bt["idle_s"]}
 
     def add(*rows):
         return {c: sum((r[c] or 0.0) for r in rows) for c in _TA_COLS}
 
-    r_total = add(r_ia, r_bg, r_bt)
+    r_total = add(r_ia, r_bg)
     r_minus = dict(r_ag)
     r_wall = {c: r_total[c] - (r_ag[c] or 0.0) for c in _TA_COLS}
     return [
@@ -1705,7 +1709,6 @@ def _ta_grid_rows(g: dict) -> list[tuple[str, str, str, dict[str, float | None]]
         ("background", "Background", "", r_bg),
         ("background_main", "├ main thread", _ta_plural(bm["turns"], "turns"), r_bm),
         ("agents", "└ parallel agents", _ta_plural(ag["count"], "agents"), r_ag),
-        ("between_turns", "Between turns", _ta_plural(bt["gaps"], "gaps"), r_bt),
         ("total", "Total", "", r_total),
         ("minus_agents", "− parallel agents", "", r_minus),
         ("wall_clock", "Wall clock", "", r_wall),
@@ -1787,17 +1790,45 @@ def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
             f'<th>{html.escape(label)}</th>{"".join(tds)}</tr>'
         )
 
-    idle_lines = []
-    for reason, label, unit, note in _TA_IDLE_LINES:
-        v = g["idle_by_reason"].get(reason, {"count": 0, "s": 0.0})
-        if v["s"] <= 0:
-            continue  # sub-table lines hide at zero
-        idle_lines.append(
-            f'<tr><th>{html.escape(label)}</th>'
-            f'<td class="ta-count">{_ta_plural(v["count"], unit)}</td>'
-            f'<td title="{_fmt_dur(v["s"])}">{_ta_hours(v["s"])}</td>'
+    def idle_line(table: str, line: str, label: str, count: str, secs: float,
+                  note: str = "", child: bool = False) -> str:
+        cls = ' class="ta-child"' if child else ""
+        return (
+            f'<tr class="ta-line" data-table="{table}" data-line="{line}" '
+            f'data-s="{secs:.3f}"><th{cls}>{html.escape(label)}</th>'
+            f'<td class="ta-count">{html.escape(count)}</td>'
+            f'<td title="{_fmt_dur(secs)}">{_ta_hours(secs)}</td>'
             f'<td class="ta-note">{html.escape(note)}</td></tr>'
         )
+
+    # Sub-table lines hide at zero.
+    bt = g["between_turns"]
+    ia_lines = []
+    if bt["idle_s"] > 0:
+        with_agents = min(bt["with_agents_s"], bt["idle_s"])
+        ia_lines.append(idle_line(
+            "ia", "between_turns", "between turns", _ta_plural(bt["gaps"], "gaps"),
+            bt["idle_s"]))
+        if with_agents > 0:
+            ia_lines.append(idle_line(
+                "ia", "with_agents", "├ while your agents worked", "", with_agents,
+                child=True))
+        if bt["idle_s"] - with_agents > 0:
+            ia_lines.append(idle_line(
+                "ia", "nothing_running", "└ nothing running", "",
+                bt["idle_s"] - with_agents, child=True))
+
+    def reason_lines(table: str, lines: tuple, cells: dict) -> list[str]:
+        out = []
+        for reason, label, unit, note in lines:
+            v = cells.get(reason, {"count": 0, "s": 0.0})
+            if v["s"] > 0:
+                count = _ta_plural(v["count"], unit) if unit else ""
+                out.append(idle_line(table, reason, label, count, v["s"], note))
+        return out
+
+    ia_lines += reason_lines("ia", _TA_IA_IDLE_LINES, g["interactive"]["idle_by_reason"])
+    bg_lines = reason_lines("bg", _TA_BG_IDLE_LINES, g["background_main"]["idle_by_reason"])
     ag = g["agents"]
     agent_lines = []
     for atype, label, unit in _TA_AGENT_LINES:
@@ -1845,7 +1876,8 @@ def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
         f'<div class="ta-formula">Leverage = Background active ÷ Interactive active = '
         f'{_ta_hours(bg_active)} ÷ {_ta_hours(ia_active)} = {_fmt_leverage(leverage)}'
         f' · longest run {_fmt_dur(g["longest_run_s"])}</div>'
-        f'{sub_table("Where the idle hours went", idle_lines)}'
+        f'{sub_table("Where the Interactive idle hours went", ia_lines)}'
+        f'{sub_table("Where the Background idle hours went", bg_lines)}'
         f'{sub_table("Parallel agents", agent_lines)}'
         f"{_ta_bar_html(segments)}"
         "</section>"
