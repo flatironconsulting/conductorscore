@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import bisect
 import statistics
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -324,6 +324,11 @@ class Segment:
     end_ms: int
     owner: Owner
     kind: Activity | IdleReason
+    # Index of the turn this segment belongs to (``partition_main_thread``
+    # numbers turns from 0; the R5 credit belongs to the turn its prompt
+    # opens). None between turns and on hand-built segments. Not part of
+    # equality, so it never changes what a segment *is*.
+    turn: int | None = field(default=None, compare=False)
 
 
 _TURN_MS = K_TURN_SECONDS * 1000
@@ -514,17 +519,20 @@ def partition_main_thread(
 
     out: list[Segment] = []
 
-    def emit(lo: int, hi: int, owner: Owner, kind: Activity | IdleReason) -> None:
+    def emit(
+        lo: int, hi: int, owner: Owner, kind: Activity | IdleReason,
+        turn: int | None = None,
+    ) -> None:
         if hi > lo:
-            out.append(Segment(lo, hi, owner, kind))
+            out.append(Segment(lo, hi, owner, kind, turn=turn))
 
     cursor = ws
-    for t, turn_tools in zip(turns, tool_pieces):
+    for n, (t, turn_tools) in enumerate(zip(turns, tool_pieces)):
         # Between turns: idle, except the R5 credit right before the prompt.
         gap_start, gap_end = cursor, t.start_ts_ms
         credit = 0 if t.is_scripted else min(gap_end - gap_start, _PROMPT_CREDIT_MS)
         emit(gap_start, gap_end - credit, Owner.BETWEEN, IdleReason.NO_ACTIVITY)
-        emit(gap_end - credit, gap_end, Owner.INTERACTIVE, Activity.READ_WRITE)
+        emit(gap_end - credit, gap_end, Owner.INTERACTIVE, Activity.READ_WRITE, n)
 
         pieces = _turn_pieces(t.start_ts_ms, t.end_ts_ms, event_ts, turn_tools)
         active = sum(hi - lo for lo, hi, k in pieces if k in _AGENT_ACTIVE)
@@ -534,7 +542,7 @@ def partition_main_thread(
             else Owner.INTERACTIVE
         )
         for lo, hi, kind in pieces:
-            emit(lo, hi, owner, kind)
+            emit(lo, hi, owner, kind, n)
         cursor = t.end_ts_ms
     emit(cursor, we, Owner.BETWEEN, IdleReason.NO_ACTIVITY)
     return out
@@ -709,6 +717,8 @@ __all__ = [
     "ToolSpan",
     "account_agents",
     "classify_tool_calls",
+    "grid_seconds",
+    "longest_run_seconds",
     "partition_main_thread",
     "tool_pieces_union",
 ]
@@ -802,3 +812,162 @@ def longest_run_seconds(segments: list[Segment], agents: AgentAccounting) -> flo
             cur = ne - ns
     best = max(best, cur)
     return best / 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Grid seconds (the Leverage table, one session)
+# ---------------------------------------------------------------------------
+
+
+def _turn_keys(segments: list[Segment]) -> list[object | None]:
+    """A turn key per segment (index-aligned); None between turns.
+
+    Uses ``Segment.turn`` when set (``partition_main_thread``'s merged turns,
+    so a queued prompt never adds a turn). Hand-built segments without it get
+    an inferred key: a new turn starts at a READ_WRITE credit, after a
+    between-turns stretch, or where the owner changes.
+    """
+    keys: list[object | None] = []
+    counter = -1
+    prev: Segment | None = None
+    for s in segments:
+        if s.owner is Owner.BETWEEN:
+            keys.append(None)
+        elif s.turn is not None:
+            keys.append(("t", s.turn))
+        else:
+            new = (
+                prev is None
+                or prev.owner is Owner.BETWEEN
+                or s.kind is Activity.READ_WRITE
+                or (prev.kind is not Activity.READ_WRITE and prev.owner is not s.owner)
+            )
+            if new:
+                counter += 1
+            keys.append(("i", counter))
+        prev = s
+    return keys
+
+
+def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
+    """Seconds behind every cell of one session's Leverage grid.
+
+    The viewer renders from this dict and the wire object (Task 8) is built
+    from it, rounding only. Every value is seconds (float) or a count (int)::
+
+        {
+          "interactive":     {"turns", "read_write_s", "model_s", "tool_s",
+                              "idle_s", "active_s", "total_s"},
+          "background_main": {"turns", "model_s", "tool_s", "idle_s",
+                              "active_s", "total_s"},
+          "agents":          {"count", "model_s", "tool_s", "idle_s",
+                              "active_s", "total_s", "union_s",
+                              "max_concurrent",
+                              "by_type": {agent_type: {"count", "active_s"}}},
+          "between_turns":   {"gaps", "idle_s", "total_s"},
+          "idle_by_reason":  {reason.value: {"count", "s"}},  # every reason
+          "wall_clock_s":    float,
+          "longest_run_s":   float,
+        }
+
+    Rows: ``interactive`` holds every R5 reading & typing credit (also the
+    credit of a prompt that opens a Background turn) and the Interactive
+    turns' time; ``background_main`` the Background turns' time on the main
+    thread; ``between_turns`` the rest. These three partition the timeline:
+    their ``total_s`` sum to ``wall_clock_s`` (the window). ``agents`` sits on
+    top of the timeline: ``active_s`` is agent-seconds (model + tool, summed
+    over agents) and ``total_s == active_s``, because agent idle
+    (``idle_s``) is reported but not shown in the grid.
+
+    Identities: ``read_write_s + model_s + tool_s == active_s`` and
+    ``active_s + idle_s == total_s`` on the timeline rows;
+    ``Σ idle_by_reason[*].s`` = main-thread idle (interactive +
+    background_main + between_turns); ``Σ by_type[*].active_s ==
+    agents.active_s``.
+
+    Counts: ``turns`` = distinct turns of that owner (a turn's owner is that
+    of its non-credit segments; a turn with only a credit is Interactive);
+    ``gaps`` = maximal between-turns stretches; ``idle_by_reason[r].count`` =
+    distinct idle pieces of reason r (contiguous same-owner segments are one
+    piece), i.e. prompts for ``permission_wait``, calls for
+    ``tool_over_cap``, dispatches for ``dispatch_wait``. Overlapping parallel
+    calls resolved into one piece count once. Headline leverage, computed by
+    the consumer, is (``background_main.active_s`` + ``agents.active_s``) ÷
+    ``interactive.active_s``.
+    """
+    ia = {"turns": 0, "read_write_s": 0.0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0}
+    bm = {"turns": 0, "model_s": 0.0, "tool_s": 0.0, "idle_s": 0.0}
+    bt = {"gaps": 0, "idle_s": 0.0}
+    idle: dict[str, dict] = {r.value: {"count": 0, "s": 0.0} for r in IdleReason}
+
+    col = {
+        Activity.READ_WRITE: "read_write_s",
+        Activity.MODEL: "model_s",
+        Activity.TOOL: "tool_s",
+    }
+    keys = _turn_keys(segments)
+    turn_owner: dict[object, Owner | None] = {}
+    prev: Segment | None = None
+    for s, key in zip(segments, keys):
+        secs = (s.end_ms - s.start_ms) / 1000.0
+        contiguous = prev is not None and prev.end_ms == s.start_ms
+        if s.owner is Owner.BETWEEN:
+            bt["idle_s"] += secs
+            if not (contiguous and prev.owner is Owner.BETWEEN):
+                bt["gaps"] += 1
+        else:
+            row = ia if s.owner is Owner.INTERACTIVE else bm
+            if isinstance(s.kind, Activity):
+                row[col[s.kind]] += secs
+            else:
+                row["idle_s"] += secs
+            # A turn's owner is that of its first non-credit segment.
+            if turn_owner.get(key) is None:
+                turn_owner[key] = None if s.kind is Activity.READ_WRITE else s.owner
+        if isinstance(s.kind, IdleReason):
+            bucket = idle[s.kind.value]
+            bucket["s"] += secs
+            if not (contiguous and prev.kind is s.kind and prev.owner is s.owner):
+                bucket["count"] += 1
+        prev = s
+    for owner in turn_owner.values():
+        if owner is Owner.BACKGROUND:
+            bm["turns"] += 1
+        else:
+            ia["turns"] += 1
+
+    ia["active_s"] = ia["read_write_s"] + ia["model_s"] + ia["tool_s"]
+    ia["total_s"] = ia["active_s"] + ia["idle_s"]
+    bm["active_s"] = bm["model_s"] + bm["tool_s"]
+    bm["total_s"] = bm["active_s"] + bm["idle_s"]
+    bt["total_s"] = bt["idle_s"]
+
+    by_type: dict[str, dict] = {}
+    model_s = tool_s = idle_s = 0.0
+    for a in agents.agents:
+        model_s += a.model_s
+        tool_s += a.tool_s
+        idle_s += a.idle_s
+        t = by_type.setdefault(a.agent_type, {"count": 0, "active_s": 0.0})
+        t["count"] += 1
+        t["active_s"] += a.model_s + a.tool_s
+    ag = {
+        "count": len(agents.agents),
+        "model_s": model_s,
+        "tool_s": tool_s,
+        "idle_s": idle_s,
+        "active_s": model_s + tool_s,
+        "total_s": model_s + tool_s,
+        "union_s": agents.union_s,
+        "max_concurrent": agents.max_concurrent,
+        "by_type": by_type,
+    }
+    return {
+        "interactive": ia,
+        "background_main": bm,
+        "agents": ag,
+        "between_turns": bt,
+        "idle_by_reason": idle,
+        "wall_clock_s": ia["total_s"] + bm["total_s"] + bt["total_s"],
+        "longest_run_s": longest_run_seconds(segments, agents),
+    }

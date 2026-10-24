@@ -54,6 +54,12 @@ from scripts.core.text import flatten_content
 from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms
 from scripts.events import EventKind, _strip_synthetic_content, read_events
+from scripts.time_accounting import (
+    Segment,
+    account_agents,
+    grid_seconds,
+    partition_main_thread,
+)
 from scripts.turn_classifier import (
     ASK_USER_QUESTION_TOOL,
     K_BRIDGE_IDLE_SECONDS,
@@ -1148,6 +1154,34 @@ header h1 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
 .wire-trace { margin-top: 28px; padding: 12px 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--rule); border-radius: 8px; }
 .wire-trace h2 { margin: 0 0 8px 0; font-size: 13px; font-weight: 600; color: var(--text); }
 .wire-trace pre { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.time-accounting { margin-top: 28px; }
+.time-accounting h2 { margin: 0 0 4px 0; font-size: 13px; font-weight: 600; color: var(--text); display: flex; justify-content: space-between; }
+.time-accounting h2 .ta-leverage { color: var(--green); font-family: var(--mono); }
+.time-accounting .ta-sub { font-size: 12px; color: var(--muted); margin: 0 0 8px 0; }
+.time-accounting .summary-table th, .time-accounting .summary-table td { padding: 6px 10px; }
+.time-accounting .summary-table thead th { font-size: 11px; color: var(--muted); }
+.time-accounting tr[data-row="total"] > *, .time-accounting tr[data-row="wall_clock"] > * { border-top: 2px solid var(--rule); }
+.time-accounting tr[data-row="background_main"] > th, .time-accounting tr[data-row="agents"] > th { padding-left: 24px; color: var(--muted); }
+.time-accounting td.ta-count { color: var(--muted); }
+.time-accounting td.ta-note { color: var(--muted); text-align: left; font-size: 11px; }
+.time-accounting .ta-formula { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 6px 0 12px 0; }
+.ta-bar { display: flex; height: 18px; width: 100%; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; margin: 10px 0 4px 0; background: var(--panel); }
+.ta-seg { display: block; height: 100%; flex: none; }
+.ta-seg.o-interactive { box-shadow: inset 0 3px 0 var(--hitl); }
+.ta-seg.o-background { box-shadow: inset 0 3px 0 var(--afk); }
+.ta-seg.k-read_write { background: #86efac; }
+.ta-seg.o-interactive.k-model { background: var(--hitl); }
+.ta-seg.o-background.k-model { background: var(--afk); }
+.ta-seg.k-tool { background: var(--tool); }
+.ta-seg.k-dispatch_wait { background: #64748b; }
+.ta-seg.k-permission_wait { background: #f97316; }
+.ta-seg.k-tool_over_cap { background: #78716c; }
+.ta-seg.k-polling { background: #a78bfa; }
+.ta-seg.k-no_activity { background: var(--idle); }
+.ta-seg.o-between_turns.k-no_activity { background: #262a36; }
+.ta-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.ta-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--muted); margin: 6px 0 0 0; }
+.ta-legend .ta-seg { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 footer { margin-top: 32px; color: var(--muted); font-size: 12px; font-family: var(--mono); border-top: 1px solid var(--rule); padding-top: 12px; }
 """
 
@@ -1411,6 +1445,8 @@ class RenderModel:
     streak_members: dict[int, list[int]]
     streak_table_html: str
     wire_trace_html: str
+    # Time accounting v2 section (grid + timeline bar); filled by render_session.
+    time_accounting_html: str = ""
 
 
 def _compute_render_model(
@@ -1582,6 +1618,254 @@ def _compute_render_model(
     )
 
 
+# ---------------------------------------------------------------------------
+# Time accounting v2 section (plan 034): Leverage grid + timeline bar
+# ---------------------------------------------------------------------------
+
+_TA_COLS = ("read_write", "model", "tool", "active", "idle", "total")
+
+_TA_IDLE_LINES = (
+    # (reason, label, count unit, note)
+    ("dispatch_wait", "waiting on a subagent you dispatched", "dispatches",
+     "counted under parallel agents"),
+    ("permission_wait", "waiting on your permission", "prompts",
+     "a wait over 5 min ends your longest run"),
+    ("tool_over_cap", "tool time over cap", "calls",
+     "30 min per call, 10 if you interrupted"),
+    ("polling", "polling / sleeping", "calls", ""),
+    ("no_activity", "no activity", "gaps", ""),
+)
+
+_TA_AGENT_LINES = (
+    ("subagent", "subagents", "agents"),
+    ("workflow", "Workflow agents", "agents"),
+    ("background_shell", "background shell commands", "commands"),
+)
+
+_TA_KIND_LABELS = {
+    "read_write": "you reading & typing",
+    "model": "agent thinking",
+    "tool": "agent tools",
+    "dispatch_wait": "waiting on a subagent",
+    "permission_wait": "waiting on your permission",
+    "tool_over_cap": "tool over cap",
+    "polling": "polling / sleeping",
+    "no_activity": "no activity",
+}
+
+_TA_OWNER_LABELS = {
+    "interactive": "Interactive",
+    "background": "Background",
+    "between_turns": "Between turns",
+}
+
+
+def _ta_hours(seconds: float) -> str:
+    return f"{seconds / 3600:.2f}"
+
+
+def _ta_plural(n: int, unit: str) -> str:
+    """``unit`` is plural; drop the trailing s for one."""
+    return f"{n} {unit[:-1] if n == 1 and unit.endswith('s') else unit}"
+
+
+def _ta_grid_rows(g: dict) -> list[tuple[str, str, str, dict[str, float | None]]]:
+    """(row id, label, count text, {col: seconds or None for blank}).
+
+    Every total is computed here from the parts in ``g`` (spec: the
+    component computes totals, never reads one it could compute).
+    """
+    ia, bm, ag, bt = (
+        g["interactive"], g["background_main"], g["agents"], g["between_turns"]
+    )
+
+    def row(rw, model, tool, idle, *, show_idle=True):
+        active = (rw or 0.0) + (model or 0.0) + (tool or 0.0)
+        return {
+            "read_write": rw, "model": model, "tool": tool, "active": active,
+            "idle": idle if show_idle else None,
+            "total": active + (idle or 0.0),
+        }
+
+    r_ia = row(ia["read_write_s"], ia["model_s"], ia["tool_s"], ia["idle_s"])
+    r_bm = row(None, bm["model_s"], bm["tool_s"], bm["idle_s"])
+    r_ag = row(None, ag["model_s"], ag["tool_s"], None, show_idle=False)
+    r_bg = row(None, bm["model_s"] + ag["model_s"], bm["tool_s"] + ag["tool_s"], bm["idle_s"])
+    r_bt = {"read_write": None, "model": None, "tool": None, "active": None,
+            "idle": bt["idle_s"], "total": bt["idle_s"]}
+
+    def add(*rows):
+        return {c: sum((r[c] or 0.0) for r in rows) for c in _TA_COLS}
+
+    r_total = add(r_ia, r_bg, r_bt)
+    r_minus = dict(r_ag)
+    r_wall = {c: r_total[c] - (r_ag[c] or 0.0) for c in _TA_COLS}
+    return [
+        ("interactive", "Interactive", _ta_plural(ia["turns"], "turns"), r_ia),
+        ("background", "Background", "", r_bg),
+        ("background_main", "├ main thread", _ta_plural(bm["turns"], "turns"), r_bm),
+        ("agents", "└ parallel agents", _ta_plural(ag["count"], "agents"), r_ag),
+        ("between_turns", "Between turns", _ta_plural(bt["gaps"], "gaps"), r_bt),
+        ("total", "Total", "", r_total),
+        ("minus_agents", "− parallel agents", "", r_minus),
+        ("wall_clock", "Wall clock", "", r_wall),
+    ]
+
+
+def _ta_bar_html(segments: list[Segment]) -> str:
+    """One bar, a span per segment, widths proportional to duration."""
+    if not segments:
+        return ""
+    ws, we = segments[0].start_ms, segments[-1].end_ms
+    span = max(1, we - ws)
+    spans = []
+    for s in segments:
+        ms = s.end_ms - s.start_ms
+        owner, kind = s.owner.value, s.kind.value
+        title = (
+            f"{_TA_OWNER_LABELS[owner]} · {_TA_KIND_LABELS[kind]} · "
+            f"{_fmt_dur(ms / 1000)} · {_fmt_clock(s.start_ms)} → {_fmt_clock(s.end_ms)}"
+        )
+        spans.append(
+            f'<span class="ta-seg o-{owner} k-{kind}" data-ms="{ms}" '
+            f'style="width:{100 * ms / span:.4f}%" title="{html.escape(title)}"></span>'
+        )
+    legend_items = [
+        ("o-interactive k-read_write", "you reading & typing"),
+        ("o-interactive k-model", "Interactive thinking"),
+        ("o-background k-model", "Background thinking"),
+        ("o-background k-tool", "agent tools"),
+        ("o-background k-dispatch_wait", "waiting on a subagent"),
+        ("o-background k-permission_wait", "waiting on permission"),
+        ("o-background k-tool_over_cap", "tool over cap"),
+        ("o-background k-polling", "polling"),
+        ("o-background k-no_activity", "no activity in a turn"),
+        ("o-between_turns k-no_activity", "between turns"),
+    ]
+    legend = "".join(
+        f'<span><span class="ta-seg {cls}"></span>{html.escape(label)}</span>'
+        for cls, label in legend_items
+    )
+    return (
+        f'<div class="ta-bar" data-ms="{we - ws}">{"".join(spans)}</div>'
+        f'<div class="ta-axis"><span>{_fmt_clock(ws)}</span>'
+        f'<span>{_fmt_dur((we - ws) / 1000)}</span><span>{_fmt_clock(we)}</span></div>'
+        f'<div class="ta-legend">{legend}<span>top stripe: '
+        f'<span style="color:var(--hitl)">Interactive</span> / '
+        f'<span style="color:var(--afk)">Background</span> turn</span></div>'
+    )
+
+
+def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
+    """The time accounting v2 section: Leverage grid, sub-tables, bar.
+
+    Layout follows the spec's "The table" (single-session numbers, hours to
+    two decimals). Each numeric cell carries ``data-col`` and ``data-s``
+    (seconds) so tests can check the identities without rounding.
+    """
+    rows = _ta_grid_rows(g)
+    by_id = {r[0]: r[3] for r in rows}
+    bg_active = by_id["background"]["active"]
+    ia_active = by_id["interactive"]["active"]
+    leverage = bg_active / ia_active if ia_active > 0 else math.inf
+    lev_attr = "inf" if math.isinf(leverage) else f"{leverage:.6f}"
+
+    body = []
+    for rid, label, count, cells in rows:
+        tds = [f'<td class="ta-count">{html.escape(count)}</td>']
+        for c in _TA_COLS:
+            v = cells.get(c)
+            if v is None:
+                tds.append('<td class="muted"></td>')
+            else:
+                tds.append(
+                    f'<td data-col="{c}" data-s="{v:.3f}" title="{_fmt_dur(v)}">'
+                    f"{_ta_hours(v)}</td>"
+                )
+        body.append(
+            f'<tr class="ta-row" data-row="{rid}">'
+            f'<th>{html.escape(label)}</th>{"".join(tds)}</tr>'
+        )
+
+    idle_lines = []
+    for reason, label, unit, note in _TA_IDLE_LINES:
+        v = g["idle_by_reason"].get(reason, {"count": 0, "s": 0.0})
+        if v["s"] <= 0:
+            continue  # sub-table lines hide at zero
+        idle_lines.append(
+            f'<tr><th>{html.escape(label)}</th>'
+            f'<td class="ta-count">{_ta_plural(v["count"], unit)}</td>'
+            f'<td title="{_fmt_dur(v["s"])}">{_ta_hours(v["s"])}</td>'
+            f'<td class="ta-note">{html.escape(note)}</td></tr>'
+        )
+    ag = g["agents"]
+    agent_lines = []
+    for atype, label, unit in _TA_AGENT_LINES:
+        v = ag["by_type"].get(atype)
+        if not v or v["active_s"] <= 0:
+            continue
+        agent_lines.append(
+            f'<tr><th>{html.escape(label)}</th>'
+            f'<td class="ta-count">{_ta_plural(v["count"], unit)}</td>'
+            f'<td title="{_fmt_dur(v["active_s"])}">{_ta_hours(v["active_s"])}</td>'
+            f'<td class="ta-note"></td></tr>'
+        )
+    if ag["union_s"] > 0:
+        conc = ag["active_s"] / ag["union_s"]
+        agent_lines.append(
+            f'<tr><th>wall clock with ≥ 1 running</th><td class="ta-count"></td>'
+            f'<td title="{_fmt_dur(ag["union_s"])}">{_ta_hours(ag["union_s"])}</td>'
+            f'<td class="ta-note">{conc:.1f}× concurrency · peak {ag["max_concurrent"]} at once'
+            f' · agent idle {_ta_hours(ag["idle_s"])} h (not in the grid)</td></tr>'
+        )
+
+    def sub_table(title: str, lines: list[str]) -> str:
+        if not lines:
+            return ""
+        return (
+            '<table class="summary-table ta-subtable"><thead><tr>'
+            f'<th>{title}</th><th>Count</th><th>Hours</th><th></th>'
+            f'</tr></thead><tbody>{"".join(lines)}</tbody></table>'
+        )
+
+    head = "".join(
+        f"<th>{h}</th>"
+        for h in ("", "Count", "You reading &amp; typing", "Agent thinking",
+                  "Agent tools", "Active hours", "Idle hours", "Total hours")
+    )
+    return (
+        '<section class="time-accounting">'
+        f'<h2><span>Agent Leverage · time accounting v2 (preview)</span>'
+        f'<span class="ta-leverage" data-x="{lev_attr}">{_fmt_leverage(leverage)}</span></h2>'
+        '<p class="ta-sub">Background hours for every Interactive hour. Every '
+        'wall-clock minute of the session lands in exactly one row and column; '
+        'parallel agents sit on top of the timeline (agent-hours).</p>'
+        f'<table class="summary-table ta-grid"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table>'
+        f'<div class="ta-formula">Leverage = Background active ÷ Interactive active = '
+        f'{_ta_hours(bg_active)} ÷ {_ta_hours(ia_active)} = {_fmt_leverage(leverage)}'
+        f' · longest run {_fmt_dur(g["longest_run_s"])}</div>'
+        f'{sub_table("Where the idle hours went", idle_lines)}'
+        f'{sub_table("Parallel agents", agent_lines)}'
+        f"{_ta_bar_html(segments)}"
+        "</section>"
+    )
+
+
+def _time_accounting_section(jsonl_path: Path, events: list) -> str:
+    """Partition the session (window = first..last positive event timestamp,
+    as the scanner bounds it) and render the v2 section."""
+    ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
+    if not ts:
+        return ""
+    window = (min(ts), max(ts))
+    segments = partition_main_thread(events, window)
+    # Subagent / Workflow transcripts are a Claude layout.
+    claude = not (_is_cursor_locator(jsonl_path) or _is_codex_jsonl(jsonl_path))
+    agents = account_agents(events, jsonl_path if claude else None, window[1])
+    return _time_accounting_html(grid_seconds(segments, agents), segments)
+
+
 def _render_html(model: RenderModel) -> str:
     """Render phase: assemble the self-contained HTML page from a
     already-computed ``RenderModel``. Pure string-building — no aggregation
@@ -1651,6 +1935,7 @@ def _render_html(model: RenderModel) -> str:
   </table>
   {model.streak_table_html}
   {model.wire_trace_html}
+  {model.time_accounting_html}
 </header>
 <div class="timeline">
 """)
@@ -1846,6 +2131,9 @@ def render_session(
         parallel_seconds,
         main_plus_sub_seconds,
         parallel_intervals,
+    )
+    model = replace(
+        model, time_accounting_html=_time_accounting_section(jsonl_path, events)
     )
 
     output_path.write_text(_render_html(model), encoding="utf-8")
