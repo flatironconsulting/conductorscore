@@ -1,6 +1,6 @@
 ---
 name: conductorscore
-description: Score your Claude Code skill — measure AFK leverage, craft, and anti-patterns from your local transcripts. Use when the user types /conductorscore.
+description: Score your Claude Code skill — measure agent leverage, craft, and anti-patterns from your local transcripts. Use when the user types /conductorscore.
 ---
 
 ConductorScore reads your local coding-agent transcripts and uploads only the
@@ -96,11 +96,11 @@ this shape (keep the ✓ and 📊 and the bullets):
 ## Debug / visualize a session — `/conductorscore debug`
 
 `/conductorscore debug` renders a session locally as a self-contained HTML
-timeline (HITL/AFK/Tool/Idle) and opens it in the browser. It runs entirely on
+timeline plus the Interactive / Background leverage table and opens it in the browser. It runs entirely on
 the user's machine and **uploads nothing — not even the numbers a scan sends.**
 Use this path when the user types `/conductorscore debug …`, or asks to
 **visualize / view / debug a session**, show its **timeline**, or see the
-**HITL/AFK/Tool/Idle breakdown**.
+**leverage breakdown** (Interactive / Background, HITL/AFK/Tool/Idle).
 
 The slash interface IS the `session_viewer.py` interface: take whatever the user
 put after `debug` and pass it **straight through** to the Python CLI — every

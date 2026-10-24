@@ -71,8 +71,9 @@ python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --list
 python3 ~/.claude/skills/conductorscore/scripts/session_viewer.py --pick 0
 ```
 
-It writes a self-contained HTML page — the HITL / AFK / Tool / Idle timeline,
-leverage table, AFK streaks, and subagent panels — and opens it in your browser.
+It writes a self-contained HTML page — the session timeline, the Interactive /
+Background leverage table your score is computed from, the longest unattended
+run, and subagent panels — and opens it in your browser.
 
 **Redacted by default:** bubbles show only the wire-equivalent view (hashes +
 token counts + tool names, exactly what an upload would contain), so a rendered
