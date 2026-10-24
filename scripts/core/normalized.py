@@ -155,6 +155,25 @@ class Event:
     # hung-then-killed command does not inflate active/AFK time. Privacy: only
     # the boolean is stored; the output text is consumed in the reader.
     is_aborted: bool = False
+    # Time accounting v2 signals. Booleans / opaque ids only; no command or
+    # result text is ever stored.
+    # TOOL_RESULT: the line's ``permissionDecision`` (top-level key) was made
+    # by a human (source ``user_*``) / was a rejection / was an automatic
+    # config accept. AskUserQuestion and ExitPlanMode are excluded (they are
+    # human judgment dialogs, not permission waits).
+    permission_by_user: bool = False
+    permission_rejected: bool = False
+    permission_auto: bool = False
+    # ASSISTANT_TOOL: Bash launched with ``run_in_background``.
+    is_background_launch: bool = False
+    # Opaque shell-task id: on the launch's TOOL_RESULT and on the later
+    # task-notification USER event.
+    background_task_id: str | None = None
+    # ASSISTANT_TOOL: Monitor / ScheduleWakeup / sleep|timeout|watch Bash.
+    is_wait_tool: bool = False
+    # ASSISTANT_TOOL: sha16(tool name + canonical input JSON); opaque hash
+    # used only to spot identical consecutive calls.
+    call_signature: str | None = None
 
 
 __all__ = ["Event", "EventKind", "SessionMeta"]

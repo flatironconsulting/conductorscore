@@ -500,6 +500,13 @@ def test_event_dataclass_has_no_raw_text_fields():
     assert field_names.isdisjoint(forbidden), (
         f"Event has a forbidden raw-content field: {field_names & forbidden}"
     )
+    # Time-accounting v2 signals are bools / opaque ids only.
+    by_name = {f.name: f for f in dataclasses.fields(Event)}
+    for n in ("permission_by_user", "permission_rejected", "permission_auto",
+              "is_background_launch", "is_wait_tool"):
+        assert by_name[n].default is False
+    for n in ("background_task_id", "call_signature"):
+        assert by_name[n].default is None
 
 
 # ---------------------------------------------------------------------------

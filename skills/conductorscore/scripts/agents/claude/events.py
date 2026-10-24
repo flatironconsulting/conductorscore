@@ -12,6 +12,7 @@ entirely; only structural metadata survives.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -84,6 +85,69 @@ def _tool_result_text(block: dict) -> str:
                     parts.append(t)
         return " ".join(parts)
     return ""
+
+
+_BG_ID_RE = re.compile(r"Command running in background with ID: ([a-z0-9]+)")
+_TASK_ID_RE = re.compile(r"<task-id>\s*([A-Za-z0-9_-]+)\s*</task-id>")
+# Dialogs that are human judgment, not permission waits.
+_NON_PERMISSION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+_WAIT_TOOLS = frozenset({"Monitor", "ScheduleWakeup"})
+_WAIT_CMD_PREFIXES = ("sleep", "timeout", "watch")
+
+
+def _permission_flags(d: dict, tool_name: str | None) -> tuple[bool, bool, bool]:
+    """(by_user, rejected, auto) from the line's top-level permissionDecision."""
+    pd = d.get("permissionDecision")
+    if not isinstance(pd, dict) or tool_name in _NON_PERMISSION_TOOLS:
+        return False, False, False
+    source = pd.get("source")
+    decision = pd.get("decision")
+    by_user = isinstance(source, str) and source.startswith("user_")
+    rejected = by_user and decision == "reject"
+    auto = source == "config" and decision == "accept"
+    return by_user, rejected, auto
+
+
+def _is_wait_call(name: str | None, inp: dict) -> bool:
+    if name in _WAIT_TOOLS:
+        return True
+    if name != "Bash":
+        return False
+    cmd = inp.get("command")
+    if not isinstance(cmd, str):
+        return False
+    cmd = cmd.lstrip()
+    first = cmd.split(None, 1)[0] if cmd else ""
+    return first in _WAIT_CMD_PREFIXES or "gh run watch" in cmd
+
+
+def _call_signature(name: str | None, inp: dict) -> str | None:
+    if not name:
+        return None
+    try:
+        canon = json.dumps(inp, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return _sha16(name + canon)
+
+
+def _notification_task_id(raw_text: str) -> str | None:
+    """Opaque id from a ``<task-notification>``; no other text is kept."""
+    if "<task-notification>" not in raw_text:
+        return None
+    m = _TASK_ID_RE.search(raw_text)
+    return m.group(1) if m else None
+
+
+def _background_result_id(d: dict, text: str) -> str | None:
+    """Background shell id on a launch's tool_result (id only)."""
+    tur = d.get("toolUseResult")
+    if isinstance(tur, dict):
+        bid = tur.get("backgroundTaskId")
+        if isinstance(bid, str) and bid:
+            return bid
+    m = _BG_ID_RE.search(text) if text else None
+    return m.group(1) if m else None
 
 
 def _strip_synthetic_content(text: str) -> str:
@@ -494,6 +558,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
     # first line, whatever the block type (thinking / tool_use / text).
     folded = _fold_message_usage(records)
     attributed: set[tuple[str, str]] = set()
+    # tool_use_id -> tool name, so a tool_result can be attributed to its call.
+    tool_names_by_id: dict[str, str] = {}
 
     for d in records:
         ts_ms = _parse_ts_ms(d)
@@ -532,6 +598,7 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             text, token_count
                         ),
                         is_scripted_prompt=origin == "scripted",
+                        background_task_id=_notification_task_id(raw_text),
                     )
                 )
             elif AUTO_COMPACT_BANNER in raw_text and not (
@@ -560,7 +627,19 @@ def read_events(jsonl_path: Path) -> list[Event]:
                     _tu_id = block.get("tool_use_id")
                     # Denial detection: flatten the result text in-memory,
                     # test it against the markers, keep ONLY the boolean.
-                    _is_denied = _is_denial_text(_tool_result_text(block))
+                    _res_text = _tool_result_text(block)
+                    _is_denied = _is_denial_text(_res_text)
+                    _res_name = (
+                        tool_names_by_id.get(_tu_id)
+                        if isinstance(_tu_id, str)
+                        else None
+                    )
+                    if _res_name is None and isinstance(
+                        block.get("tool_use_name"), str
+                    ):
+                        _res_name = block["tool_use_name"]
+                    _p_user, _p_rej, _p_auto = _permission_flags(d, _res_name)
+                    _bg_id = _background_result_id(d, _res_text)
                     events.append(
                         Event(
                             kind=EventKind.TOOL_RESULT,
@@ -574,6 +653,10 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             subagent_id=subagent_id,
                             tool_use_id=_tu_id if isinstance(_tu_id, str) else None,
                             is_denied=_is_denied,
+                            permission_by_user=_p_user,
+                            permission_rejected=_p_rej,
+                            permission_auto=_p_auto,
+                            background_task_id=_bg_id,
                         )
                     )
             continue
@@ -648,6 +731,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
                         _block_id if isinstance(_block_id, str) else None
                     )
                     inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    if tool_use_id_val and name:
+                        tool_names_by_id[tool_use_id_val] = name
                     # Default-safe v0.4 plan/edit flags.
                     skill_name_val: str | None = None
                     todo_count_val = 0
@@ -703,6 +788,12 @@ def read_events(jsonl_path: Path) -> list[Event]:
                             raw_input=raw_input_val,
                             stop_reason=stop_reason_val,
                             tool_use_id=tool_use_id_val,
+                            is_background_launch=(
+                                name == "Bash"
+                                and inp.get("run_in_background") is True
+                            ),
+                            is_wait_tool=_is_wait_call(name, inp),
+                            call_signature=_call_signature(name, inp),
                         )
                     )
             elif isinstance(content, str):
