@@ -239,3 +239,16 @@ def test_pieces_cover_span_exactly(scenario):
         for a, b in zip(s.pieces, s.pieces[1:]):
             assert a.end_ms == b.start_ms
         assert all(p.end_ms > p.start_ms for p in s.pieces)
+
+
+def test_ask_user_question_breaks_a_polling_run():
+    evs = _pair("a", 0, 3 * MIN, call_kw={"call_signature": "sig"})
+    evs += _pair("b", 3 * MIN, 6 * MIN, call_kw={"call_signature": "sig"})
+    evs += _pair("q", 6 * MIN, 60 * MIN, name="AskUserQuestion",
+                 call_kw={"call_signature": "sig"})
+    evs += _pair("d", 60 * MIN, 63 * MIN, call_kw={"call_signature": "sig"})
+    spans = classify_tool_calls(evs, FAR)
+    assert [s.tool_use_id for s in spans] == ["a", "b", "d"]
+    assert _kinds(_span(spans, "a")) == [(Activity.TOOL, 3)]
+    assert _kinds(_span(spans, "b")) == [(Activity.TOOL, 3)]
+    assert _kinds(_span(spans, "d")) == [(Activity.TOOL, 3)]

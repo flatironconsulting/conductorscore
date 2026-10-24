@@ -120,16 +120,23 @@ def _poll_groups(calls: list[Event]) -> list[int | None]:
 
     A run of >= 3 consecutive calls with the same ``call_signature`` shares
     one group (one 5-min grace for the whole run). An explicit wait tool
-    outside such a run gets a group of its own.
+    outside such a run gets a group of its own. Any different call, and
+    AskUserQuestion in particular, breaks a run.
     """
     groups: list[int | None] = [None] * len(calls)
     next_group = 0
     i = 0
     while i < len(calls):
         sig = calls[i].call_signature
+        if calls[i].tool_name == ASK_USER_QUESTION_TOOL:
+            sig = None  # a turn boundary never joins or extends a run
         j = i + 1
         if sig is not None:
-            while j < len(calls) and calls[j].call_signature == sig:
+            while (
+                j < len(calls)
+                and calls[j].call_signature == sig
+                and calls[j].tool_name != ASK_USER_QUESTION_TOOL
+            ):
                 j += 1
         if sig is not None and j - i >= _POLL_RUN_MIN:
             for k in range(i, j):
@@ -152,12 +159,16 @@ def classify_tool_calls(events: list[Event], scope_end_ms: int) -> list[ToolSpan
     ends at ``scope_end_ms``. Pieces within a call are ordered: permission
     wait, tool runtime up to the cap (or poll grace), then the remainder.
     """
-    calls = [
+    all_calls = [
         e for e in events
-        if e.kind == EventKind.ASSISTANT_TOOL
-        and e.tool_use_id
-        and e.tool_name != ASK_USER_QUESTION_TOOL
+        if e.kind == EventKind.ASSISTANT_TOOL and e.tool_use_id
     ]
+    # Poll runs are grouped over every call, AskUserQuestion included: it is
+    # a turn boundary and breaks a run, so grace never leaks across turns.
+    # It is then dropped (it is not a tool call here).
+    keep = [c.tool_name != ASK_USER_QUESTION_TOOL for c in all_calls]
+    calls = [c for c, k in zip(all_calls, keep) if k]
+    groups = [g for g, k in zip(_poll_groups(all_calls), keep) if k]
     call_ids = {c.tool_use_id for c in calls}
     results: dict[str, Event] = {}
     for e in events:
@@ -169,7 +180,6 @@ def classify_tool_calls(events: list[Event], scope_end_ms: int) -> list[ToolSpan
             results[e.tool_use_id] = e
 
     baselines = _permission_baselines(calls, results)
-    groups = _poll_groups(calls)
     grace_left: dict[int, int] = {}
 
     spans: list[ToolSpan] = []
