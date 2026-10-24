@@ -105,3 +105,44 @@ def test_short_no_activity_bridges_but_not_counted():
 
 def test_empty_timeline_is_zero():
     assert longest_run_seconds([], NONE) == 0.0
+
+
+def test_probe_b_read_write_credit_before_background_turn_does_not_break():
+    """Final review m2, probe B: two 20-min Background turns 2 min apart.
+    The 2-min R5 credit belongs to the second (Background) turn, so it does
+    not end the run: 40 min, not 20."""
+    segs = [
+        Segment(T, T + 20 * MIN, BG, M, turn=0),
+        Segment(T + 20 * MIN, T + 22 * MIN, IA, Activity.READ_WRITE, turn=1),
+        Segment(T + 22 * MIN, T + 42 * MIN, BG, M, turn=1),
+    ]
+    assert longest_run_seconds(segs, NONE) == mins(40)
+
+
+def test_read_write_credit_before_interactive_turn_still_breaks():
+    segs = [
+        Segment(T, T + 20 * MIN, BG, M, turn=0),
+        Segment(T + 20 * MIN, T + 22 * MIN, IA, Activity.READ_WRITE, turn=1),
+        Segment(T + 22 * MIN, T + 23 * MIN, IA, M, turn=1),
+        Segment(T + 23 * MIN, T + 43 * MIN, BG, M, turn=2),
+    ]
+    assert longest_run_seconds(segs, NONE) == mins(20)
+
+
+def test_probe_b_end_to_end():
+    """Probe B through the partition: two Background turns (each > 5 min of
+    agent activity), the second typed 2 min after the first ends."""
+    from scripts.core.normalized import Event, EventKind
+    from scripts.time_accounting import partition_main_thread
+
+    def ev(kind, ts, **kw):
+        return Event(kind=kind, session_id="s", timestamp_ms=ts, **kw)
+
+    evs = []
+    for start in (0, 22):
+        evs.append(ev(EventKind.USER, T + start * MIN))
+        evs += [ev(EventKind.ASSISTANT_TEXT, T + (start + k) * MIN) for k in range(1, 20)]
+        evs.append(ev(EventKind.ASSISTANT_TEXT, T + (start + 20) * MIN, stop_reason="end_turn"))
+    segs = partition_main_thread(evs, (T, T + 42 * MIN))
+    assert {s.owner for s in segs if s.kind is M} == {BG}
+    assert longest_run_seconds(segs, NONE) == mins(40)

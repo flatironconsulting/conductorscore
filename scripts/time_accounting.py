@@ -155,14 +155,25 @@ def _permission_baselines(
     return {name: round(statistics.median(v)) for name, v in samples.items()}
 
 
-def _poll_groups(calls: list[Event]) -> list[int | None]:
+def _poll_groups(
+    calls: list[Event], turn_starts: list[int] | None = None
+) -> list[int | None]:
     """Grace-budget group per call (index-aligned), or None if not polling.
 
     A run of >= 3 consecutive calls with the same ``call_signature`` shares
     one group (one 5-min grace for the whole run). An explicit wait tool
-    outside such a run gets a group of its own. Any different call, and
-    AskUserQuestion in particular, breaks a run.
+    outside such a run gets a group of its own. Any different call,
+    AskUserQuestion, and any turn start (``turn_starts``: sorted timestamps
+    of the USER events that open a turn, typed or scripted) between two
+    calls break a run, so a run never spans turns.
     """
+    starts = turn_starts or []
+
+    def same_turn(a: Event, b: Event) -> bool:
+        # No turn start in (a, b]: a call at a turn's start belongs to it.
+        k = bisect.bisect_right(starts, a.timestamp_ms)
+        return k >= len(starts) or starts[k] > b.timestamp_ms
+
     groups: list[int | None] = [None] * len(calls)
     next_group = 0
     i = 0
@@ -176,6 +187,7 @@ def _poll_groups(calls: list[Event]) -> list[int | None]:
                 j < len(calls)
                 and calls[j].call_signature == sig
                 and calls[j].tool_name != ASK_USER_QUESTION_TOOL
+                and same_turn(calls[j - 1], calls[j])
             ):
                 j += 1
         if sig is not None and j - i >= _POLL_RUN_MIN:
@@ -191,24 +203,37 @@ def _poll_groups(calls: list[Event]) -> list[int | None]:
     return groups
 
 
-def classify_tool_calls(events: list[Event], scope_end_ms: int) -> list[ToolSpan]:
+def classify_tool_calls(
+    events: list[Event],
+    scope_end_ms: int,
+    turn_starts: list[int] | None = None,
+) -> list[ToolSpan]:
     """Split each tool call's call→result interval into tagged pieces.
 
     Pairs ASSISTANT_TOOL with TOOL_RESULT by ``tool_use_id`` among
     ``events`` (one thread: the main thread or one agent). An unpaired call
     ends at ``scope_end_ms``. Pieces within a call are ordered: permission
     wait, tool runtime up to the cap (or poll grace), then the remainder.
+
+    ``turn_starts`` are the timestamps of the USER events that open a turn
+    (the main thread passes its turn starts). When omitted, every USER
+    event in ``events`` counts as one.
     """
     all_calls = [
         e for e in events
         if e.kind == EventKind.ASSISTANT_TOOL and e.tool_use_id
     ]
-    # Poll runs are grouped over every call, AskUserQuestion included: it is
-    # a turn boundary and breaks a run, so grace never leaks across turns.
-    # It is then dropped (it is not a tool call here).
+    if turn_starts is None:
+        turn_starts = [e.timestamp_ms for e in events if e.kind == EventKind.USER]
+    # Poll runs are grouped over every call, AskUserQuestion included, and
+    # break at every turn start: AskUserQuestion and turn-opening prompts
+    # are turn boundaries, so grace never leaks across turns. AskUserQuestion
+    # is then dropped (it is not a tool call here).
     keep = [c.tool_name != ASK_USER_QUESTION_TOOL for c in all_calls]
     calls = [c for c, k in zip(all_calls, keep) if k]
-    groups = [g for g, k in zip(_poll_groups(all_calls), keep) if k]
+    groups = [
+        g for g, k in zip(_poll_groups(all_calls, sorted(turn_starts)), keep) if k
+    ]
     call_ids = {c.tool_use_id for c in calls}
     results: dict[str, Event] = {}
     for e in events:
@@ -381,7 +406,9 @@ def _open_call_intervals(main: list[Event]) -> list[tuple[int, int]]:
     return out
 
 
-def _is_queued(ts: int, main: list[Event], open_calls: list[tuple[int, int]]) -> bool:
+def _is_queued(
+    ts: int, typed_ts: set[int], open_calls: list[tuple[int, int]]
+) -> bool:
     """A typed prompt at ``ts`` arrived while the agent was still working.
 
     Claude Code delivers a prompt queued mid-turn as a ``queued_command``
@@ -390,19 +417,20 @@ def _is_queued(ts: int, main: list[Event], open_calls: list[tuple[int, int]]) ->
     turn mid-flight is queued when a main-thread tool call was still running
     at that instant (called before it, result after it). A prompt after an
     interrupt or a turn that ended without ``end_turn`` (no tool open) is a
-    real new prompt.
+    real new prompt. ``typed_ts`` holds the timestamps of the main thread's
+    typed (non-scripted) USER events, built once per session.
     """
-    opener = any(
-        e.timestamp_ms == ts and e.kind == EventKind.USER and not e.is_scripted_prompt
-        for e in main
-    )
-    return opener and any(lo < ts < hi for lo, hi in open_calls)
+    return ts in typed_ts and any(lo < ts < hi for lo, hi in open_calls)
 
 
 def _main_turns(main: list[Event]) -> list[Turn]:
     """``segment_turns`` boundaries, with queued-prompt splits undone (R5)."""
     turns = segment_turns(main)
     open_calls = _open_call_intervals(main)
+    typed_ts = {
+        e.timestamp_ms for e in main
+        if e.kind == EventKind.USER and not e.is_scripted_prompt
+    }
     merged: list[Turn] = []
     for t in turns:
         prev = merged[-1] if merged else None
@@ -410,7 +438,7 @@ def _main_turns(main: list[Event]) -> list[Turn]:
             prev is not None
             and prev.end_reason == "next_user"
             and prev.end_ts_ms == t.start_ts_ms
-            and _is_queued(t.start_ts_ms, main, open_calls)
+            and _is_queued(t.start_ts_ms, typed_ts, open_calls)
         ):
             merged[-1] = Turn(
                 start_ts_ms=prev.start_ts_ms,
@@ -445,7 +473,7 @@ def _pieces_by_turn(spans: list[ToolSpan], turns: list[Turn]) -> list[list[Piece
     cut at that turn's end, so a call with no result (which runs to the
     scope end) never spills into later turns. Calls outside every turn are
     dropped. Spans are classified over the whole session first, so R4's
-    permission baseline and R6's poll runs stay session-wide.
+    permission baseline stays session-wide (R6 poll runs break at turn starts).
     """
     owned: list[list[ToolSpan]] = [[] for _ in turns]
     starts = [t.start_ts_ms for t in turns]
@@ -469,7 +497,8 @@ def _turn_pieces(
     """Contiguous (lo, hi, kind) pieces covering ``[start, end)``.
 
     Shared by main-thread turns and agent spans (R8). Tool pieces win where
-    they cover time. The rest is cut at the thread's event timestamps; each uncovered stretch is MODEL up to the bridge
+    they cover time. The rest is cut at the thread's event timestamps
+    (``event_ts``, sorted ascending); each uncovered stretch is MODEL up to the bridge
     limit, NO_ACTIVITY beyond it (R2).
     """
     clipped = [
@@ -478,7 +507,10 @@ def _turn_pieces(
         if p.end_ms > start and p.start_ms < end
     ]
     points = {start, end}
-    points.update(ts for ts in event_ts if start < ts < end)
+    # event_ts is sorted: take the (start, end) slice by bisection.
+    points.update(
+        event_ts[bisect.bisect_right(event_ts, start):bisect.bisect_left(event_ts, end)]
+    )
     for lo, hi, _ in clipped:
         points.add(lo)
         points.add(hi)
@@ -514,7 +546,9 @@ def partition_main_thread(
         return []
     main = _clip_main_events(events, ws, we)
     turns = _main_turns(main)
-    tool_pieces = _pieces_by_turn(classify_tool_calls(main, we), turns)
+    tool_pieces = _pieces_by_turn(
+        classify_tool_calls(main, we, [t.start_ts_ms for t in turns]), turns
+    )
     event_ts = sorted({e.timestamp_ms for e in main})
 
     out: list[Segment] = []
@@ -778,9 +812,22 @@ def longest_run_seconds(segments: list[Segment], agents: AgentAccounting) -> flo
     continuous stretch of it longer than that is outside main-thread
     DISPATCH_WAIT / TOOL_OVER_CAP / POLLING (so NO_ACTIVITY, PERMISSION_WAIT,
     BETWEEN and uncovered time break). Length counts timeline minutes only.
+
+    Only an Interactive *turn* cuts a run (decision 11): the R5 READ_WRITE
+    credit before a prompt that opens a Background turn (``Segment.turn``)
+    does not, so two Background turns a short gap apart stay one run.
     """
+    background_turns = {
+        s.turn for s in segments
+        if s.turn is not None and s.owner is Owner.BACKGROUND
+    }
     interactive = _merge_intervals(
-        [(s.start_ms, s.end_ms) for s in segments if s.owner is Owner.INTERACTIVE]
+        [
+            (s.start_ms, s.end_ms)
+            for s in segments
+            if s.owner is Owner.INTERACTIVE
+            and not (s.kind is Activity.READ_WRITE and s.turn in background_turns)
+        ]
     )
     raw = [
         (s.start_ms, s.end_ms)

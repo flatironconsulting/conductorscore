@@ -438,3 +438,22 @@ def test_session_end_turn_with_reply_is_kept():
         (I, Activity.READ_WRITE): 5,
         (I, Activity.MODEL): 2,
     }
+
+
+def test_probe_a_poll_run_does_not_span_typed_turns():
+    """Final review m1, probe A: three typed turns, each running the same
+    4-min command: 12 min of tool time, no polling."""
+    evs = []
+    for i in range(3):
+        t = T + i * 10 * MIN
+        evs.append(_prompt(t))
+        evs.append(_call(f"r{i}", t + MIN, call_signature="sig"))
+        evs.append(_result(f"r{i}", t + 5 * MIN))
+        evs.append(_end(t + 6 * MIN))
+    window = (T, T + 30 * MIN)
+    segs = partition_main_thread(evs, window)
+    _check(segs, window)
+    tool = sum(s.end_ms - s.start_ms for s in segs if s.kind == Activity.TOOL)
+    poll = sum(s.end_ms - s.start_ms for s in segs if s.kind == IdleReason.POLLING)
+    assert tool == 12 * MIN
+    assert poll == 0

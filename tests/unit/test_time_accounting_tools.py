@@ -252,3 +252,44 @@ def test_ask_user_question_breaks_a_polling_run():
     assert _kinds(_span(spans, "a")) == [(Activity.TOOL, 3)]
     assert _kinds(_span(spans, "b")) == [(Activity.TOOL, 3)]
     assert _kinds(_span(spans, "d")) == [(Activity.TOOL, 3)]
+
+
+def _user(ts, scripted=False):
+    return Event(kind=EventKind.USER, session_id="s", timestamp_ms=ts,
+                 is_scripted_prompt=scripted)
+
+
+def test_turn_opening_prompts_break_a_polling_run():
+    """Probe A (final review m1): three typed turns, each running the same
+    4-min command, are three separate calls, not one polling run."""
+    evs = []
+    for i in range(3):
+        t = i * 10 * MIN
+        evs.append(_user(t))
+        evs += _pair(f"r{i}", t + MIN, t + 5 * MIN, call_kw={"call_signature": "sig"})
+    spans = classify_tool_calls(evs, FAR)
+    assert _totals([p for s in spans for p in s.pieces]) == {Activity.TOOL: 12}
+
+
+def test_scripted_turn_start_breaks_a_polling_run():
+    evs = []
+    for i in range(3):
+        t = i * 10 * MIN
+        evs.append(_user(t, scripted=True))
+        evs += _pair(f"r{i}", t + MIN, t + 5 * MIN, call_kw={"call_signature": "sig"})
+    spans = classify_tool_calls(evs, FAR)
+    assert _totals([p for s in spans for p in s.pieces]) == {Activity.TOOL: 12}
+
+
+def test_explicit_turn_starts_override_user_events():
+    """Only the given turn starts break a run (an absorbed prompt does not)."""
+    evs = [_user(0)]
+    for i in range(4):
+        evs += _pair(f"r{i}", (1 + 3 * i) * MIN, (4 + 3 * i) * MIN,
+                     call_kw={"call_signature": "sig"})
+    evs.append(_user(5 * MIN, scripted=True))  # absorbed mid-turn
+    evs.sort(key=lambda e: e.timestamp_ms)
+    spans = classify_tool_calls(evs, FAR, turn_starts=[0])
+    assert _totals([p for s in spans for p in s.pieces]) == {
+        Activity.TOOL: 5, IdleReason.POLLING: 7,
+    }
