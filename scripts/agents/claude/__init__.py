@@ -23,9 +23,17 @@ class ClaudeAdapter:
         return discovery.find_sessions()
 
     def read_events_and_text(
-        self, jsonl_path: Path
+        self,
+        jsonl_path: Path,
+        *,
+        subagent_records: events.SubagentRecords | None = None,
     ) -> tuple[list[Event], dict[int, str]]:
-        return events.read_events_and_text(jsonl_path)
+        """``subagent_records`` (``events.load_subagent_records``) replaces
+        the subagent transcript reads for the token events; None reads them
+        from disk."""
+        return events.read_events_and_text(
+            jsonl_path, subagent_records=subagent_records
+        )
 
     def preflight(self, now_ms: int, window_ms: int) -> dict:
         return discovery.preflight(now_ms, window_ms)

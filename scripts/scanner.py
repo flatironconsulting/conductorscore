@@ -4,6 +4,11 @@ import sys
 import time
 
 from scripts.agents import consent as consent_mod
+from scripts.agents.claude.events import (
+    SubagentRecords,
+    load_subagent_records,
+    subagent_usage_events,
+)
 from scripts.agents.registry import adapters_for
 from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
@@ -205,7 +210,15 @@ def _permission_signal(provider: str) -> str:
     return "available" if provider == "claude" else "not_available"
 
 
-def _safe_time_accounting(events, window, jsonl_path, session_id, provider="claude"):
+def _safe_time_accounting(
+    events,
+    window,
+    jsonl_path,
+    session_id,
+    provider="claude",
+    *,
+    subagent_records: SubagentRecords | None = None,
+):
     """``build_time_accounting``, or None (with one warning per scan) when it
     raises. The warning names the exception type and session id only.
 
@@ -219,6 +232,7 @@ def _safe_time_accounting(events, window, jsonl_path, session_id, provider="clau
             window,
             jsonl_path=jsonl_path,
             permission_signal=_permission_signal(provider),
+            subagent_records=subagent_records,
         )
     except Exception as e:  # noqa: BLE001 — dual reporting must survive any bug
         if not _time_accounting_warned:
@@ -252,6 +266,19 @@ def _build_per_session(
         artifact_times_by_project: cross-session (session_id, ts_ms) plan-
             artifact history keyed by project_root, built once in Pass 1.
     """
+    # Plan 035: each subagent transcript is parsed ONCE per Claude session,
+    # here, and the records feed all three readers: the subagent tokens
+    # (appended to ``events``, which ``_read_session`` left main-thread
+    # only), the legacy subagent activity and the v2 agent accounting. The
+    # records live only for this call: they are never cached or returned.
+    # Codex/Cursor have no subagent transcript tree.
+    subagent_records: SubagentRecords | None = None
+    if provider == "claude" and s.jsonl_path is not None:
+        subagent_records = load_subagent_records(s.jsonl_path)
+        events = events + subagent_usage_events(
+            s.jsonl_path, s.jsonl_path.stem, records=subagent_records
+        )
+
     stf = SessionToolFields.from_tool_counts(tc)
 
     # Session bounds (#10). Discovery reads only the head/tail lines of each
@@ -285,9 +312,16 @@ def _build_per_session(
         # provider. Codex/Cursor have no subagent transcript tree, so they
         # report zero agents.
         time_accounting = _safe_time_accounting(
-            events, (started_at_ms, ended_at_ms), s.jsonl_path, s.session_id, provider
+            events,
+            (started_at_ms, ended_at_ms),
+            s.jsonl_path,
+            s.session_id,
+            provider,
+            subagent_records=subagent_records,
         )
-        agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
+        agg = compute_turn_aggregates(
+            events, jsonl_path=s.jsonl_path, subagent_records=subagent_records
+        )
         hitl_minutes = agg.hitl_minutes
         afk_minutes = agg.afk_minutes
         hitl_tool_minutes = agg.hitl_tool_minutes
@@ -501,13 +535,22 @@ def _read_session(agent, s) -> tuple[list, dict, "ToolCounts | None"]:
     ``count_cursor_tools``): the same wire fields (distinct_builtin_tools /
     builtin_tool_invocations / distinct_mcp_tools) drive the Customization +
     Tools surfaces.
+
+    Claude events are main-thread only: ``_build_per_session`` adds the
+    subagent token events from its single subagent load (plan 035), so Pass 1
+    never opens a subagent transcript and holds no subagent records across
+    sessions. An empty ``subagent_records`` means "read none here".
     """
     if s.jsonl_path is None:
         return [], {}, None
-    events, text_map = agent.read_events_and_text(s.jsonl_path)
     if agent.agent_id == "claude":
+        events, text_map = agent.read_events_and_text(
+            s.jsonl_path, subagent_records={}
+        )
         tc = count_tools(s.jsonl_path)
-    elif agent.agent_id == "cursor":
+        return events, text_map, tc
+    events, text_map = agent.read_events_and_text(s.jsonl_path)
+    if agent.agent_id == "cursor":
         tc = count_cursor_tools(events)
     else:
         tc = count_codex_tools(events)

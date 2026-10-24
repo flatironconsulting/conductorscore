@@ -44,6 +44,11 @@ from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
 from scripts.agents.claude.discovery import subagent_transcripts
+from scripts.agents.claude.events import (
+    SubagentRecords,
+    load_subagent_records,
+    parse_transcript_records,
+)
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
@@ -663,86 +668,84 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_subagent_messages(sub_jsonl_path: Path) -> list[TimelineMessage]:
-    """Parse a subagent JSONL into a flat list of bubbles."""
+def _parse_subagent_messages(
+    sub_jsonl_path: Path, records: list[dict] | None = None
+) -> list[TimelineMessage]:
+    """Parse a subagent JSONL into a flat list of bubbles. ``records`` (its
+    ``parse_transcript_records`` output) replaces the file read."""
     messages: list[TimelineMessage] = []
     pending_tools: dict[str, tuple[int, str]] = {}
-    with sub_jsonl_path.open(encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(d, dict):
-                continue
-            ts_ms = _parse_ts_ms(d)
-            if ts_ms is None:
-                continue
-            msg = d.get("message") if isinstance(d.get("message"), dict) else None
-            if msg is None:
-                continue
-            role = msg.get("role")
-            content = msg.get("content")
-            if role == "user":
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            tid = block.get("tool_use_id")
-                            if isinstance(tid, str) and tid in pending_tools:
-                                idx, _ = pending_tools.pop(tid)
-                                messages[idx].end_ts_ms = ts_ms
-                text = _flatten_text(content)
-                if text and _AUTO_COMPACT_BANNER not in text and not d.get("isMeta"):
-                    messages.append(
-                        TimelineMessage(ts_ms=ts_ms, role="user", text=_truncate(text))
-                    )
-            elif role == "assistant":
-                if not isinstance(content, list):
-                    continue
-                is_end_turn = msg.get("stop_reason") == "end_turn"
+    if records is None:
+        records = parse_transcript_records(sub_jsonl_path)
+    for d in records:
+        ts_ms = _parse_ts_ms(d)
+        if ts_ms is None:
+            continue
+        msg = d.get("message") if isinstance(d.get("message"), dict) else None
+        if msg is None:
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user":
+            if isinstance(content, list):
                 for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "text":
-                        text = block.get("text", "")
-                        if text:
-                            messages.append(
-                                TimelineMessage(
-                                    ts_ms=ts_ms,
-                                    role="assistant_text",
-                                    text=_truncate(text),
-                                    is_end_turn=is_end_turn,
-                                )
-                            )
-                    elif btype == "tool_use":
-                        name = block.get("name") or "?"
-                        tid = block.get("id") if isinstance(block.get("id"), str) else None
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id")
+                        if isinstance(tid, str) and tid in pending_tools:
+                            idx, _ = pending_tools.pop(tid)
+                            messages[idx].end_ts_ms = ts_ms
+            text = _flatten_text(content)
+            if text and _AUTO_COMPACT_BANNER not in text and not d.get("isMeta"):
+                messages.append(
+                    TimelineMessage(ts_ms=ts_ms, role="user", text=_truncate(text))
+                )
+        elif role == "assistant":
+            if not isinstance(content, list):
+                continue
+            is_end_turn = msg.get("stop_reason") == "end_turn"
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
                         messages.append(
                             TimelineMessage(
                                 ts_ms=ts_ms,
-                                role="assistant_tool",
-                                tool_name=name,
-                                text=_truncate(_tool_input_summary(block.get("input"))),
+                                role="assistant_text",
+                                text=_truncate(text),
+                                is_end_turn=is_end_turn,
                             )
                         )
-                        if tid:
-                            pending_tools[tid] = (len(messages) - 1, name)
+                elif btype == "tool_use":
+                    name = block.get("name") or "?"
+                    tid = block.get("id") if isinstance(block.get("id"), str) else None
+                    messages.append(
+                        TimelineMessage(
+                            ts_ms=ts_ms,
+                            role="assistant_tool",
+                            tool_name=name,
+                            text=_truncate(_tool_input_summary(block.get("input"))),
+                        )
+                    )
+                    if tid:
+                        pending_tools[tid] = (len(messages) - 1, name)
     messages.sort(key=lambda m: m.ts_ms)
     return messages
 
 
 def _load_subagent_panels(
     jsonl_path: Path,
+    *,
+    records: SubagentRecords | None = None,
 ) -> dict[str, tuple[str, list[TimelineMessage]]]:
     """Return ``{parent_tool_use_id: (description, sub_messages)}``.
 
     Reads each ``agent-<sid>.meta.json`` to discover the parent's
     ``toolUseId`` and the subagent's ``description``, then parses the
-    matching ``.jsonl``.
+    matching ``.jsonl`` (or takes it from ``records``,
+    ``load_subagent_records`` output).
     """
     panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
     for sub_jsonl in subagent_transcripts(jsonl_path):
@@ -757,7 +760,9 @@ def _load_subagent_panels(
         description = meta.get("description") or meta.get("agentType") or "subagent"
         if not isinstance(tool_use_id, str):
             continue
-        msgs = _parse_subagent_messages(sub_jsonl)
+        msgs = _parse_subagent_messages(
+            sub_jsonl, records.get(sub_jsonl, []) if records is not None else None
+        )
         panels[tool_use_id] = (description, msgs)
     return panels
 
@@ -1884,12 +1889,16 @@ def _time_accounting_html(g: dict, segments: list[Segment]) -> str:
     )
 
 
-def _time_accounting_section(jsonl_path: Path, events: list) -> str:
+def _time_accounting_section(
+    jsonl_path: Path,
+    events: list,
+    subagent_records: SubagentRecords | None = None,
+) -> str:
     """The v2 section, or "" if building it raises: a bug in time accounting
     v2 must never cost the user the rest of the viewer page (as Ruling 22
     guards the scan). The note names the exception type only."""
     try:
-        return _build_time_accounting_section(jsonl_path, events)
+        return _build_time_accounting_section(jsonl_path, events, subagent_records)
     except Exception as e:  # noqa: BLE001 — the page must survive any v2 bug
         print(
             f"session viewer: time accounting section skipped ({type(e).__name__}).",
@@ -1898,7 +1907,11 @@ def _time_accounting_section(jsonl_path: Path, events: list) -> str:
         return ""
 
 
-def _build_time_accounting_section(jsonl_path: Path, events: list) -> str:
+def _build_time_accounting_section(
+    jsonl_path: Path,
+    events: list,
+    subagent_records: SubagentRecords | None = None,
+) -> str:
     """Partition the session (window = first..last positive event timestamp,
     as the scanner bounds it) and render the v2 section."""
     ts = [e.timestamp_ms for e in events if e.timestamp_ms > 0]
@@ -1908,7 +1921,12 @@ def _build_time_accounting_section(jsonl_path: Path, events: list) -> str:
     segments = partition_main_thread(events, window)
     # Subagent / Workflow transcripts are a Claude layout.
     claude = not (_is_cursor_locator(jsonl_path) or _is_codex_jsonl(jsonl_path))
-    agents = account_agents(events, jsonl_path if claude else None, window[1])
+    agents = account_agents(
+        events,
+        jsonl_path if claude else None,
+        window[1],
+        subagent_records=subagent_records,
+    )
     return _time_accounting_html(grid_seconds(segments, agents), segments)
 
 
@@ -2150,8 +2168,12 @@ def render_session(
     turns = _split_turns_at_idle(turns, events, aborted_ids)
     hitl_streaks, afk_streaks = derive_streaks(turns)
 
+    # Each subagent transcript is parsed once (plan 035); the activity spans,
+    # the panels and the v2 agent accounting all read these records. They
+    # live only for this render.
+    subagent_records = load_subagent_records(jsonl_path)
     # Subagent spans from disk (the route stages them next to the input JSONL).
-    activity = subagent_activity_from_disk(jsonl_path)
+    activity = subagent_activity_from_disk(jsonl_path, records=subagent_records)
     subagent_spans = {sid: (a.start_ts_ms, a.end_ts_ms) for sid, a in activity.items()}
     parallel_seconds = _concurrent_subagent_seconds(turns, subagent_spans)
     # The wire's subagent credit (per-agent sum of agent active time; the
@@ -2162,7 +2184,7 @@ def render_session(
     )
     main_plus_sub_seconds = sum((hi - lo) / 1000.0 for lo, hi in parallel_intervals)
 
-    subagent_panels = _load_subagent_panels(jsonl_path)
+    subagent_panels = _load_subagent_panels(jsonl_path, records=subagent_records)
     if redact:
         subagent_panels = _redact_panels(subagent_panels)
 
@@ -2179,7 +2201,10 @@ def render_session(
         parallel_intervals,
     )
     model = replace(
-        model, time_accounting_html=_time_accounting_section(jsonl_path, events)
+        model,
+        time_accounting_html=_time_accounting_section(
+            jsonl_path, events, subagent_records
+        ),
     )
 
     output_path.write_text(_render_html(model), encoding="utf-8")

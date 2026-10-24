@@ -15,6 +15,7 @@ from pathlib import Path
 
 from scripts.agents.claude.discovery import claude_home, find_sessions
 from scripts.agents.claude.events import (
+    SubagentRecords,
     load_subagent_panels,
 )
 from scripts.agents.claude.events import read_events as _claude_read_events
@@ -70,18 +71,21 @@ def read_events(jsonl_path: Path) -> list[Event]:
 
 def read_events_and_text(
     jsonl_path: Path,
+    *,
+    subagent_records: SubagentRecords | None = None,
 ) -> tuple[list[Event], dict[int, str]]:
     """Like ``read_events`` but also returns the in-memory raw-text map for
     the Feature-7 detectors. Auto-detects Cursor vs Codex vs Claude (see
     ``read_events``). The returned text map is a side-channel that is never
-    serialized.
+    serialized. ``subagent_records`` reaches the Claude parser only (Codex
+    and Cursor have no subagent transcripts).
     """
     path = Path(jsonl_path)
     if is_cursor_locator(path):
         return _cursor_events.read_events_and_text(path)
     if _codex_events.is_codex_jsonl(path):
         return _codex_events.read_events_and_text(path)
-    return _claude_read_events_and_text(path)
+    return _claude_read_events_and_text(path, subagent_records=subagent_records)
 
 
 __all__ = [

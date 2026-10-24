@@ -73,9 +73,9 @@ def parse_calls(monkeypatch):
     calls: list[str] = []
     original = ClaudeAdapter.read_events_and_text
 
-    def spy(self, jsonl_path):
+    def spy(self, jsonl_path, **kw):
         calls.append(Path(jsonl_path).stem)
-        return original(self, jsonl_path)
+        return original(self, jsonl_path, **kw)
 
     monkeypatch.setattr(ClaudeAdapter, "read_events_and_text", spy)
     return calls
