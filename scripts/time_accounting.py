@@ -35,6 +35,20 @@ a Background turn or the time between turns:
 - **R5 Reading & typing.** A typed prompt (or AskUserQuestion answer) that
   opens a turn credits the last ``K_PROMPT_CREDIT_SECONDS`` of the gap
   before it as Interactive READ_WRITE. A queued prompt opens no turn.
+
+The third block accounts parallel agents (``account_agents``), on top of
+the main-thread timeline:
+
+- **R8 Agent span.** Each subagent / Workflow agent transcript is credited
+  from its first to its last event, never cut by main-thread prompts. Its
+  own tool calls go through ``classify_tool_calls`` (R3, R4, R6, R7: a
+  nested blocking dispatch is that agent's ``dispatch_wait``) and the same
+  R2 gap rule as a main-thread turn.
+- **R9 Summation.** Agent-seconds are summed across agents; the wall-clock
+  union and the peak concurrency are reported separately.
+- **R10 Background shells.** A main-thread ``Bash`` launched with
+  ``run_in_background`` runs from launch to its task notification (or the
+  window end), active up to the R3 cap, idle beyond.
 """
 
 from __future__ import annotations
@@ -43,7 +57,10 @@ import bisect
 import statistics
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 
+from scripts.agents.claude.discovery import subagent_transcripts
+from scripts.agents.claude.events import read_events
 from scripts.core.normalized import Event, EventKind
 from scripts.core.thresholds import (
     K_BRIDGE_IDLE_SECONDS,
@@ -446,8 +463,8 @@ def _turn_pieces(
 ) -> list[tuple[int, int, Activity | IdleReason]]:
     """Contiguous (lo, hi, kind) pieces covering ``[start, end)``.
 
-    Tool pieces win where they cover time. The rest is cut at main-thread
-    event timestamps; each uncovered stretch is MODEL up to the bridge
+    Shared by main-thread turns and agent spans (R8). Tool pieces win where
+    they cover time. The rest is cut at the thread's event timestamps; each uncovered stretch is MODEL up to the bridge
     limit, NO_ACTIVITY beyond it (R2).
     """
     clipped = [
@@ -523,13 +540,174 @@ def partition_main_thread(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Parallel agents (R8, R9, R10)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AgentSummary:
+    agent_type: str            # "subagent" | "workflow" | "background_shell"
+    start_ms: int
+    end_ms: int
+    model_s: float
+    tool_s: float
+    idle_s: float
+    active_intervals: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class AgentAccounting:
+    agents: tuple[AgentSummary, ...]
+    union_s: float             # wall clock with >= 1 agent active
+    max_concurrent: int        # max agents active at one instant
+
+
+def _agent_from_events(agent_type: str, events: list[Event]) -> AgentSummary | None:
+    """One agent transcript: span = first..last event, R2-R7 inside (R8)."""
+    evs = sorted(
+        (e for e in events if e.timestamp_ms > 0 and e.kind != EventKind.USAGE),
+        key=lambda e: e.timestamp_ms,
+    )
+    if not evs:
+        return None
+    start, end = evs[0].timestamp_ms, evs[-1].timestamp_ms
+    tools = tool_pieces_union(classify_tool_calls(evs, end))
+    event_ts = sorted({e.timestamp_ms for e in evs})
+    model = tool = idle = 0
+    intervals: list[tuple[int, int]] = []
+    for lo, hi, kind in _turn_pieces(start, end, event_ts, tools):
+        if kind == Activity.MODEL:
+            model += hi - lo
+        elif kind == Activity.TOOL:
+            tool += hi - lo
+        else:
+            idle += hi - lo
+            continue
+        if intervals and intervals[-1][1] == lo:
+            intervals[-1] = (intervals[-1][0], hi)
+        else:
+            intervals.append((lo, hi))
+    return AgentSummary(
+        agent_type, start, end, model / 1000, tool / 1000, idle / 1000,
+        tuple(intervals),
+    )
+
+
+def _transcript_agents(jsonl_path: Path) -> list[AgentSummary]:
+    """Every subagent / Workflow transcript of the session (R8)."""
+    jsonl_path = Path(jsonl_path)
+    root = jsonl_path.parent / jsonl_path.stem / "subagents"
+    out: list[AgentSummary] = []
+    for path in subagent_transcripts(jsonl_path):
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            parts = ()
+        agent_type = "workflow" if parts[:1] == ("workflows",) else "subagent"
+        try:
+            events = read_events(path)
+        except OSError:
+            continue
+        summary = _agent_from_events(agent_type, events)
+        if summary is not None:
+            out.append(summary)
+    return out
+
+
+def _background_shells(main_events: list[Event], window_end_ms: int) -> list[AgentSummary]:
+    """Main-thread background Bash launches, paired with their notification (R10).
+
+    Only TOOL_RESULTs of ``is_background_launch`` calls supply a task id (the
+    reader's text fallback can stamp one on an unrelated result), and only
+    USER events (task notifications) complete it. The first notification at
+    or after the launch wins; with none the shell runs to the window end.
+    """
+    main = [e for e in main_events if not e.is_sidechain and e.timestamp_ms > 0]
+    launches: dict[str, int] = {}
+    for e in main:
+        if e.kind == EventKind.ASSISTANT_TOOL and e.is_background_launch and e.tool_use_id:
+            launches.setdefault(e.tool_use_id, e.timestamp_ms)
+    task_of: dict[str, str] = {}
+    for e in main:
+        if (
+            e.kind == EventKind.TOOL_RESULT
+            and e.tool_use_id in launches
+            and e.background_task_id
+        ):
+            task_of.setdefault(e.tool_use_id, e.background_task_id)
+    done: dict[str, list[int]] = {}
+    for e in main:
+        if e.kind == EventKind.USER and e.background_task_id:
+            done.setdefault(e.background_task_id, []).append(e.timestamp_ms)
+
+    out: list[AgentSummary] = []
+    for tid, start in launches.items():
+        task = task_of.get(tid)
+        ends = sorted(t for t in done.get(task, []) if t >= start) if task else []
+        end = max(start, ends[0] if ends else window_end_ms)
+        active = min(end - start, _TOOL_CAP_MS)
+        out.append(AgentSummary(
+            "background_shell", start, end, 0.0, active / 1000,
+            (end - start - active) / 1000,
+            ((start, start + active),) if active > 0 else (),
+        ))
+    return out
+
+
+def _union_and_peak(agents: list[AgentSummary]) -> tuple[int, int]:
+    """(union ms, max agents active at once) over all active intervals.
+
+    One agent's intervals never overlap each other, so counting open
+    intervals counts agents. Half-open: an end and a start at the same
+    instant do not overlap.
+    """
+    points: list[tuple[int, int]] = []
+    for a in agents:
+        for lo, hi in a.active_intervals:
+            if hi > lo:
+                points.append((lo, 1))
+                points.append((hi, -1))
+    points.sort()  # -1 sorts before +1 at a shared instant
+    union = depth = peak = 0
+    prev = None
+    for ts, d in points:
+        if depth > 0 and prev is not None:
+            union += ts - prev
+        depth += d
+        peak = max(peak, depth)
+        prev = ts
+    return union, peak
+
+
+def account_agents(
+    main_events: list[Event], jsonl_path: Path | None, main_window_end_ms: int
+) -> AgentAccounting:
+    """Account every parallel agent of one session (R8, R9, R10).
+
+    Subagent and Workflow transcripts come from ``jsonl_path``'s
+    ``subagents/`` tree (none when ``jsonl_path`` is None); background
+    shells from ``main_events``. Agent-seconds are summed by the caller over
+    ``agents``; ``union_s`` and ``max_concurrent`` cover their active
+    intervals.
+    """
+    agents = _transcript_agents(jsonl_path) if jsonl_path is not None else []
+    agents += _background_shells(main_events, main_window_end_ms)
+    agents.sort(key=lambda a: (a.start_ms, a.end_ms, a.agent_type))
+    union, peak = _union_and_peak(agents)
+    return AgentAccounting(tuple(agents), union / 1000, peak)
+
+
 __all__ = [
+    "AgentAccounting",
+    "AgentSummary",
     "Activity",
     "IdleReason",
     "Owner",
     "Piece",
     "Segment",
     "ToolSpan",
+    "account_agents",
     "classify_tool_calls",
     "partition_main_thread",
     "tool_pieces_union",
