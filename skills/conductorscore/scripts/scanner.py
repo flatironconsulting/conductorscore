@@ -40,6 +40,7 @@ from scripts.plan_signals import (
 from scripts.prompt_similarity import jaccard_repetitive_rate
 from scripts.revert_detector import count_reverts
 from scripts.session_window import compute_window
+from scripts.time_accounting import build_time_accounting
 from scripts.tool_counter import (
     SessionToolFields,
     ToolCounts,
@@ -240,8 +241,19 @@ def _build_per_session(
     intervals: list[AfkInterval] = []
     top_streaks: list[AfkStreakWire] = []
     hitl_minute_set: set[int] = set()  # v0.6 — for hitl_mcp_invocations.
+    time_accounting = None
 
     if window is not None:
+        # Time accounting v2 (plan 034), over the #10 bounds above. Claude
+        # only for now: Codex/Cursor get their permission_signal and
+        # fallbacks in Task 9.
+        if provider == "claude":
+            time_accounting = build_time_accounting(
+                events,
+                (started_at_ms, ended_at_ms),
+                jsonl_path=s.jsonl_path,
+                permission_signal="available",
+            )
         agg = compute_turn_aggregates(events, jsonl_path=s.jsonl_path)
         hitl_minutes = agg.hitl_minutes
         afk_minutes = agg.afk_minutes
@@ -437,6 +449,7 @@ def _build_per_session(
         model_skill_invocations=stf.model_skill_invocations,
         model_plugin_invocations=stf.model_plugin_invocations,
         model_skill_invocations_by_name=stf.model_skill_invocations_by_name,
+        time_accounting=time_accounting,
     )
 
 

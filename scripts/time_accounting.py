@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import bisect
 import statistics
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 
@@ -707,6 +707,9 @@ def account_agents(
 
 
 __all__ = [
+    "PERMISSION_SIGNALS",
+    "TIME_ACCOUNTING_VERSION",
+    "TimeAccounting",
     "AgentAccounting",
     "AgentSummary",
     "Activity",
@@ -716,8 +719,10 @@ __all__ = [
     "Segment",
     "ToolSpan",
     "account_agents",
+    "build_time_accounting",
     "classify_tool_calls",
     "grid_seconds",
+    "identity_violations",
     "longest_run_seconds",
     "partition_main_thread",
     "tool_pieces_union",
@@ -971,3 +976,235 @@ def grid_seconds(segments: list[Segment], agents: AgentAccounting) -> dict:
         "wall_clock_s": ia["total_s"] + bm["total_s"] + bt["total_s"],
         "longest_run_s": longest_run_seconds(segments, agents),
     }
+
+
+# ---------------------------------------------------------------------------
+# Wire object (the per-session ``time_accounting`` payload)
+# ---------------------------------------------------------------------------
+
+TIME_ACCOUNTING_VERSION = 2
+PERMISSION_SIGNALS: tuple[str, ...] = ("available", "not_available")
+_WIRE_AGENT_TYPES: tuple[str, ...] = ("subagent", "workflow", "background_shell")
+
+
+@dataclass(frozen=True)
+class TimeAccounting:
+    """One session's ``time_accounting`` wire object, one field per leaf.
+
+    Flat so ``dataclasses.asdict`` / ``TimeAccounting(**d)`` round-trip it
+    through the feature cache. Minutes are integers: seconds summed by
+    ``grid_seconds``, then rounded once per leaf. ``to_wire`` builds the
+    nested JSON shape of the spec ("Wire format (client → server)").
+    """
+
+    wall_clock_minutes: int = 0
+    interactive_turns: int = 0
+    interactive_read_write_minutes: int = 0
+    interactive_model_minutes: int = 0
+    interactive_tool_minutes: int = 0
+    interactive_idle_minutes: int = 0
+    background_turns: int = 0
+    background_model_minutes: int = 0
+    background_tool_minutes: int = 0
+    background_idle_minutes: int = 0
+    agents_count: int = 0
+    agents_model_minutes: int = 0
+    agents_tool_minutes: int = 0
+    agents_idle_minutes: int = 0
+    agents_union_minutes: int = 0
+    agents_max_concurrent: int = 0
+    subagent_count: int = 0
+    subagent_minutes: int = 0
+    workflow_count: int = 0
+    workflow_minutes: int = 0
+    background_shell_count: int = 0
+    background_shell_minutes: int = 0
+    between_turns_gaps: int = 0
+    between_turns_idle_minutes: int = 0
+    dispatch_wait_count: int = 0
+    dispatch_wait_minutes: int = 0
+    permission_wait_count: int = 0
+    permission_wait_minutes: int = 0
+    tool_over_cap_count: int = 0
+    tool_over_cap_minutes: int = 0
+    polling_count: int = 0
+    polling_minutes: int = 0
+    no_activity_count: int = 0
+    no_activity_minutes: int = 0
+    longest_run_minutes: int = 0
+    permission_signal: str = "available"
+    version: int = TIME_ACCOUNTING_VERSION
+
+    def to_wire(self) -> dict:
+        """Exactly the spec's ``time_accounting`` JSON object, plus
+        ``agents.max_concurrent_agents`` (spec "Server" section)."""
+        return {
+            "version": self.version,
+            "wall_clock_minutes": self.wall_clock_minutes,
+            "interactive": {
+                "turns": self.interactive_turns,
+                "read_write_minutes": self.interactive_read_write_minutes,
+                "model_minutes": self.interactive_model_minutes,
+                "tool_minutes": self.interactive_tool_minutes,
+                "idle_minutes": self.interactive_idle_minutes,
+            },
+            "background": {
+                "turns": self.background_turns,
+                "model_minutes": self.background_model_minutes,
+                "tool_minutes": self.background_tool_minutes,
+                "idle_minutes": self.background_idle_minutes,
+            },
+            "agents": {
+                "count": self.agents_count,
+                "model_minutes": self.agents_model_minutes,
+                "tool_minutes": self.agents_tool_minutes,
+                "idle_minutes": self.agents_idle_minutes,
+                "union_minutes": self.agents_union_minutes,
+                "max_concurrent_agents": self.agents_max_concurrent,
+                "by_type": {
+                    t: {
+                        "count": getattr(self, f"{t}_count"),
+                        "minutes": getattr(self, f"{t}_minutes"),
+                    }
+                    for t in _WIRE_AGENT_TYPES
+                },
+            },
+            "between_turns": {
+                "gaps": self.between_turns_gaps,
+                "idle_minutes": self.between_turns_idle_minutes,
+            },
+            "idle_by_reason": {
+                r.value: {
+                    "count": getattr(self, f"{r.value}_count"),
+                    "minutes": getattr(self, f"{r.value}_minutes"),
+                }
+                for r in IdleReason
+            },
+            "longest_run_minutes": self.longest_run_minutes,
+            "permission_signal": self.permission_signal,
+        }
+
+
+def _minutes(seconds: float) -> int:
+    """Round once per leaf, as ``TurnAggregates`` rounds its minutes."""
+    return round(seconds / 60)
+
+
+def build_time_accounting(
+    events: list[Event],
+    window: tuple[int, int],
+    jsonl_path: Path | None,
+    permission_signal: str,
+) -> TimeAccounting:
+    """Build one session's wire object from ``grid_seconds``, rounding only.
+
+    ``window`` is the scanner's session bounds ``(started_at_ms,
+    ended_at_ms)``; ``jsonl_path`` locates the Claude subagent / Workflow
+    transcripts (None for none). ``grid_seconds`` runs ``longest_run_seconds``
+    on the same segments and agents, so its ``longest_run_s`` is used as is.
+    """
+    if permission_signal not in PERMISSION_SIGNALS:
+        raise ValueError(f"permission_signal must be one of {PERMISSION_SIGNALS}")
+    segments = partition_main_thread(events, window)
+    agents = account_agents(events, jsonl_path, window[1])
+    g = grid_seconds(segments, agents)
+    ia, bm, ag, bt = g["interactive"], g["background_main"], g["agents"], g["between_turns"]
+    kw: dict[str, int | str] = {
+        "wall_clock_minutes": _minutes(g["wall_clock_s"]),
+        "interactive_turns": ia["turns"],
+        "interactive_read_write_minutes": _minutes(ia["read_write_s"]),
+        "interactive_model_minutes": _minutes(ia["model_s"]),
+        "interactive_tool_minutes": _minutes(ia["tool_s"]),
+        "interactive_idle_minutes": _minutes(ia["idle_s"]),
+        "background_turns": bm["turns"],
+        "background_model_minutes": _minutes(bm["model_s"]),
+        "background_tool_minutes": _minutes(bm["tool_s"]),
+        "background_idle_minutes": _minutes(bm["idle_s"]),
+        "agents_count": ag["count"],
+        "agents_model_minutes": _minutes(ag["model_s"]),
+        "agents_tool_minutes": _minutes(ag["tool_s"]),
+        "agents_idle_minutes": _minutes(ag["idle_s"]),
+        "agents_union_minutes": _minutes(ag["union_s"]),
+        "agents_max_concurrent": ag["max_concurrent"],
+        "between_turns_gaps": bt["gaps"],
+        "between_turns_idle_minutes": _minutes(bt["idle_s"]),
+        "longest_run_minutes": _minutes(g["longest_run_s"]),
+        "permission_signal": permission_signal,
+    }
+    for t in _WIRE_AGENT_TYPES:
+        cell = ag["by_type"].get(t, {"count": 0, "active_s": 0.0})
+        kw[f"{t}_count"] = cell["count"]
+        kw[f"{t}_minutes"] = _minutes(cell["active_s"])
+    for reason, cell in g["idle_by_reason"].items():
+        kw[f"{reason}_count"] = cell["count"]
+        kw[f"{reason}_minutes"] = _minutes(cell["s"])
+    return TimeAccounting(**kw)
+
+
+def identity_violations(ta: TimeAccounting) -> list[str]:
+    """The spec's identities that fail on ``ta`` ([] when all hold).
+
+    The grid's derived cells (active, total, the Total and Wall clock rows)
+    are not on the wire; consumers compute them from the leaves, so the
+    checkable identities are the ones tying leaves together. Each rounded
+    leaf may be off by up to half a minute, so a sum over n leaves is
+    allowed n minutes of slack (±1 minute per summed leaf).
+    """
+    out: list[str] = []
+
+    def check(name: str, lhs: list[int], rhs: list[int]) -> None:
+        tol = len(lhs) + len(rhs)
+        if abs(sum(lhs) - sum(rhs)) > tol:
+            out.append(f"{name}: {sum(lhs)} != {sum(rhs)} (±{tol})")
+
+    interactive_total = [
+        ta.interactive_read_write_minutes, ta.interactive_model_minutes,
+        ta.interactive_tool_minutes, ta.interactive_idle_minutes,
+    ]
+    background_total = [
+        ta.background_model_minutes, ta.background_tool_minutes,
+        ta.background_idle_minutes,
+    ]
+    timeline_idle = [
+        ta.interactive_idle_minutes, ta.background_idle_minutes,
+        ta.between_turns_idle_minutes,
+    ]
+    reasons = [getattr(ta, f"{r.value}_minutes") for r in IdleReason]
+    by_type_minutes = [getattr(ta, f"{t}_minutes") for t in _WIRE_AGENT_TYPES]
+    by_type_counts = [getattr(ta, f"{t}_count") for t in _WIRE_AGENT_TYPES]
+
+    # Down: Interactive + Background (main thread) + Between turns = Wall
+    # clock (= Total − parallel agents) = the session window.
+    check("wall_clock = interactive + background + between_turns totals",
+          interactive_total + background_total + [ta.between_turns_idle_minutes],
+          [ta.wall_clock_minutes])
+    # Idle column: Total idle = Wall clock idle = Σ idle sub-lines.
+    check("idle total = Σ idle_by_reason", timeline_idle, reasons)
+    # Σ parallel-agent sub-lines = parallel agents active total.
+    check("Σ agents.by_type minutes = agents model + tool",
+          by_type_minutes, [ta.agents_model_minutes, ta.agents_tool_minutes])
+    if sum(by_type_counts) != ta.agents_count:
+        out.append(f"Σ agents.by_type count {sum(by_type_counts)} != agents.count {ta.agents_count}")
+    # Union and concurrency bounds (union <= agent-seconds; 3 rounded leaves).
+    if ta.agents_union_minutes > ta.agents_model_minutes + ta.agents_tool_minutes + 3:
+        out.append("agents.union_minutes exceeds agent active minutes")
+    if not 0 <= ta.agents_max_concurrent <= ta.agents_count:
+        out.append("agents.max_concurrent_agents outside [0, agents.count]")
+    if ta.agents_max_concurrent == 0 and ta.agents_union_minutes != 0:
+        out.append("agents.union_minutes without a concurrent agent")
+    # The longest run lies on Background main-thread activity ∪ agent activity.
+    lr_bound = [ta.background_model_minutes, ta.background_tool_minutes,
+                ta.agents_union_minutes]
+    if ta.longest_run_minutes > sum(lr_bound) + len(lr_bound) + 1:
+        out.append("longest_run_minutes exceeds background + agent union minutes")
+    if ta.between_turns_idle_minutes > 0 and ta.between_turns_gaps == 0:
+        out.append("between_turns idle without a gap count")
+    for f in fields(ta):
+        v = getattr(ta, f.name)
+        if isinstance(v, int) and v < 0:
+            out.append(f"{f.name} is negative")
+    if ta.permission_signal not in PERMISSION_SIGNALS:
+        out.append(f"permission_signal {ta.permission_signal!r} unknown")
+    if ta.version != TIME_ACCOUNTING_VERSION:
+        out.append(f"version {ta.version} != {TIME_ACCOUNTING_VERSION}")
+    return out
