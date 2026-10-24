@@ -78,7 +78,10 @@ def main():
     print("wall clock minutes (sum): %d" % wall)
     print()
     print("%-34s %12s %12s" % ("quantity (minutes unless noted)", "before", "after"))
+    rw = S(lambda ps, ta: ta.interactive_read_write_minutes)
     print("%-34s %12d %12d" % ("Interactive", h, ia))
+    print("%-34s %12s %12d" % ("  reading+typing (R5 credit)", "-", rw))
+    print("%-34s %12s %12d" % ("  model + tool", "-", ia - rw))
     print("%-34s %12d %12d" % ("Background main thread", bg_before, bg))
     print("%-34s %12d %12d" % ("Agent time (sum)", par, am + at))
     print("%-34s %12s %12d" % ("  agents model / tool", "-", am))
@@ -92,7 +95,13 @@ def main():
     print("%-34s %12.2f %12.2f" % ("Leverage (aggregate, x)",
                                     _legacy_lev(bg_before + par, h),
                                     _legacy_lev(bg + am + at, ia)))
-    for nm, fn in (("legacy", lambda ps, ta: _legacy_lev(ps.afk_minutes - ps.afk_dispatch_minutes
+    print("%-34s %12s %12.2f" % ("Leverage excl. R5 (aggregate, x)", "-",
+                                  _legacy_lev(bg + am + at, ia - rw)))
+    for nm, fn in (("new excl. R5", lambda ps, ta: _legacy_lev(
+                       ta.background_model_minutes + ta.background_tool_minutes
+                       + ta.agents_model_minutes + ta.agents_tool_minutes,
+                       ta.interactive_model_minutes + ta.interactive_tool_minutes)),
+                   ("legacy", lambda ps, ta: _legacy_lev(ps.afk_minutes - ps.afk_dispatch_minutes
                     + ps.afk_parallel_minutes_foreground, ps.hitl_minutes)),
                    ("new", lambda ps, ta: _legacy_lev(
                        ta.background_model_minutes + ta.background_tool_minutes
