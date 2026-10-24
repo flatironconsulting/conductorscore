@@ -33,7 +33,7 @@ from pathlib import Path
 
 from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.codex.taxonomy import multi_agent_action
-from scripts.core.thresholds import K_TURN_SECONDS
+from scripts.core.thresholds import K_BRIDGE_IDLE_SECONDS, K_TURN_SECONDS
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ts_ms
 from scripts.events import Event, EventKind
 
@@ -49,9 +49,6 @@ class MinuteBucket(str, Enum):
     HITL = "hitl"
     AFK = "afk"
     IDLE = "idle"
-
-# Idle longer than this between same-label turns splits the streak.
-K_BRIDGE_IDLE_SECONDS = 300  # 5 min — an idle gap longer than this ends an AFK streak
 
 # Dispatcher tools whose tool_use is NOT a real turn participant. The
 # subagent itself emits sidechain events that we track separately.

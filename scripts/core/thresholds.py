@@ -27,6 +27,21 @@ WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 # HITL/AFK turn-duration threshold (5 min). A turn <= this is HITL, else AFK.
 K_TURN_SECONDS = 300
 
+# R1: an idle gap longer than this between same-label turns ends an AFK streak.
+K_BRIDGE_IDLE_SECONDS = 300
+
+# R2: per-tool-call time cap (30 min) for time accounting.
+K_TOOL_CAP_SECONDS = 1800
+
+# R3: per-tool-call time cap (10 min) when the call was interrupted.
+K_TOOL_CAP_INTERRUPTED_SECONDS = 600
+
+# R4: time credited to a prompt (5 min).
+K_PROMPT_CREDIT_SECONDS = 300
+
+# R5: grace period (5 min) after a poll before time stops being credited.
+K_POLL_GRACE_SECONDS = 300
+
 # A pause longer than this between a tool dispatch and the next event is
 # treated as "execution waited for a human approval-click."
 APPROVAL_WAIT_MS = 10_000
@@ -45,6 +60,11 @@ MS_PER_DAY = 24 * 60 * 60 * 1000
 __all__ = [
     "WINDOW_MS",
     "K_TURN_SECONDS",
+    "K_BRIDGE_IDLE_SECONDS",
+    "K_TOOL_CAP_SECONDS",
+    "K_TOOL_CAP_INTERRUPTED_SECONDS",
+    "K_PROMPT_CREDIT_SECONDS",
+    "K_POLL_GRACE_SECONDS",
     "APPROVAL_WAIT_MS",
     "SIGNIFICANT_FILES_FLOOR",
     "SIGNIFICANT_LINES_FLOOR",
