@@ -1,11 +1,12 @@
 """Single cache-directory resolver shared by run/scan/consent/viewer/daily.
 
-CLAUDE_PLUGIN_DATA is deliberately NOT consulted here. Only the SessionStart
-hook (scripts/daily.py) runs inside the plugin runtime that sets it; daily.py
-applies that rule itself and exports the resolved dir to its scan subprocess as
-CONDUCTORSCORE_CACHE_DIR. Foreground run/scan/consent/viewer never read
-CLAUDE_PLUGIN_DATA (pre-refactor behavior) -- honoring it there would move an
-existing user's cache (ledger, consent, status) to a new dir mid-install.
+CLAUDE_PLUGIN_DATA is deliberately NOT consulted here, and nothing reads it for
+scan state: the plugin's SessionStart hook (scripts/daily.py) uses this same
+dir so its detached scan shares consent, the delta ledger and status with the
+foreground run. The only remaining reader is daily.py's one-time migration of
+the pre-0.7.18 ``last_daily`` throttle stamp out of the old plugin data dir.
+Honoring CLAUDE_PLUGIN_DATA here would also move an existing user's cache
+(ledger, consent, status) to a new dir mid-install.
 """
 from __future__ import annotations
 

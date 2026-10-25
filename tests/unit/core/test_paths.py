@@ -144,13 +144,15 @@ def test_daily_data_dir_honors_conductorscore_cache_dir(monkeypatch, tmp_path):
     assert daily._data_dir() == pref
 
 
-def test_daily_data_dir_uses_plugin_data_verbatim(monkeypatch, tmp_path):
+def test_daily_data_dir_ignores_plugin_data(monkeypatch, tmp_path):
+    # The plugin SessionStart scan must share the foreground run's state
+    # (consent, delta ledger), so CLAUDE_PLUGIN_DATA never picks the dir.
     from scripts import daily
 
     monkeypatch.delenv("CONDUCTORSCORE_CACHE_DIR", raising=False)
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "plug"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "y"))
-    assert daily._data_dir() == tmp_path / "plug"
+    assert daily._data_dir() == tmp_path / "y" / "conductorscore"
 
 
 def test_daily_data_dir_explicit_beats_plugin_data(monkeypatch, tmp_path):

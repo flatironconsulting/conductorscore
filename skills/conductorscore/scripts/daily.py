@@ -19,7 +19,7 @@ user opts into daily scoring:
     hook surface + event.
 """
 from __future__ import annotations
-import json, os, sys, subprocess, time
+import json, os, shutil, sys, subprocess, time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,17 +114,43 @@ def enable_daily(provider: str) -> DailyResult:
     )
 
 def _data_dir() -> Path:
-    # CONDUCTORSCORE_CACHE_DIR (run.py's resolved dir) wins; then the plugin
-    # runtime's CLAUDE_PLUGIN_DATA (verbatim) -- applied only here, never in the
-    # shared resolver (see scripts/core/paths.py); then the shared XDG/home rule.
-    if os.environ.get("CONDUCTORSCORE_CACHE_DIR"):
-        base = cache_dir()
-    elif d := os.environ.get("CLAUDE_PLUGIN_DATA"):
-        base = Path(d)
-    else:
-        base = cache_dir()
+    # The SAME dir the foreground /conductorscore run uses (core.paths.cache_dir:
+    # CONDUCTORSCORE_CACHE_DIR, then XDG/home). Never CLAUDE_PLUGIN_DATA: the
+    # detached scan keeps its consent, delta ledger and status here, and a
+    # separate plugin-only dir meant it never saw foreground consent and
+    # uploaded a Claude-only session set (v0.7.18 fix).
+    base = cache_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _migrate_plugin_stamp(data_dir: Path) -> None:
+    """One-time carry-over of the daily throttle stamp from the pre-0.7.18
+    plugin data dir, so switching dirs doesn't fire an extra scan.
+
+    Only ``last_daily`` is copied (with its mtime, which the throttle reads).
+    The old dir's ledger/consent/features are deliberately NOT merged -- the
+    shared dir's are authoritative -- and the old files are left in place.
+    Never raises: a migration failure must not break the SessionStart hook.
+    """
+    try:
+        old = os.environ.get("CLAUDE_PLUGIN_DATA")
+        if not old:
+            return
+        src = Path(old) / "last_daily"
+        dst = data_dir / "last_daily"
+        if src.resolve() == dst.resolve() or dst.exists() or not src.is_file():
+            return
+        shutil.copy2(src, dst)
+    except OSError:
+        pass
+
+
+def _scan_env(data_dir: Path) -> dict[str, str]:
+    """Environment for the detached headless scan: it resolves every state
+    file (consent, ledger, status, pending-update record) from ``data_dir``."""
+    return {**os.environ, "CONDUCTORSCORE_HEADLESS": "1",
+            "CONDUCTORSCORE_CACHE_DIR": str(data_dir)}
 
 def _recent(stamp: Path) -> bool:
     try:
@@ -148,6 +174,7 @@ def main() -> int:
         return 0
     try:
         data_dir = _data_dir()
+        _migrate_plugin_stamp(data_dir)
         stamp = data_dir / "last_daily"
         if _recent(stamp):
             return 0
@@ -169,9 +196,8 @@ def main() -> int:
         # because there is no session UI to render it; the foreground run.py path logs
         # to a file instead.
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                      env={**os.environ, "CONDUCTORSCORE_HEADLESS": "1",
-                           # scan.py records the update notice where _show_pending_update reads it.
-                           "CONDUCTORSCORE_CACHE_DIR": str(data_dir)})
+                      # scan.py records the update notice where _show_pending_update reads it.
+                      env=_scan_env(data_dir))
         if os.name == "posix":
             kwargs["start_new_session"] = True
         else:
