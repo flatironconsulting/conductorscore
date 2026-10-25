@@ -2,7 +2,17 @@
 client tests (loaded there via importlib; both packages are named ``tests``)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+# CONDUCTORSCORE_* vars the server repo's suite sets OUTSIDE this fixture and
+# reads at test time; every other CONDUCTORSCORE_* var is scrubbed.
+_PRESERVED_ENV = frozenset({
+    "CONDUCTORSCORE_CLIENT_ROOT",
+    "CONDUCTORSCORE_NODE_BIN",
+    "CONDUCTORSCORE_INTEGRATION_BASE",
+    "CONDUCTORSCORE_OPERATOR",
+})
 
 
 def isolate_user_dirs(monkeypatch, root: Path) -> Path:
@@ -13,6 +23,9 @@ def isolate_user_dirs(monkeypatch, root: Path) -> Path:
     never probes the real machine (e.g. /mnt/c/Users under WSL).
     """
     root = Path(root)
+    for k in list(os.environ):
+        if k.startswith("CONDUCTORSCORE_") and k not in _PRESERVED_ENV:
+            monkeypatch.delenv(k, raising=False)
     for k, v in {
         "HOME": root,
         "USERPROFILE": root,
@@ -25,7 +38,6 @@ def isolate_user_dirs(monkeypatch, root: Path) -> Path:
         "CONDUCTORSCORE_CURSOR_CLI_DIR": root / "none" / "cli",
     }.items():
         monkeypatch.setenv(k, str(v))
-    for k in ("CONDUCTORSCORE_CACHE_DIR", "CONDUCTORSCORE_PROVIDERS",
-              "CLAUDE_PLUGIN_DATA", "APPDATA"):
+    for k in ("CLAUDE_PLUGIN_DATA", "APPDATA"):
         monkeypatch.delenv(k, raising=False)
     return root
