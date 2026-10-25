@@ -469,7 +469,9 @@ def test_legacy_fields_unchanged(tmp_path, monkeypatch):
     for key in ("hitl_minutes", "hitl_tool_minutes", "hitl_mcp_invocations",
                 "cron_parallel_minutes", "afk_minutes", "idle_minutes"):
         assert after[key] > 0, key
-    legacy = {k: v for k, v in after.items() if k != "time_accounting"}
+    # ``digest`` (wire 0.14) is new and covers time_accounting; the golden is
+    # the frozen pre-Task-8 legacy payload, so compare without it.
+    legacy = {k: v for k, v in after.items() if k not in ("time_accounting", "digest")}
     # Before: the payload the pre-Task-8 client emitted for this session.
     before = json.loads(GOLDEN.read_text())
     assert set(legacy) == set(before)
@@ -480,6 +482,7 @@ def test_legacy_fields_unchanged(tmp_path, monkeypatch):
     _, ps_off = _scan(tmp_path / "off", monkeypatch)
     off = _wire_session(ps_off)
     assert "time_accounting" not in off
+    off.pop("digest")
     assert off == legacy
 
 
@@ -493,6 +496,7 @@ def test_time_accounting_failure_keeps_legacy_fields(tmp_path, monkeypatch, caps
     assert ps.time_accounting is None
     d = _wire_session(ps)
     assert "time_accounting" not in d
+    d.pop("digest")  # wire 0.14; the golden predates it
     before = json.loads(GOLDEN.read_text())
     assert set(d) == set(before)
     for key in before:

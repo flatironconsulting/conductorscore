@@ -10,7 +10,7 @@ from scripts.core.text import sha16 as _sha16
 if TYPE_CHECKING:
     from scripts.time_accounting import TimeAccounting
 
-SCHEMA_VERSION = "0.13"
+SCHEMA_VERSION = "0.14"
 
 # Per-session ``token_accounting_version``: bumped when the MEANING of the
 # token totals changes, so the server can tell old totals from new ones
@@ -45,6 +45,14 @@ def compute_session_chain(sessions: list[dict]) -> str:
     for s in sessions:
         acc = _sha16(acc + "|" + digest(s))
     return acc
+
+
+def session_digest(d: dict) -> str:
+    """16-hex fingerprint of a wire session dict, excluding its own ``digest``
+    key. The server stores it; a later upload may send a ``ref`` for a session
+    whose digest is unchanged (delta upload)."""
+    body = {k: v for k, v in d.items() if k != "digest"}
+    return _sha16(json.dumps(body, sort_keys=True, separators=(",", ":")))
 
 
 def _read_client_version() -> str:
@@ -387,6 +395,8 @@ class ExtractorOutput:
             # Claude-only payload is byte-identical to v0.11.
             if s.provider != _DEFAULT_PROVIDER:
                 d["provider"] = s.provider
+            # Last: covers every other key.
+            d["digest"] = session_digest(d)
             return d
 
         out: dict = {
