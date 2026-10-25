@@ -34,10 +34,10 @@ FIXTURE = [
 def _layout(tmp_path: Path, lines=FIXTURE) -> Path:
     main = tmp_path / "proj" / "sess.jsonl"
     main.parent.mkdir(parents=True)
-    main.write_text(json.dumps({"type": "user"}) + "\n")
+    main.write_text(json.dumps({"type": "user"}) + "\n", encoding="utf-8")
     subs = tmp_path / "proj" / "sess" / "subagents"
     subs.mkdir(parents=True)
-    (subs / "agent-a.jsonl").write_text("\n".join(lines) + "\n")
+    (subs / "agent-a.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return main
 
 
