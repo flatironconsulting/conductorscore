@@ -247,12 +247,59 @@ def test_old_format_ledger_still_sends_ordinary_refs(wire):
     assert set(load_chain_stubs(wire["ledger_path"])) == {"a", "b"}
 
 
-def test_skipped_session_without_chain_ints_stays_absent(wire):
+def test_skipped_uploaded_session_without_chain_ints_skips_the_upload(wire):
+    # b was uploaded by an older client (no chain integers recorded), so it
+    # can't be kept as a ref: uploading without it would lower the score.
     _write_old_ledger(wire["ledger_path"], {"a": "d1", "b": "d2"})
+    before = wire["ledger_path"].read_text()
     wire["script"] = [{"ok": True}]
-    a = _full("a", "d1", 1)
-    p = _chained(a)
-    scan._send(p, "tok", skipped=("b",))
-    body = wire["bodies"][0]
-    assert [s["session_hash"] for s in body["sessions"]] == ["a"]
-    assert body["session_chain"] == p["session_chain"]
+    result = scan._send(_chained(_full("a", "d1", 1)), "tok", skipped=("b",), skipped_types=("ValueError",))
+    assert result == ("skipped", (1, ["ValueError"]))
+    assert wire["bodies"] == []  # no POST
+    assert wire["ledger_path"].read_text() == before  # ledger unchanged
+
+
+def test_skipped_not_in_ledger_does_not_block_upload(wire):
+    _write_old_ledger(wire["ledger_path"], {"a": "d1"})
+    wire["script"] = [{"ok": True}]
+    p = _chained(_full("a", "d1", 1))
+    assert scan._send(p, "tok", skipped=("ghost",), skipped_types=("ValueError",))[0] == "ok"
+    assert [s["session_hash"] for s in wire["bodies"][0]["sessions"]] == ["a"]
+
+
+def test_main_prints_one_warning_and_keeps_old_score_when_upload_skipped(
+    tmp_path, monkeypatch, capsys
+):
+    import importlib
+
+    base = "https://conductorscore.com"
+    monkeypatch.setenv("CONDUCTORSCORE_API_BASE", base)
+    import scripts.auth_store as auth_store
+    importlib.reload(auth_store)
+    importlib.reload(scan)
+    auth_store.save_auth(base, {"device_token": "t", "github_username": "o", "email": None, "paired_at": "x"})
+    ledger_path = scan._cache_dir() / "uploaded.json"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_old_ledger(ledger_path, {"a": "d1", "b": "d2"})
+    before = ledger_path.read_text()
+
+    class _Feat:
+        skipped_session_hashes = ("b",)
+        skipped_session_types = ("UnicodeDecodeError",)
+
+        def to_dict(self):
+            return _chained(_full("a", "d1", 1))
+
+    monkeypatch.setattr(scan, "extract", lambda **kw: _Feat())
+    posts = []
+    monkeypatch.setattr(scan, "_upload", lambda body, tok: posts.append(body) or ("ok", {}))
+    assert scan.main() == 1
+    assert posts == []
+    assert ledger_path.read_text() == before
+    err = capsys.readouterr().err
+    assert err.strip().splitlines() == [
+        "warning: upload skipped this run; 1 previously-uploaded session(s) "
+        "could not be read (UnicodeDecodeError)"
+    ]
+    status = json.loads(scan._status_path().read_text(encoding="utf-8"))
+    assert status["phase"] == "error"

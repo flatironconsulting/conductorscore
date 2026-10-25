@@ -152,4 +152,6 @@ def test_skipped_session_hash_is_returned_but_never_serialized(three_sessions, m
     monkeypatch.setattr(scanner, "_read_session", flaky)
     out = scanner.extract(device_id="d", client_version="0.0.0", now_ms=NOW)
     assert out.skipped_session_hashes == (sha16("b"),)
-    assert "skipped_session_hashes" not in out.to_dict()
+    assert out.skipped_session_types == ("ValueError",)
+    d = out.to_dict()
+    assert "skipped_session_hashes" not in d and "skipped_session_types" not in d

@@ -297,6 +297,9 @@ class ExtractorOutput:
     # (``to_dict`` omits it); the uploader uses it to keep already-uploaded
     # ones scored via delta refs.
     skipped_session_hashes: tuple[str, ...] = ()
+    # Exception type name per entry of ``skipped_session_hashes`` (parallel).
+    # Also never serialized; only named in the local upload-skipped warning.
+    skipped_session_types: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         config_d = asdict(self.config)

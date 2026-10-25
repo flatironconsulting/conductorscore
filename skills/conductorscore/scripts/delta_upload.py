@@ -104,6 +104,22 @@ def preserved_for(
     return out
 
 
+def unpreservable_for(
+    skipped: tuple[str, ...], payload: dict, ledger: dict[str, str], stubs: dict[str, dict]
+) -> list[str]:
+    """Skipped sessions the server already holds (in the ledger) that can NOT
+    be kept as refs because their chain integers were never recorded (ledger
+    entries written by an older client). Uploading without them would drop
+    them from the scored set, so the caller must skip this upload instead."""
+    present = {s["session_hash"] for s in payload["sessions"]}
+    out: list[str] = []
+    for h in skipped:
+        if h in present or h in out or h not in ledger or h in stubs:
+            continue
+        out.append(h)
+    return out
+
+
 def build_body(
     payload: dict,
     ledger: dict[str, str],
@@ -145,4 +161,5 @@ def build_body(
 __all__ = [
     "CHAIN_FIELDS", "LEDGER_FORMAT", "build_body", "chain_stub", "ledger_from_payload",
     "load_chain_stubs", "load_ledger", "preserved_for", "save_ledger",
+    "unpreservable_for",
 ]

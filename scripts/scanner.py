@@ -218,6 +218,8 @@ _skipped_sessions: dict[str, int] = {}
 # parsing). ``extract`` returns it so the upload can keep the session's
 # already-stored copy in the scored set.
 _skipped_hashes: list[str] = []
+# Exception type name for each entry of ``_skipped_hashes`` (parallel list).
+_skipped_types: list[str] = []
 
 
 def _session_hash(provider: str, session_id: str) -> str:
@@ -235,6 +237,7 @@ def _read_session_or_skip(agent: "AgentAdapter", s):
         name = type(e).__name__
         _skipped_sessions[name] = _skipped_sessions.get(name, 0) + 1
         _skipped_hashes.append(_session_hash(agent.agent_id, s.session_id))
+        _skipped_types.append(name)
         return None
 
 
@@ -663,6 +666,7 @@ def extract(
     _time_accounting_warned = False  # one time-accounting warning per scan
     _skipped_sessions.clear()  # one skipped-session warning per scan
     _skipped_hashes.clear()
+    _skipped_types.clear()
 
     # Resolve the cross-provider consent decision: which providers we are
     # allowed to scan. The launch provider is always scanned; the OTHER
@@ -788,6 +792,7 @@ def extract(
         sessions=tuple(sessions),
         providers_seen=seen,  # type: ignore[arg-type]
         skipped_session_hashes=tuple(_skipped_hashes),
+        skipped_session_types=tuple(_skipped_types),
     )
 
 
