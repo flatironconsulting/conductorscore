@@ -123,3 +123,44 @@ def test_409_with_other_error_is_returned_without_retry(wire):
     assert json.loads(body) == {"error": "something_else"}
     assert len(wire["bodies"]) == 1
     assert not wire["ledger_path"].exists()
+
+
+def _422(body: dict):
+    return urllib.error.HTTPError(
+        "http://x", 422, "Unprocessable", {}, io.BytesIO(json.dumps(body).encode())
+    )
+
+
+def test_422_after_a_body_with_refs_retries_once_fully_expanded(wire):
+    _seed(wire)
+    wire["script"] = [_422({"error": "validation"}), {"ok": True}]
+    p = _payload(("a", "d1"), ("b", "d2"), ("c", "d3"))
+
+    assert scan._send(p, "tok") == ("ok", {"ok": True})
+
+    assert len(wire["bodies"]) == 2
+    assert _refs(wire["bodies"][0]) == {"a", "b", "c"}
+    assert wire["bodies"][1]["sessions"] == p["sessions"]
+
+
+def test_422_after_a_full_body_is_returned_without_retry(wire):
+    wire["script"] = [_422({"error": "validation"})]
+
+    kind, (code, body) = scan._send(_payload(("a", "d1")), "tok")
+
+    assert (kind, code) == ("http", 422)
+    assert json.loads(body) == {"error": "validation"}
+    assert len(wire["bodies"]) == 1
+    assert not wire["ledger_path"].exists()
+
+
+def test_409_with_malformed_session_hashes_is_returned_without_retry(wire):
+    _seed(wire)
+    err = {"error": "unresolved_refs", "session_hashes": [["x"], {"a": 1}]}
+    wire["script"] = [_409(err)]
+
+    kind, (code, body) = scan._send(_payload(("a", "d1")), "tok")
+
+    assert (kind, code) == ("http", 409)
+    assert json.loads(body) == err
+    assert len(wire["bodies"]) == 1

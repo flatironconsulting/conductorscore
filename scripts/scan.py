@@ -136,7 +136,10 @@ def _unresolved_refs(result) -> list[str] | None:
     if not isinstance(data, dict) or data.get("error") != "unresolved_refs":
         return None
     hashes = data.get("session_hashes")
-    return hashes if isinstance(hashes, list) else None
+    if not isinstance(hashes, list):
+        return None
+    hashes = [h for h in hashes if isinstance(h, str)]
+    return hashes or None
 
 
 def _send(payload: dict, device_token: str):
@@ -146,12 +149,20 @@ def _send(payload: dict, device_token: str):
     Sessions whose digest matches the local ledger go as refs. If the server
     answers 409 ``unresolved_refs``, exactly the listed sessions are expanded
     and the upload retried once; a second such 409 sends everything in full.
-    Only an accepted upload updates the ledger.
+    A 422 to a body that carried refs is retried once fully expanded (a stored
+    session may no longer validate). Only an accepted upload updates the ledger.
     """
+    last_body: dict = {}
+
     def post(body: dict):
+        nonlocal last_body
+        last_body = body
         return _upload(
             json.dumps(body, sort_keys=True, separators=(",", ":")), device_token
         )
+
+    def has_refs(body: dict) -> bool:
+        return any(s.get("ref") is True for s in body.get("sessions", []))
 
     ledger_path = _cache_dir() / "uploaded.json"
     result = post(build_body(payload, load_ledger(ledger_path)))
@@ -162,6 +173,8 @@ def _send(payload: dict, device_token: str):
         )
         if _unresolved_refs(result) is not None:
             result = post(build_body(payload, {}))
+    if result[0] == "http" and result[1][0] == 422 and has_refs(last_body):
+        result = post(build_body(payload, {}))
     if result[0] == "ok":
         save_ledger(ledger_path, ledger_from_payload(payload))
     return result

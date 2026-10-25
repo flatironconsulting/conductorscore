@@ -112,3 +112,16 @@ def test_save_then_load_round_trips(tmp_path):
 def test_save_ledger_swallows_an_unwritable_path(tmp_path):
     save_ledger(tmp_path, {"a": "1"})  # a directory
     assert load_ledger(tmp_path) == {}
+
+
+def test_build_body_keeps_every_copy_of_a_duplicated_hash_full():
+    # Two copies of hash x with different digests: the server keeps the last
+    # full copy, so a ref for either would make the delta differ from full.
+    p = {
+        "sessions": [
+            {"session_hash": "x", "digest": "d1", "n": 1},
+            {"session_hash": "x", "digest": "d2", "n": 2},
+        ]
+    }
+    body = build_body(p, {"x": "d2"})
+    assert body["sessions"] == p["sessions"]

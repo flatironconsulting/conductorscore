@@ -25,6 +25,7 @@ The invariant is pinned by `tests/test_extractor_integration.py::test_extracted_
 | 0.11 | Customization "Top by invocations" table | `sessions[].{skill_invocations_by_name, mcp_invocations_by_name, plugin_invocations_by_name}` — per-name invocation maps. MCP and plugin keys are **raw names in plaintext**. |
 | 0.12 | Codex AGENTS.md line-count split | `config.global_agents_md_lines` — AGENTS.md lines tracked separately; `global_claude_md_lines` is now CLAUDE.md-only. |
 | 0.13 | Tamper-evidence hash-chain | top-level `session_chain` — a hash-chain over the sessions in submission order. Optional; the server verifies it (a mismatch ⇒ telemetry edited after scan). See [§ Schema v0.13](#schema-v013--session_chain-tamper-evidence). |
+| 0.14 | Delta upload | `sessions[].digest` (required on full sessions), and a `sessions[]` element may instead be a reference `{ref, session_hash, digest}` to a session the server already stores. See [§ Schema v0.14](#schema-v014--delta-upload). |
 
 Released schemas are pinned to Git tags (`v0.1.0`, `v0.2.0`, ...). The server accepts the current version and at least one prior version for a 30-day deprecation window.
 
@@ -1040,6 +1041,87 @@ break the chain (the scanner recomputes it over the edited counts) — that case
 is caught by the content invariants instead; `session_chain` specifically
 catches *post-scan* telemetry edits. The field is an ordering hash over data
 already transmitted; it carries no new content.
+
+## Schema v0.14 — delta upload
+
+v0.14 lets a client skip re-sending sessions the server already holds. It
+bumps `device.schema_version` to `"0.14"`; the full per-session shape is the
+v0.11 shape plus one required field, `digest`. The server keeps accepting
+`"0.11"`–`"0.13"`, which never contain references.
+
+### `sessions[].digest`
+
+| Field    | Type   | Required | Notes |
+|----------|--------|----------|-------|
+| `digest` | string | yes (0.14) | 16 lowercase-hex chars (`^[a-f0-9]{16}$`). A fingerprint of the whole session as sent. |
+
+```
+digest(session) = sha16(canonical_json(session minus its "digest" key))
+canonical_json(x) = json.dumps(x, sort_keys=True, separators=(",", ":"))   # Python defaults otherwise
+```
+
+where `sha16(x) = sha256(utf8(x)).hexdigest()[:16]`. The reference
+implementation is `scripts/output_schema.py:session_digest`. This is **not** the
+pipe-joined per-session digest that feeds `session_chain` (§ Schema v0.13); that
+one is unchanged and still computed over the full logical session list.
+
+The server never recomputes `digest`. It stores it with the session and uses it
+only to match a later reference from the same user, so a wrong digest just
+causes a resend.
+
+### Reference elements
+
+Each element of `sessions[]` is either a full session (with `digest`) or a
+reference:
+
+```json
+{ "ref": true, "session_hash": "<16 hex>", "digest": "<16 hex>" }
+```
+
+A reference carries no other keys. The client sends one only for a session
+whose `digest` equals the digest it recorded after its last accepted upload
+(the local ledger `<cache dir>/uploaded.json`), and never for a `session_hash`
+that appears more than once in the payload. Submission order is preserved and
+`session_chain` is computed over the full sessions, as if no references were
+used.
+
+The server replaces each reference, in place, with the session it stores for
+that user and `session_hash`, provided the stored digest matches. It then
+validates, scores and chain-checks the merged list exactly as it would a full
+upload. A hash sent both as a reference and as a full session uses the full
+copy.
+
+### Limits
+
+| What | Max |
+|------|-----|
+| full sessions in one request | 10,000 |
+| references in one request | 50,000 |
+| merged list (full + references) | 50,000 |
+
+Over any cap the server answers `422 { "error": "too_many_sessions", "full", "refs", "max_full", "max_refs", "max_merged" }`.
+A malformed reference gets `422 { "error": "bad_session_ref", "index": <i> }`.
+
+### `409 unresolved_refs`
+
+If any reference does not match a stored session for this user (unknown hash,
+different digest, or a digest stored under an older server revision), the
+server writes nothing and answers:
+
+```json
+{ "error": "unresolved_refs", "session_hashes": ["<16 hex>", "..."] }
+```
+
+### Client fallback
+
+1. On `409 unresolved_refs`, expand exactly the listed hashes to full sessions
+   and retry once.
+2. If that retry also answers `409 unresolved_refs`, send the payload fully
+   expanded (no references).
+3. On `422` to a body that contained at least one reference, retry once fully
+   expanded. A `422` to a body with no references is returned as is.
+4. Only an accepted (2xx) upload replaces the ledger, with the digests of every
+   session in the payload. Any failure leaves it untouched.
 
 ## `sessions[].token_accounting_version` — additive, no schema bump
 

@@ -57,11 +57,18 @@ def build_body(
     payload: dict, ledger: dict[str, str], expand: frozenset[str] = frozenset()
 ) -> dict:
     """A new dict: sessions the ledger already matches (and not in ``expand``)
-    become refs, order preserved; all other keys are copied as-is."""
+    become refs, order preserved; all other keys are copied as-is.
+
+    A ``session_hash`` that appears more than once is never referenced: the
+    server keeps a full copy over a ref, so a ref could make the body differ
+    from a full upload."""
+    counts: dict[str, int] = {}
+    for s in payload["sessions"]:
+        counts[s["session_hash"]] = counts.get(s["session_hash"], 0) + 1
     sessions = []
     for s in payload["sessions"]:
         h, d = s["session_hash"], s["digest"]
-        if h not in expand and ledger.get(h) == d:
+        if h not in expand and counts[h] == 1 and ledger.get(h) == d:
             sessions.append({"ref": True, "session_hash": h, "digest": d})
         else:
             sessions.append(s)
