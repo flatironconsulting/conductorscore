@@ -18,7 +18,14 @@ from pathlib import Path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content as _flatten_text
+from scripts.core.text import basename
 from scripts.core.text import sha16 as _sha16
+from scripts.plan_signals import (
+    is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
+)
+from scripts.plan_signals import (
+    is_structured_prompt as _plan_signals_is_structured_prompt,
+)
 from scripts.agents.claude.discovery import _parse_ts_ms, subagent_transcripts
 from scripts.agents.claude.taxonomy import (
     AUTO_COMPACT_BANNER,
@@ -236,11 +243,6 @@ def _is_system_auto_compaction(d: dict) -> bool:
         if msg.get("compactType") == "auto":
             return True
     return False
-
-
-def basename(path: str) -> str:
-    """Return the final path component for POSIX or Windows separators."""
-    return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _is_excluded_edit_path(path: str) -> bool:
@@ -637,14 +639,6 @@ def events_from_records(records: list[dict], session_id: str) -> list[Event]:
     """Build ``read_events``' Events from already-parsed JSON-object lines
     (``_parse_records`` / ``parse_transcript_records`` output), in file
     order. Opens no file."""
-    # Late import to avoid a cycle: plan_signals imports Event from us.
-    from scripts.plan_signals import (
-        is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
-    )
-    from scripts.plan_signals import (
-        is_structured_prompt as _plan_signals_is_structured_prompt,
-    )
-
     events: list[Event] = []
     # Usage is attributed once per API message, to the first event of its
     # first line, whatever the block type (thinking / tool_use / text).
@@ -986,11 +980,6 @@ def read_events_and_text(
     map (the scanner passes it to the detectors which emit counts /
     booleans only).
     """
-    # Late import (cycle).
-    from scripts.plan_signals import (
-        is_structured_prompt as _plan_signals_is_structured_prompt,
-    )
-
     if not include_subagent_usage and subagent_records is not None:
         raise ValueError("subagent_records needs include_subagent_usage=True")
     events = read_events(jsonl_path)

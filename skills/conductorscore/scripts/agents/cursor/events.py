@@ -49,6 +49,7 @@ from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ms
+from scripts.plan_signals import is_structured_prompt
 
 # "default" is Cursor's placeholder/alias model string (unresolved model
 # selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
@@ -240,10 +241,6 @@ def _read_ide(
                     if not isinstance(text, str):
                         text = ""
                     token_count = _approx_token_count(text)
-                    # Late import to avoid a cycle: plan_signals imports
-                    # Event from core.normalized (same pattern as codex).
-                    from scripts.plan_signals import is_structured_prompt
-
                     ev = Event(
                         kind=EventKind.USER,
                         session_id=composer_id,

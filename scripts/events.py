@@ -37,9 +37,7 @@ from scripts.agents.cursor.store import is_cursor_locator
 # Re-export it so that consumer keeps working after the move to the Claude
 # adapter edge.
 from scripts.agents.claude.events import (  # noqa: F401
-    _is_excluded_edit_path,
     _strip_synthetic_content,
-    basename,
 )
 from scripts.core.normalized import Event, EventKind, SessionMeta
 

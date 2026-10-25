@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from scripts.agents.claude.events import _is_excluded_edit_path
+from scripts.core.text import basename
+
 from scripts.events import (
     Event,
     EventKind,
-    _is_excluded_edit_path,
-    basename,
     claude_home,
     find_sessions,
     read_events,

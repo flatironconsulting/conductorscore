@@ -31,7 +31,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from scripts.events import Event, EventKind, basename
+from scripts.core.normalized import Event, EventKind
+from scripts.core.text import basename
 
 # ---------------------------------------------------------------------------
 # Path classification.

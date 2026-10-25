@@ -38,6 +38,9 @@ from pathlib import Path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
+from scripts.agents.claude.events import _is_excluded_edit_path
+from scripts.plan_signals import is_plan_shaped_path
+from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
 from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.timestamps import parse_row_ts_ms
 from scripts.agents.codex.taxonomy import (
@@ -379,21 +382,13 @@ def _edit_craft_from_files(files: list[tuple[str, int]]) -> dict:
     consumers. A plan-shaped ``.md`` target fires ``is_plan_file_write``.
     Returns ``{}`` when ``files`` is empty.
     """
-    # Late import to avoid a cycle: claude events imports plan_signals which
-    # imports Event from core.normalized.
-    from scripts.agents.claude.events import (
-        _is_excluded_edit_path,
-        _sha16 as _edit_sha16,
-    )
-    from scripts.plan_signals import is_plan_shaped_path
-
     if not files:
         return {}
     edit_files: list[tuple[str, int, bool]] = []
     is_plan_write = False
     for path, lines in files:
         edit_files.append(
-            (_edit_sha16(path), lines, _is_excluded_edit_path(path))
+            (_sha16(path), lines, _is_excluded_edit_path(path))
         )
         if path.lower().endswith(".md") and is_plan_shaped_path(path):
             is_plan_write = True
@@ -874,9 +869,6 @@ def _handle_patch_apply_end(ctx: _ReadContext, payload: dict, ts_ms: int) -> Non
 def _read(
     jsonl_path: Path, *, want_text: bool
 ) -> tuple[list[Event], dict[int, str]]:
-    # Late import to avoid a cycle: plan_signals imports Event from us.
-    from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
-
     session_id = jsonl_path.stem
     ctx = _ReadContext(
         session_id=session_id,
