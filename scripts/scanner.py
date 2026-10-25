@@ -11,7 +11,7 @@ from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
 from scripts.config_scanner import scan_config
 from scripts.core.text import sha16 as _sha16
-from scripts.core.thresholds import WINDOW_MS
+from scripts.core.thresholds import PRIOR_ARTIFACT_LOOKBACK_MS, WINDOW_MS
 from scripts.edit_counter import count_edits
 from scripts.feature_cache import FeatureCache, entry_key, file_fingerprint
 from scripts.events import (
@@ -63,8 +63,6 @@ from scripts.tool_counter import (
 if TYPE_CHECKING:
     from scripts.agents.base import AgentAdapter
     from scripts.agents.claude import ClaudeAdapter
-
-PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
 # Cursor sessions very often carry NO resolved model id: Cursor's on-disk
 # model of record is the ``default``/``auto`` sentinel (mapped to ``None`` by

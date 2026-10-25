@@ -24,3 +24,10 @@ def test_time_accounting_constants():
 
     # turn_classifier keeps re-exporting the moved constant.
     assert turn_classifier.K_BRIDGE_IDLE_SECONDS is thresholds.K_BRIDGE_IDLE_SECONDS
+
+
+def test_remaining_ms_thresholds():
+    assert thresholds.PRIOR_ARTIFACT_LOOKBACK_MS == 24 * 60 * 60 * 1000
+    assert thresholds.RAGE_QUIT_NO_USER_GAP_MS == 30 * 60 * 1000
+    assert "PRIOR_ARTIFACT_LOOKBACK_MS" in thresholds.__all__
+    assert "RAGE_QUIT_NO_USER_GAP_MS" in thresholds.__all__

@@ -54,6 +54,13 @@ SIGNIFICANT_LINES_FLOOR = 200
 # Rage-quit pre-error lookback window (10 min before the frustration message).
 RAGE_QUIT_PRE_ERROR_WINDOW_MS = 10 * 60 * 1000
 
+# Rage-quit: no user message for this long (30 min) after the frustration
+# message counts as a quit.
+RAGE_QUIT_NO_USER_GAP_MS = 30 * 60 * 1000
+
+# Cross-session prior-artifact lookback (24h) used by the scanner.
+PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000
+
 # Generic day-length-in-milliseconds constant, for window/day-count math.
 MS_PER_DAY = 24 * 60 * 60 * 1000
 
@@ -69,5 +76,7 @@ __all__ = [
     "SIGNIFICANT_FILES_FLOOR",
     "SIGNIFICANT_LINES_FLOOR",
     "RAGE_QUIT_PRE_ERROR_WINDOW_MS",
+    "RAGE_QUIT_NO_USER_GAP_MS",
+    "PRIOR_ARTIFACT_LOOKBACK_MS",
     "MS_PER_DAY",
 ]
