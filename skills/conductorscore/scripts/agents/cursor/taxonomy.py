@@ -168,13 +168,58 @@ def edit_footprint(name: str, args: dict) -> tuple[str | None, int, bool]:
     return _sha16(path), estimate_edit_line_count(name, args), is_excluded_edit_path(path)
 
 
+# "default" is Cursor's placeholder/alias model string (unresolved model
+# selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
+# strings", Decision 5. It must never be reported as a real model.
+MODEL_SENTINEL = "default"
+
+
+def model_or_none(raw: object) -> str | None:
+    """Map the ``"default"`` sentinel (and absence) to ``None``; pass any
+    other non-empty string through unchanged."""
+    if isinstance(raw, str) and raw and raw != MODEL_SENTINEL:
+        return raw
+    return None
+
+
+def tool_craft(name: str, args: dict) -> dict:
+    """Craft fields for an ASSISTANT_TOOL ``Event`` from a canonical tool
+    ``name`` and its ``args`` dict. Shared by the IDE and CLI readers so the
+    shared counters treat both identically."""
+    craft: dict = {}
+    if name in SHELL_TOOL_NAMES:
+        cmd = normalize_shell_command(args)
+        if cmd is not None:
+            # RAW, unreduced command string -- in-memory only (Event.raw_input
+            # is repr=False and never serialized). Reduction/privacy-collapse
+            # is approval_counter.signature_for_bash's job, not ours.
+            craft["raw_input"] = {"command": cmd}
+    elif name in EDIT_TOOL_NAMES:
+        path_hash, lines, excluded = edit_footprint(name, args)
+        if path_hash is not None:
+            craft["edit_file_path_hash"] = path_hash
+            craft["edit_line_count"] = lines
+            craft["is_excluded_edit_path"] = excluded
+            raw_path = args.get("file_path") or args.get("path") or args.get("target_file")
+            if isinstance(raw_path, str):
+                # In-memory only, like Codex's raw_input for edit paths.
+                craft["raw_input"] = {"file_path": raw_path}
+    elif name in TODO_TOOL_NAMES:
+        todos = args.get("todos")
+        craft["todo_count"] = len(todos) if isinstance(todos, list) else 0
+    return craft
+
+
 __all__ = [
     "EDIT_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
+    "MODEL_SENTINEL",
     "SHELL_TOOL_NAMES",
     "TASK_TOOL_NAMES",
     "TODO_TOOL_NAMES",
     "canonical_tool_name",
     "edit_footprint",
+    "model_or_none",
     "normalize_shell_command",
+    "tool_craft",
 ]

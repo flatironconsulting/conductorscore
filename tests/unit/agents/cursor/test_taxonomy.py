@@ -17,6 +17,9 @@ callers route unknowns to a diagnostics counter rather than dropping them.
 from __future__ import annotations
 
 from scripts.agents.cursor.taxonomy import (
+    MODEL_SENTINEL,
+    model_or_none,
+    tool_craft,
     EDIT_TOOL_NAMES,
     KNOWN_TOOL_NAMES,
     SHELL_TOOL_NAMES,
@@ -204,3 +207,47 @@ def test_edit_footprint_has_no_line_floor():
     assert lines == 0
     _, lines, _ = edit_footprint("Write", {"file_path": "/p/a.py", "contents": ""})
     assert lines == 0
+
+
+# --- shared tool_craft / model_or_none (IDE + CLI readers) ------------------
+
+
+def test_tool_craft_shell():
+    assert tool_craft("Shell", {"command": "git status"}) == {
+        "raw_input": {"command": "git status"}
+    }
+
+
+def test_tool_craft_shell_without_command_is_empty():
+    assert tool_craft("Shell", {}) == {}
+
+
+def test_tool_craft_edit():
+    craft = tool_craft("Write", {"file_path": "src/a.py", "contents": "a\nb\n"})
+    path_hash, lines, excluded = edit_footprint("Write", {"file_path": "src/a.py", "contents": "a\nb\n"})
+    assert craft == {
+        "edit_file_path_hash": path_hash,
+        "edit_line_count": lines,
+        "is_excluded_edit_path": excluded,
+        "raw_input": {"file_path": "src/a.py"},
+    }
+
+
+def test_tool_craft_edit_without_path_is_empty():
+    assert tool_craft("Write", {"contents": "x"}) == {}
+
+
+def test_tool_craft_todo():
+    assert tool_craft("TodoWrite", {"todos": [1, 2, 3]}) == {"todo_count": 3}
+    assert tool_craft("TodoWrite", {"todos": "nope"}) == {"todo_count": 0}
+
+
+def test_tool_craft_other_tool_is_empty():
+    assert tool_craft("Grep", {"pattern": "x"}) == {}
+
+
+def test_model_or_none():
+    assert model_or_none(MODEL_SENTINEL) is None
+    assert model_or_none("") is None
+    assert model_or_none(None) is None
+    assert model_or_none("gpt-5") == "gpt-5"

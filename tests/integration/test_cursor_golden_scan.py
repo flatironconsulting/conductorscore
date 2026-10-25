@@ -337,7 +337,7 @@ def test_tokens_by_model_keyed_by_model_id(cursor_home, monkeypatch):
     the real observed id ``"composer-2.5"``, one under a pass-through id
     ``"claude-4.5-sonnet"`` (Cursor lets the user pick a different
     backing model; the reader passes any non-"default" model string
-    through unchanged -- ``events._model_or_none``).
+    through unchanged -- ``taxonomy.model_or_none``).
 
     composer-2.5: (input=100,output=20) + (input=50,output=10)
       -> input sums to 150, output sums to 30.

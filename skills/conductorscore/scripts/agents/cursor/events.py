@@ -51,20 +51,6 @@ from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ms
 from scripts.plan_signals import is_structured_prompt
 
-# "default" is Cursor's placeholder/alias model string (unresolved model
-# selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
-# strings", Decision 5. It must never be reported as a real model.
-_MODEL_SENTINEL = "default"
-
-
-def _model_or_none(name: object) -> str | None:
-    """Map the ``"default"`` sentinel to ``None``; pass any other non-empty
-    string through unchanged."""
-    if isinstance(name, str) and name and name != _MODEL_SENTINEL:
-        return name
-    return None
-
-
 def _bubble_ts_ms(b: dict, fallback: int) -> int:
     """Resolve a bubble's timestamp in epoch ms.
 
@@ -132,28 +118,7 @@ def _tool_events(session_id: str, ts: int, model: str | None, tfd: dict) -> list
     raw_tool_use_id = tfd.get("toolCallId")
     tool_use_id = raw_tool_use_id if isinstance(raw_tool_use_id, str) else None
     args = _args_dict(tfd)
-    craft: dict = {}
-
-    if name in taxonomy.SHELL_TOOL_NAMES:
-        cmd = taxonomy.normalize_shell_command(args)
-        if cmd is not None:
-            # RAW, unreduced command string -- in-memory only (Event.raw_input
-            # is repr=False and never serialized). Reduction/privacy-collapse
-            # is approval_counter.signature_for_bash's job, not ours.
-            craft["raw_input"] = {"command": cmd}
-    elif name in taxonomy.EDIT_TOOL_NAMES:
-        path_hash, lines, excluded = taxonomy.edit_footprint(name, args)
-        if path_hash is not None:
-            craft["edit_file_path_hash"] = path_hash
-            craft["edit_line_count"] = lines
-            craft["is_excluded_edit_path"] = excluded
-            raw_path = args.get("file_path") or args.get("path") or args.get("target_file")
-            if isinstance(raw_path, str):
-                # Mirrors Codex's in-memory-only raw_input for edit paths.
-                craft["raw_input"] = {"file_path": raw_path}
-    elif name in taxonomy.TODO_TOOL_NAMES:
-        todos = args.get("todos")
-        craft["todo_count"] = len(todos) if isinstance(todos, list) else 0
+    craft = taxonomy.tool_craft(name, args)
 
     call = Event(
         kind=EventKind.ASSISTANT_TOOL,
@@ -199,7 +164,7 @@ def _read_ide(
             return [], {}
 
         mc = doc.get("modelConfig")
-        session_model = _model_or_none(mc.get("modelName")) if isinstance(mc, dict) else None
+        session_model = taxonomy.model_or_none(mc.get("modelName")) if isinstance(mc, dict) else None
 
         headers = doc.get("fullConversationHeadersOnly")
         if not isinstance(headers, list):
@@ -226,7 +191,7 @@ def _read_ide(
                 model = session_model
                 mi = b.get("modelInfo")
                 if isinstance(mi, dict):
-                    bubble_model = _model_or_none(mi.get("modelName"))
+                    bubble_model = taxonomy.model_or_none(mi.get("modelName"))
                     if bubble_model is not None:
                         model = bubble_model
 
