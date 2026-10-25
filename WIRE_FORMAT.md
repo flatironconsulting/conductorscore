@@ -45,20 +45,12 @@ fields.
 
 ## Current schema
 
-Skeleton — fleshed out per feature as fields are added.
-
-```json
-{
-  "device": {
-    "device_id": "uuid",
-    "client_version": "0.1.0",
-    "schema_version": "0.1",
-    "extracted_at_ms": 0,
-    "window_days": 30
-  },
-  "sessions": []
-}
-```
+The current version is `SCHEMA_VERSION` in `scripts/output_schema.py` — the
+last row of the table above. For a complete, current example payload see
+`wire_format_sample.json` beside this file; it is generated from the emitter
+by `tools/gen_wire_format_sample.py` (never hand-edited), so its envelope,
+field set, `digest` values and `session_chain` are exactly what the client
+sends. The per-version sections below spell out each field.
 
 ## Schema v0.1
 

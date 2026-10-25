@@ -16,7 +16,7 @@ conductorscore.com              (scoring)
 
 ## What gets uploaded
 
-Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~38 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
+Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~50 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
 
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
