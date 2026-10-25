@@ -293,6 +293,10 @@ class ExtractorOutput:
     # at the top level only when it isn't exactly ("claude",), so a
     # Claude-only payload stays byte-equivalent to v0.11.
     providers_seen: tuple[Provider, ...] = (_DEFAULT_PROVIDER,)
+    # Sessions skipped this scan because their parser raised. NEVER serialized
+    # (``to_dict`` omits it); the uploader uses it to keep already-uploaded
+    # ones scored via delta refs.
+    skipped_session_hashes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         config_d = asdict(self.config)

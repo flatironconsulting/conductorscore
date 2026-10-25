@@ -216,6 +216,16 @@ _time_accounting_warned = False
 # order; reset by ``extract`` and flushed as ONE stderr line at its end. Names
 # the exception type and a count only -- never a path, session id or content.
 _skipped_sessions: dict[str, int] = {}
+# session_hash of each skipped session (a wire field, derivable without
+# parsing). ``extract`` returns it so the upload can keep the session's
+# already-stored copy in the scored set.
+_skipped_hashes: list[str] = []
+
+
+def _session_hash(provider: str, session_id: str) -> str:
+    """Claude stays UNPREFIXED (v0.11 byte-identity); other providers are
+    namespaced ``<provider>:`` so ids can't collide across providers."""
+    return _sha16(session_id if provider == "claude" else f"{provider}:{session_id}")
 
 
 def _read_session_or_skip(agent: "AgentAdapter", s):
@@ -226,6 +236,7 @@ def _read_session_or_skip(agent: "AgentAdapter", s):
     except Exception as e:  # noqa: BLE001 — one broken session must not abort the scan
         name = type(e).__name__
         _skipped_sessions[name] = _skipped_sessions.get(name, 0) + 1
+        _skipped_hashes.append(_session_hash(agent.agent_id, s.session_id))
         return None
 
 
@@ -505,11 +516,10 @@ def _build_per_session(
     # byte-identical; only non-default providers (codex) get the
     # ``<provider>:`` prefix. Same for the project hash, since two agents
     # in the same cwd would otherwise collapse to one project bucket.
+    session_hash = _session_hash(provider, s.session_id)
     if provider == "claude":
-        session_hash = _sha16(s.session_id)
         project_hash = _sha16(s.project_root)
     else:
-        session_hash = _sha16(f"{provider}:{s.session_id}")
         project_hash = _sha16(f"{provider}:{s.project_root}")
 
     return PerSession(
@@ -654,6 +664,7 @@ def extract(
     global _time_accounting_warned
     _time_accounting_warned = False  # one time-accounting warning per scan
     _skipped_sessions.clear()  # one skipped-session warning per scan
+    _skipped_hashes.clear()
 
     # Resolve the cross-provider consent decision: which providers we are
     # allowed to scan. The launch provider is always scanned; the OTHER
@@ -778,6 +789,7 @@ def extract(
         config=config,
         sessions=tuple(sessions),
         providers_seen=seen,  # type: ignore[arg-type]
+        skipped_session_hashes=tuple(_skipped_hashes),
     )
 
 

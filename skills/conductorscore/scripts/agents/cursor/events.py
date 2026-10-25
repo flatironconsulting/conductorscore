@@ -30,7 +30,9 @@ see ``CURSOR_FORMAT.md`` § "Rejection/denial shapes actually found"
 (addendum). A live-store example is still unobserved (recon sessions ran
 auto-approved), so keep fixtures for this branch marked synthetic.
 
-Soft-fail contract (never raises): a corrupt/unopenable DB, a missing
+Soft-fail contract: a locked/missing/corrupt store (sqlite3/OS errors) soft-fails; parse-shaped
+errors (``store.PARSE_ERRORS``) propagate to the scanner's per-session policy
+(skip + one warning). Specifically: a corrupt/unopenable DB, a missing
 ``composerData`` doc, or a single malformed bubble each degrade gracefully
 -- the whole read returns ``([], {})``, or (for one bad bubble) that bubble
 is simply skipped and the rest of the session is still read. A composer with
@@ -310,8 +312,9 @@ def read_events_and_text(locator: Path) -> tuple[list[Event], dict[int, str]]:
 
 def read_events(locator: Path) -> list[Event]:
     """Parse a Cursor session locator (``store.make_locator`` output) into
-    normalized Events. Never raises -- corrupt/missing data soft-fails to
-    an empty list."""
+    normalized Events. A corrupt/missing/locked store soft-fails to an empty
+    list; parse-shaped errors (``store.PARSE_ERRORS``) propagate to the
+    scanner's per-session skip policy."""
     events, _ = _read(locator, want_text=False)
     return events
 

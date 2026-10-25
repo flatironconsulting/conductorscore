@@ -112,6 +112,7 @@ def test_cursor_reader_reraises_parse_errors_into_scanner_policy(
 
     class _Meta:
         jsonl_path = loc
+        session_id = "sid"
 
     class _Agent:
         agent_id = "cursor"
@@ -136,3 +137,19 @@ def test_cursor_reader_still_soft_fails_on_sqlite_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(cursor_events, "open_ro", lambda p: _Con())
     monkeypatch.setattr(cursor_events, "kv_get_json", locked)
     assert cursor_events.read_events_and_text(Path(f"{tmp_path / 'db'}#ide:sid")) == ([], {})
+
+
+def test_skipped_session_hash_is_returned_but_never_serialized(three_sessions, monkeypatch):
+    from scripts.core.text import sha16
+
+    real = scanner._read_session
+
+    def flaky(agent, s):
+        if s.session_id == "b":
+            raise ValueError("x")
+        return real(agent, s)
+
+    monkeypatch.setattr(scanner, "_read_session", flaky)
+    out = scanner.extract(device_id="d", client_version="0.0.0", now_ms=NOW)
+    assert out.skipped_session_hashes == (sha16("b"),)
+    assert "skipped_session_hashes" not in out.to_dict()

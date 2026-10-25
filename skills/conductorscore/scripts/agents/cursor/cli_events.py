@@ -48,7 +48,9 @@ Shell commands/edit paths are pulled only as far as
 ``scripts.agents.cursor.taxonomy`` needs to compute craft fields; the raw
 values live in ``Event.raw_input`` (``repr=False``, never serialized).
 
-Soft-fail contract (never raises): an unopenable/corrupt db, invalid/absent
+Soft-fail contract: sqlite3/OS trouble soft-fails, but parse-shaped errors
+(``store.PARSE_ERRORS``) propagate to the scanner's per-session policy (skip +
+one warning). Specifically: an unopenable/corrupt db, invalid/absent
 meta hex, a missing or unwalkable root, or one malformed message each
 degrade gracefully. Total failure (bad db, bad meta, missing root, empty
 walk) returns ``([], {})``. A single bad message inside an otherwise good
@@ -708,8 +710,9 @@ def read_cli_events_and_text(
 
     Opens ``db_path`` via ``store.open_ro`` EXACTLY ONCE, loads the entire
     ``blobs`` table into memory in that same call, walks the tree from
-    ``meta.latestRootBlobId``, and normalizes the ordered messages. Never
-    raises -- see the module docstring's soft-fail contract.
+    ``meta.latestRootBlobId``, and normalizes the ordered messages. sqlite3/OS
+    errors soft-fail to ``([], {})``; parse-shaped errors propagate -- see the
+    module docstring's soft-fail contract.
     """
     con = open_ro(db_path)
     if con is None:

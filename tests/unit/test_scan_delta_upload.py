@@ -164,3 +164,65 @@ def test_409_with_malformed_session_hashes_is_returned_without_retry(wire):
     assert (kind, code) == ("http", 409)
     assert json.loads(body) == err
     assert len(wire["bodies"]) == 1
+
+
+# --- skipped sessions stay scored (ref from the ledger) -------------------
+
+from scripts.output_schema import compute_session_chain  # noqa: E402
+
+
+def _full(h, d, n):
+    return {
+        "session_hash": h, "digest": d, "started_at_ms": n, "ended_at_ms": n + 5,
+        "total_lines_edited": n, "commit_count": 1, "total_input_tokens": 10 * n,
+        "total_output_tokens": 3 * n, "hitl_minutes": 2, "afk_minutes": 1, "idle_minutes": 0,
+    }
+
+
+def _chained(*sessions):
+    return {
+        "schema_version": "0.14", "sessions": list(sessions),
+        "session_chain": compute_session_chain(list(sessions)),
+    }
+
+
+def test_skipped_uploaded_session_goes_as_ref_and_stays_in_ledger(wire):
+    a, b = _full("a", "d1", 1), _full("b", "d2", 2)
+    wire["script"] = [{"ok": True}, {"ok": True}]
+    scan._send(_chained(a, b), "tok")
+    # Next scan: b's parser raised, so only a is in the payload.
+    scan._send(_chained(a), "tok", skipped=("b",))
+
+    body = wire["bodies"][1]
+    assert [s["session_hash"] for s in body["sessions"]] == ["a", "b"]
+    assert body["sessions"][1] == {"ref": True, "session_hash": "b", "digest": "d2"}
+    # Server recomputes the chain over resolved sessions in body order.
+    assert body["session_chain"] == compute_session_chain([a, b])
+    assert load_ledger(wire["ledger_path"]) == {"a": "d1", "b": "d2"}
+    # And it survives yet another skipped scan.
+    wire["script"] = [{"ok": True}]
+    scan._send(_chained(a), "tok", skipped=("b",))
+    assert _refs(wire["bodies"][2]) == {"a", "b"}
+
+
+def test_skipped_never_uploaded_session_is_absent(wire):
+    a = _full("a", "d1", 1)
+    wire["script"] = [{"ok": True}]
+    p = _chained(a)
+    scan._send(p, "tok", skipped=("ghost",))
+    body = wire["bodies"][0]
+    assert [s["session_hash"] for s in body["sessions"]] == ["a"]
+    assert body["session_chain"] == p["session_chain"]
+    assert "ghost" not in load_ledger(wire["ledger_path"])
+
+
+def test_preserved_ref_the_server_cannot_resolve_is_dropped(wire):
+    a, b = _full("a", "d1", 1), _full("b", "d2", 2)
+    wire["script"] = [{"ok": True}, _409({"error": "unresolved_refs", "session_hashes": ["b"]}), {"ok": True}]
+    scan._send(_chained(a, b), "tok")
+    wire["bodies"].clear()
+    scan._send(_chained(a), "tok", skipped=("b",))
+    last = wire["bodies"][-1]
+    assert [s["session_hash"] for s in last["sessions"]] == ["a"]
+    assert last["session_chain"] == compute_session_chain([a])
+    assert "b" not in load_ledger(wire["ledger_path"])

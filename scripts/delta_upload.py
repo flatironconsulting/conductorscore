@@ -16,7 +16,15 @@ import json
 import os
 from pathlib import Path
 
-LEDGER_FORMAT = 1
+LEDGER_FORMAT = 2
+
+# The integer fields ``compute_session_chain`` folds in. The ledger keeps them
+# per session so a skipped session can stay in the chain as a ref.
+CHAIN_FIELDS = (
+    "started_at_ms", "ended_at_ms", "total_lines_edited", "commit_count",
+    "total_input_tokens", "total_output_tokens", "hitl_minutes", "afk_minutes",
+    "idle_minutes",
+)
 
 
 def load_ledger(path: Path) -> dict[str, str]:
@@ -33,13 +41,39 @@ def load_ledger(path: Path) -> dict[str, str]:
     return {k: v for k, v in digests.items() if isinstance(k, str) and isinstance(v, str)}
 
 
-def save_ledger(path: Path, digests: dict[str, str]) -> None:
+def load_chain_stubs(path: Path) -> dict[str, dict]:
+    """``{session_hash: {chain field: int}}`` recorded with the ledger."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("format") != LEDGER_FORMAT:
+        return {}
+    chain = data.get("chain")
+    if not isinstance(chain, dict):
+        return {}
+    return {
+        k: v for k, v in chain.items()
+        if isinstance(k, str) and isinstance(v, dict)
+        and all(isinstance(v.get(f), int) for f in CHAIN_FIELDS)
+    }
+
+
+def chain_stub(session: dict) -> dict:
+    return {f: int(session.get(f, 0)) for f in CHAIN_FIELDS}
+
+
+def save_ledger(
+    path: Path, digests: dict[str, str], chain: dict[str, dict] | None = None
+) -> None:
     """Atomic replace; any filesystem error is swallowed."""
     tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(
-            json.dumps({"format": LEDGER_FORMAT, "digests": digests}), encoding="utf-8"
+            json.dumps(
+                {"format": LEDGER_FORMAT, "digests": digests, "chain": chain or {}}
+            ), encoding="utf-8"
         )
         os.replace(tmp, path)
     except OSError:
@@ -53,8 +87,27 @@ def ledger_from_payload(payload: dict) -> dict[str, str]:
     return {s["session_hash"]: s["digest"] for s in payload["sessions"]}
 
 
+def preserved_for(
+    skipped: tuple[str, ...], payload: dict, ledger: dict[str, str], stubs: dict[str, dict]
+) -> list[dict]:
+    """Skipped sessions the server already holds (in the ledger, with chain
+    fields recorded), as stub dicts ``{session_hash, digest, <chain fields>}``.
+    A skipped session never uploaded is absent: nothing to preserve."""
+    present = {s["session_hash"] for s in payload["sessions"]}
+    out, seen = [], set()
+    for h in skipped:
+        if h in present or h in seen or h not in ledger or h not in stubs:
+            continue
+        seen.add(h)
+        out.append({"session_hash": h, "digest": ledger[h], **stubs[h]})
+    return out
+
+
 def build_body(
-    payload: dict, ledger: dict[str, str], expand: frozenset[str] = frozenset()
+    payload: dict,
+    ledger: dict[str, str],
+    expand: frozenset[str] = frozenset(),
+    preserved: list[dict] | tuple = (),
 ) -> dict:
     """A new dict: sessions the ledger already matches (and not in ``expand``)
     become refs, order preserved; all other keys are copied as-is.
@@ -72,7 +125,23 @@ def build_body(
             sessions.append({"ref": True, "session_hash": h, "digest": d})
         else:
             sessions.append(s)
-    return {**payload, "sessions": sessions}
+    kept = [p for p in preserved if p["session_hash"] not in expand]
+    if not kept:
+        return {**payload, "sessions": sessions}
+    # Preserved sessions are refs only (never expandable: we hold no content),
+    # appended last; the chain covers them in that order, as the server
+    # recomputes it over the resolved sessions.
+    from scripts.output_schema import compute_session_chain
+
+    refs = [{"ref": True, "session_hash": p["session_hash"], "digest": p["digest"]} for p in kept]
+    return {
+        **payload,
+        "sessions": sessions + refs,
+        "session_chain": compute_session_chain(list(payload["sessions"]) + kept),
+    }
 
 
-__all__ = ["LEDGER_FORMAT", "build_body", "ledger_from_payload", "load_ledger", "save_ledger"]
+__all__ = [
+    "CHAIN_FIELDS", "LEDGER_FORMAT", "build_body", "chain_stub", "ledger_from_payload",
+    "load_chain_stubs", "load_ledger", "preserved_for", "save_ledger",
+]

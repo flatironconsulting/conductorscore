@@ -32,7 +32,15 @@ if __package__ in (None, ""):
 import scripts.auth_store as auth_store
 from scripts._http import open_url
 from scripts.agents import consent as consent_mod
-from scripts.delta_upload import build_body, ledger_from_payload, load_ledger, save_ledger
+from scripts.delta_upload import (
+    build_body,
+    chain_stub,
+    ledger_from_payload,
+    load_chain_stubs,
+    load_ledger,
+    preserved_for,
+    save_ledger,
+)
 from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
@@ -139,7 +147,7 @@ def _unresolved_refs(result) -> list[str] | None:
     return hashes or None
 
 
-def _send(payload: dict, device_token: str):
+def _send(payload: dict, device_token: str, skipped: tuple[str, ...] = ()):
     """Delta-upload ``payload`` (an ExtractorOutput dict). Returns what
     ``_upload`` returns.
 
@@ -162,18 +170,30 @@ def _send(payload: dict, device_token: str):
         return any(s.get("ref") is True for s in body.get("sessions", []))
 
     ledger_path = _cache_dir() / "uploaded.json"
-    result = post(build_body(payload, load_ledger(ledger_path)))
+    ledger = load_ledger(ledger_path)
+    stubs = load_chain_stubs(ledger_path)
+    # Sessions skipped this scan (parser raised) that the server already holds
+    # stay scored: sent as refs from the ledger, and kept in the ledger.
+    preserved = preserved_for(skipped, payload, ledger, stubs)
+    result = post(build_body(payload, ledger, preserved=preserved))
     hashes = _unresolved_refs(result)
     if hashes is not None:
         result = post(
-            build_body(payload, load_ledger(ledger_path), frozenset(hashes))
+            build_body(payload, ledger, frozenset(hashes), preserved=preserved)
         )
         if _unresolved_refs(result) is not None:
             result = post(build_body(payload, {}))
     if result[0] == "http" and result[1][0] == 422 and has_refs(last_body):
         result = post(build_body(payload, {}))
     if result[0] == "ok":
-        save_ledger(ledger_path, ledger_from_payload(payload))
+        digests = ledger_from_payload(payload)
+        chain = {x["session_hash"]: chain_stub(x) for x in payload["sessions"]}
+        sent = {x["session_hash"] for x in last_body.get("sessions", [])}
+        for p in preserved:
+            if p["session_hash"] in sent:
+                digests[p["session_hash"]] = p["digest"]
+                chain[p["session_hash"]] = stubs[p["session_hash"]]
+        save_ledger(ledger_path, digests, chain)
     return result
 
 
@@ -309,7 +329,11 @@ def main() -> int:
 
     # The dataclass isn't JSON-serialisable; _send delta-encodes its dict form.
     features_payload = features.to_dict()
-    kind, payload = _send(features_payload, auth["device_token"])
+    kind, payload = _send(
+        features_payload,
+        auth["device_token"],
+        tuple(getattr(features, "skipped_session_hashes", ())),
+    )
 
     # On a 401 the stored token is rejected. Attempt ONE silent re-auth (no
     # browser) + retry — never delete the credential (non-destructive, D8).
@@ -325,7 +349,11 @@ def main() -> int:
             sw.write(phase="error", message="reauth_needed: token rejected (401)")
             print("reauth_needed: 401", file=sys.stderr)
             return 1
-        kind, payload = _send(features_payload, auth["device_token"])
+        kind, payload = _send(
+            features_payload,
+            auth["device_token"],
+            tuple(getattr(features, "skipped_session_hashes", ())),
+        )
 
     if kind == "ok":
         resp = payload
