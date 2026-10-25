@@ -209,7 +209,13 @@ def is_cursor_locator(path: Path) -> bool:
     return kind in ("ide", "cli")
 
 
+# Errors that mean "our parser is wrong about this data" (as opposed to a
+# locked/missing/corrupt store, which soft-fails to empty). Readers re-raise
+# these so the scanner's per-session policy skips the session with a warning.
+PARSE_ERRORS = (KeyError, ValueError, TypeError, AttributeError, IndexError)
+
 __all__ = [
+    "PARSE_ERRORS",
     "is_cursor_locator",
     "kv_get_json",
     "kv_iter_prefix",

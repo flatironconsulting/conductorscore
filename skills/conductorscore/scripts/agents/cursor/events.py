@@ -43,7 +43,7 @@ import json
 from pathlib import Path
 
 from scripts.agents.cursor import taxonomy
-from scripts.agents.cursor.store import kv_get_json, open_ro, parse_locator
+from scripts.agents.cursor.store import PARSE_ERRORS, kv_get_json, open_ro, parse_locator
 from scripts.core.normalized import Event, EventKind
 from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.text import approx_token_count as _approx_token_count
@@ -276,7 +276,9 @@ def _read_ide(
         # Rule 3 (IDE only: bubbles carry real timestamps; the CLI reader's
         # are spread evenly, so every repeat there would look scheduled).
         return mark_scheduled_repeats(events, text_map)
-    except Exception:
+    except PARSE_ERRORS:
+        raise
+    except Exception:  # sqlite3 / OS trouble: soft-fail the one session
         return [], {}
     finally:
         con.close()
@@ -291,9 +293,10 @@ def _read(locator: Path, *, want_text: bool) -> tuple[list[Event], dict[int, str
 
         try:
             return read_cli_events_and_text(db_path, session_id, want_text=want_text)
+        except PARSE_ERRORS:
+            raise
         except Exception:
-            # cli_events soft-fails internally already; this is belt-and-
-            # suspenders against an unforeseen crash in that module.
+            # sqlite3 / OS trouble: soft-fail the one session.
             return [], {}
     return _read_ide(db_path, session_id, want_text=want_text)
 

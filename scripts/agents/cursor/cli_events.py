@@ -63,7 +63,7 @@ import sqlite3
 from pathlib import Path
 
 from scripts.agents.cursor import taxonomy
-from scripts.agents.cursor.store import open_ro
+from scripts.agents.cursor.store import PARSE_ERRORS, open_ro
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content
@@ -772,7 +772,9 @@ def read_cli_events_and_text(
                 continue
 
         return events, text_map
-    except Exception:
+    except PARSE_ERRORS:
+        raise
+    except Exception:  # sqlite3 / OS trouble: soft-fail the one session
         return [], {}
     finally:
         con.close()

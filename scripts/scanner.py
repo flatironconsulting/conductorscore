@@ -211,6 +211,35 @@ def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int
 # session its legacy fields. One stderr line per scan (reset by ``extract``).
 _time_accounting_warned = False
 
+# Per-session error policy: a session whose parser raises is skipped and the
+# rest of the scan proceeds. Exception type names -> count, in first-seen
+# order; reset by ``extract`` and flushed as ONE stderr line at its end. Names
+# the exception type and a count only -- never a path, session id or content.
+_skipped_sessions: dict[str, int] = {}
+
+
+def _read_session_or_skip(agent: "AgentAdapter", s):
+    """``_read_session``, or None (the session is skipped) when it raises an
+    ``Exception``. ``KeyboardInterrupt``/``SystemExit`` still propagate."""
+    try:
+        return _read_session(agent, s)
+    except Exception as e:  # noqa: BLE001 — one broken session must not abort the scan
+        name = type(e).__name__
+        _skipped_sessions[name] = _skipped_sessions.get(name, 0) + 1
+        return None
+
+
+def _flush_skip_warning() -> None:
+    if not _skipped_sessions:
+        return
+    n = sum(_skipped_sessions.values())
+    print(
+        f"warning: skipped {n} session{'' if n == 1 else 's'} "
+        f"({', '.join(_skipped_sessions)})",
+        file=sys.stderr,
+    )
+    _skipped_sessions.clear()
+
 
 def _permission_signal(provider: str) -> str:
     return "available" if provider == "claude" else "not_available"
@@ -624,6 +653,7 @@ def extract(
     home = home_dot_claude.parent
     global _time_accounting_warned
     _time_accounting_warned = False  # one time-accounting warning per scan
+    _skipped_sessions.clear()  # one skipped-session warning per scan
 
     # Resolve the cross-provider consent decision: which providers we are
     # allowed to scan. The launch provider is always scanned; the OTHER
@@ -673,7 +703,11 @@ def extract(
             parsed = None
             produced_artifact = cached["plan_artifact"]
         else:
-            parsed = _read_session(agent, s)
+            parsed = _read_session_or_skip(agent, s)
+            if parsed is None:
+                if on_progress is not None:
+                    on_progress(i + 1, total)
+                continue
             produced_artifact = bool(parsed[0]) and session_produced_plan_artifact(parsed[0])
         loaded.append((s, agent, fp, cached, parsed, produced_artifact))
         project_roots.add(s.project_root)
@@ -714,7 +748,11 @@ def extract(
             # session's plan artifact entered/left the 24h lookback — the
             # latter wasn't parsed in Pass 1, so read it now.
             if parsed is None:
-                parsed = _read_session(agent, s)
+                parsed = _read_session_or_skip(agent, s)
+                if parsed is None:
+                    if on_stage is not None:
+                        on_stage("score", i + 1, total)
+                    continue
             events, text_map, tc = parsed
             per_session = _build_per_session(
                 s, provider, events, text_map, tc, artifact_times_by_project
@@ -726,6 +764,7 @@ def extract(
         if on_stage is not None:
             on_stage("score", i + 1, total)
     cache.save()
+    _flush_skip_warning()
     # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
     # byte-equivalent to v0.11 (output_schema omits the key in that case).
     # Empty scans (no sessions) also report the default Claude-only set.
