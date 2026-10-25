@@ -52,3 +52,52 @@ def test_broken_symlink_is_ignored(tmp_path):
     (home / ".claude" / "skills").mkdir(parents=True)
     os.symlink(tmp_path / "missing", home / ".claude" / "skills" / "gone")
     assert scan_config(home).custom_commands == 0
+
+
+# ---------------------------------------------------------------------------
+# Adopted from the server repo (tests/client/unit/agents/claude/test_config.py).
+# Claude config-scan adapter parity tests (Slice 0).
+#
+# ``scripts.agents.claude.config.scan_config`` must produce the SAME
+# ``ConfigCounts`` as the legacy ``scripts.config_scanner.scan_config``.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+from scripts.agents.claude import config as claude_config  # noqa: E402
+from scripts import config_scanner as legacy_config  # noqa: E402
+
+
+def _make_home(tmp_path):
+    home = tmp_path
+    dot = home / ".claude"
+    (dot / "commands").mkdir(parents=True)
+    (dot / "CLAUDE.md").write_text("a\nb\nc\n")
+    (dot / "commands" / "foo.md").write_text("cmd")
+    (dot / "settings.json").write_text(json.dumps({
+        "hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"x": 1}, {"y": 2}]}]}
+    }))
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"a": {}, "b": {}}
+    }))
+    return home
+
+
+def test_config_adapter_matches_legacy(tmp_path):
+    home = _make_home(tmp_path)
+    project = home / "proj"
+    project.mkdir()
+    (project / "CLAUDE.md").write_text("one\ntwo\n")
+    roots = [str(project)]
+
+    via_adapter = claude_config.scan_config(home, project_roots=roots)
+    via_legacy = legacy_config.scan_config(home, project_roots=roots)
+    assert via_adapter == via_legacy
+
+
+def test_config_adapter_basic_counts(tmp_path):
+    home = _make_home(tmp_path)
+    cc = claude_config.scan_config(home)
+    assert cc.mcp_servers == 2
+    assert cc.hooks == 2
+    assert cc.custom_commands == 1
+    assert cc.global_claude_md_lines == 3

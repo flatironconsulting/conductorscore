@@ -578,3 +578,94 @@ def test_denials_and_waits_combine_per_signature():
         _result(10 + APPROVAL_WAIT_MS + 1, tool_use_id="tu_2", is_denied=False),
     ]
     assert count_redundant_approvals(events) == {"Bash::git": 2}
+
+
+# ---------------------------------------------------------------------------
+# Adopted from the server repo (tests/client/unit/test_approval_counter.py).
+# Slice 6 — Codex approval-friction counting.
+#
+# The redundant-approvals craft signal measures flow-stops where the human had
+# to gate execution. For Codex, no explicit sandbox/escalation/approval records
+# were found in the fixtures, so the documented wait-gap proxy is the only
+# basis — applied ONLY to the shell/apply_patch-like tools (``shell`` /
+# ``exec_command`` / ``apply_patch``), mirroring Claude's Bash/Edit-family
+# scope. This module pins that the proxy fires on the fixture's planted wait gap
+# and that the signature keys stay categorical (no raw command/path).
+#
+# Anchors: plans/003_outline.md § "redundantApprovals".
+# ---------------------------------------------------------------------------
+from pathlib import Path  # noqa: E402
+
+from scripts.agents.codex.events import read_events as _codex_read_events  # noqa: E402
+from scripts.approval_counter import (  # noqa: E402
+    APPROVAL_WAIT_MS,
+    count_redundant_approvals,
+    signature_for_event,
+)
+from scripts.events import Event, EventKind  # noqa: E402
+
+_CODEX_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codex"
+
+
+def _codex_shell(ts: int, name: str, cmd: str) -> Event:
+    e = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="cdx",
+        timestamp_ms=ts,
+        tool_name=name,
+    )
+    object.__setattr__(e, "raw_input", {"command": cmd})
+    return e
+
+
+def test_codex_shell_signature_is_first_command_token():
+    sig = signature_for_event(_codex_shell(0, "shell", "git reset --hard"))
+    assert sig == ("Bash", "git")
+
+
+def test_codex_exec_command_signature_is_first_command_token():
+    sig = signature_for_event(_codex_shell(0, "exec_command", "pytest -q"))
+    assert sig == ("Bash", "pytest")
+
+
+def test_codex_apply_patch_signature_uses_first_hashed_file():
+    ev = Event(
+        kind=EventKind.ASSISTANT_TOOL,
+        session_id="cdx",
+        timestamp_ms=0,
+        tool_name="apply_patch",
+        edit_files=(("deadbeef0badf00d", 3, False),),
+    )
+    sig = signature_for_event(ev)
+    assert sig == ("Edit", "deadbeef0badf00d")
+
+
+def test_codex_wait_gap_proxy_counts_shell_flow_stop():
+    """A shell dispatch followed by a > threshold pause before the next event
+    is a wait-gap flow-stop (the documented Codex approval proxy)."""
+    gap = APPROVAL_WAIT_MS + 5_000
+    evs = [
+        _codex_shell(0, "shell", "sleep 60"),
+        Event(
+            kind=EventKind.TOOL_RESULT,
+            session_id="cdx",
+            timestamp_ms=gap,
+            tool_name="shell",
+        ),
+    ]
+    counts = count_redundant_approvals(evs)
+    assert counts == {"Bash::sleep": 1}
+
+
+def test_codex_fixture_wait_gap_proxy_fires_and_keys_are_categorical():
+    events = _codex_read_events(
+        _CODEX_FIXTURES / "tool_edit_plan_session.jsonl"
+    )
+    counts = count_redundant_approvals(events)
+    # The fixture plants ONE > threshold gap after the `sleep 60` shell call.
+    assert counts.get("Bash::sleep") == 1
+    # Keys are categorical — no raw command/path/secret crosses the wire.
+    for key in counts:
+        assert "CODEX_SECRET" not in key
+        # Signature shape: "<Tool>::<arg>" with a categorical arg.
+        assert "::" in key
