@@ -286,3 +286,21 @@ def test_headless_scan_env_honors_shared_consent_for_codex(tmp_path, monkeypatch
     assert d.providers == ["claude", "codex"]
     assert d.permission_needed == ()
     assert adapters["codex"].preflight_calls == 0
+
+
+def test_migrated_stamp_keeps_its_mtime(tmp_path, monkeypatch):
+    """The throttle reads st_mtime, so the copy must carry the mtime over
+    (a plain content copy would stamp 'now' and shift the daily window)."""
+    shared = _shared(monkeypatch, tmp_path)
+    plug = tmp_path / "plug"
+    plug.mkdir()
+    src = plug / "last_daily"
+    src.write_text("1234567890", encoding="utf-8")
+    backdated = time.time() - 19 * 3600
+    os.utime(src, (backdated, backdated))
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(plug))
+    daily._migrate_plugin_stamp(daily._data_dir())
+    dst = shared / "last_daily"
+    assert dst.stat().st_mtime == pytest.approx(backdated, abs=1e-3)
+    assert daily._recent(dst)  # still inside the 20h window...
+    assert (time.time() - dst.stat().st_mtime) > 18 * 3600  # ...but not reset to now
