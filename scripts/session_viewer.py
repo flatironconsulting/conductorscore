@@ -53,6 +53,7 @@ from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
 )
 from scripts.agents.cursor.store import is_cursor_locator as _is_cursor_locator
+from scripts.core.paths import cache_dir
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content
 from scripts.core.text import sha16 as _sha16
@@ -2268,8 +2269,7 @@ _CAPTURED_TRANSCRIPT_ENV = "CONDUCTORSCORE_TRANSCRIPT"
 
 
 def _cache_dir() -> Path:
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
+    return cache_dir()
 
 
 def _captured_transcript() -> Path | None:

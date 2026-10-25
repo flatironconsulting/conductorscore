@@ -39,6 +39,7 @@ if __package__ in (None, ""):
 
 import scripts.auth_store as auth_store
 import scripts.version_check as version_check
+from scripts.core.paths import cache_dir
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
@@ -114,11 +115,7 @@ def _version_banner() -> bool:
 
 
 def _cache_dir() -> Path:
-    explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
-    if explicit:
-        return Path(explicit)
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
+    return cache_dir()
 
 
 def _writable_cache_dir() -> Path:

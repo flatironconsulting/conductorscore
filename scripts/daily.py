@@ -31,6 +31,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.version_check as version_check
+from scripts.core.paths import cache_dir
 
 THROTTLE_SECONDS = 20 * 3600
 
@@ -113,18 +114,7 @@ def enable_daily(provider: str) -> DailyResult:
     )
 
 def _data_dir() -> Path:
-    # CONDUCTORSCORE_CACHE_DIR is the already-resolved writable dir run.py chose
-    # (and exports into the scan subprocess env). Honor it first — verbatim — so
-    # the daily stamp persists in the SAME place run.py reads and the
-    # orchestrator + subprocess never split-brain.
-    shared = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
-    if shared:
-        base = Path(shared)
-    elif d := os.environ.get("CLAUDE_PLUGIN_DATA"):
-        base = Path(d)
-    else:
-        cache = os.environ.get("XDG_CACHE_HOME")
-        base = (Path(cache) if cache else Path.home() / ".cache") / "conductorscore"
+    base = cache_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
 
