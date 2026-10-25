@@ -32,6 +32,7 @@ if __package__ in (None, ""):
 import scripts.auth_store as auth_store
 from scripts._http import open_url
 from scripts.agents import consent as consent_mod
+from scripts.delta_upload import build_body, ledger_from_payload, load_ledger, save_ledger
 from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
@@ -121,6 +122,49 @@ def _upload(features_json: str, device_token: str):
         # longer than `timeout` on a large payload) surfaces as a bare
         # TimeoutError / ConnectionError — still a network failure, not a crash.
         return "neterr", str(e) or type(e).__name__
+
+
+def _unresolved_refs(result) -> list[str] | None:
+    """The session hashes of a 409 ``unresolved_refs`` response, else None."""
+    kind, payload = result
+    if kind != "http" or payload[0] != 409:
+        return None
+    try:
+        data = json.loads(payload[1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("error") != "unresolved_refs":
+        return None
+    hashes = data.get("session_hashes")
+    return hashes if isinstance(hashes, list) else None
+
+
+def _send(payload: dict, device_token: str):
+    """Delta-upload ``payload`` (an ExtractorOutput dict). Returns what
+    ``_upload`` returns.
+
+    Sessions whose digest matches the local ledger go as refs. If the server
+    answers 409 ``unresolved_refs``, exactly the listed sessions are expanded
+    and the upload retried once; a second such 409 sends everything in full.
+    Only an accepted upload updates the ledger.
+    """
+    def post(body: dict):
+        return _upload(
+            json.dumps(body, sort_keys=True, separators=(",", ":")), device_token
+        )
+
+    ledger_path = _cache_dir() / "uploaded.json"
+    result = post(build_body(payload, load_ledger(ledger_path)))
+    hashes = _unresolved_refs(result)
+    if hashes is not None:
+        result = post(
+            build_body(payload, load_ledger(ledger_path), frozenset(hashes))
+        )
+        if _unresolved_refs(result) is not None:
+            result = post(build_body(payload, {}))
+    if result[0] == "ok":
+        save_ledger(ledger_path, ledger_from_payload(payload))
+    return result
 
 
 def main() -> int:
@@ -250,10 +294,9 @@ def main() -> int:
         percent=PROGRESS_STAGES["score"][1],
     )
 
-    # ExtractorOutput.to_json() serialises via to_dict() — use it rather than
-    # json.dumps(features) which would fail on the dataclass object.
-    features_json = features.to_json()
-    kind, payload = _upload(features_json, auth["device_token"])
+    # The dataclass isn't JSON-serialisable; _send delta-encodes its dict form.
+    features_payload = features.to_dict()
+    kind, payload = _send(features_payload, auth["device_token"])
 
     # On a 401 the stored token is rejected. Attempt ONE silent re-auth (no
     # browser) + retry — never delete the credential (non-destructive, D8).
@@ -269,7 +312,7 @@ def main() -> int:
             sw.write(phase="error", message="reauth_needed: token rejected (401)")
             print("reauth_needed: 401", file=sys.stderr)
             return 1
-        kind, payload = _upload(features_json, auth["device_token"])
+        kind, payload = _send(features_payload, auth["device_token"])
 
     if kind == "ok":
         resp = payload
