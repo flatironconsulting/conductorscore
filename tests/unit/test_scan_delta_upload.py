@@ -226,3 +226,33 @@ def test_preserved_ref_the_server_cannot_resolve_is_dropped(wire):
     assert [s["session_hash"] for s in last["sessions"]] == ["a"]
     assert last["session_chain"] == compute_session_chain([a])
     assert "b" not in load_ledger(wire["ledger_path"])
+
+
+def _write_old_ledger(path, digests):
+    path.write_text(json.dumps({"format": 1, "digests": digests}))
+
+
+def test_old_format_ledger_still_sends_ordinary_refs(wire):
+    _write_old_ledger(wire["ledger_path"], {"a": "d1", "b": "d2"})
+    wire["script"] = [{"ok": True}]
+    a, b = _full("a", "d1", 1), _full("b", "d2", 2)
+    p = _chained(a, b)
+    scan._send(p, "tok")
+    body = wire["bodies"][0]
+    assert _refs(body) == {"a", "b"}
+    assert body["session_chain"] == p["session_chain"]
+    # Entries are rewritten with the chain integers going forward.
+    from scripts.delta_upload import load_chain_stubs
+
+    assert set(load_chain_stubs(wire["ledger_path"])) == {"a", "b"}
+
+
+def test_skipped_session_without_chain_ints_stays_absent(wire):
+    _write_old_ledger(wire["ledger_path"], {"a": "d1", "b": "d2"})
+    wire["script"] = [{"ok": True}]
+    a = _full("a", "d1", 1)
+    p = _chained(a)
+    scan._send(p, "tok", skipped=("b",))
+    body = wire["bodies"][0]
+    assert [s["session_hash"] for s in body["sessions"]] == ["a"]
+    assert body["session_chain"] == p["session_chain"]

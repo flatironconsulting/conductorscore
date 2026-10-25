@@ -16,7 +16,7 @@ import json
 import os
 from pathlib import Path
 
-LEDGER_FORMAT = 2
+LEDGER_FORMAT = 1
 
 # The integer fields ``compute_session_chain`` folds in. The ledger keeps them
 # per session so a skipped session can stay in the chain as a ref.
@@ -42,7 +42,8 @@ def load_ledger(path: Path) -> dict[str, str]:
 
 
 def load_chain_stubs(path: Path) -> dict[str, dict]:
-    """``{session_hash: {chain field: int}}`` recorded with the ledger."""
+    """``{session_hash: {chain field: int}}``: the OPTIONAL per-entry chain
+    integers; entries written by an older client simply lack them."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
