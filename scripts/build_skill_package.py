@@ -21,7 +21,6 @@ rebuilt on each run; ``SKILL.md`` is preserved.
 """
 from __future__ import annotations
 
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -31,26 +30,6 @@ from pathlib import Path
 IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".venv", "tests", "build_skill_package.py"
 )
-
-
-def write_plugin_manifest(root: Path) -> None:
-    """Stamp ``.claude-plugin/plugin.json``'s version from ``<root>/VERSION``.
-
-    Only the ``"version"`` value is substituted; every other byte of the
-    hand-formatted manifest is preserved.
-    """
-    version = (root / "VERSION").read_text(encoding="utf-8").strip()
-    manifest = root / ".claude-plugin" / "plugin.json"
-    text = manifest.read_text(encoding="utf-8")
-    new_text, count = re.subn(
-        r'("version":\s*")[^"]*(")',
-        lambda m: m.group(1) + version + m.group(2),
-        text,
-        count=1,
-    )
-    if count != 1:
-        raise RuntimeError(f"no top-level \"version\" key found in {manifest}")
-    manifest.write_text(new_text, encoding="utf-8")
 
 
 def build(root: Path) -> int:
@@ -81,8 +60,6 @@ def build(root: Path) -> int:
     (target / "VERSION").write_text(
         src_version.read_text(encoding="utf-8"), encoding="utf-8"
     )
-
-    write_plugin_manifest(root)
 
     copied = sum(1 for p in target.rglob("*") if p.is_file())
     return copied

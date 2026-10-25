@@ -68,16 +68,6 @@ jobs:
               sys.exit("FAIL: " + "; ".join(errs))
           print(f"OK: release version {want} resolves from the single VERSION source")
           PY
-      - name: plugin.json version matches VERSION
-        run: |
-          python3 - <<'PY'
-          import json, pathlib, sys
-          want = pathlib.Path("VERSION").read_text().strip()
-          got = json.load(open(".claude-plugin/plugin.json"))["version"]
-          if got != want:
-              sys.exit(f"FAIL: .claude-plugin/plugin.json version={got!r} != VERSION={want!r}")
-          print(f"OK: plugin.json version {got} matches VERSION")
-          PY
 
   supply-chain-guard:
     runs-on: ubuntu-latest
