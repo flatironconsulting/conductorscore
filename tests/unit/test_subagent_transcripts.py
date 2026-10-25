@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from scripts.agents.claude.discovery import subagent_transcripts
-from scripts.agents.claude.events import load_subagent_panels
+from scripts.session_viewer import _subagent_panel
 from scripts.turn_classifier import subagent_spans_from_disk
 
 
@@ -64,5 +64,9 @@ def test_turn_spans_include_nested_workflow_agents(tmp_path):
 
 
 def test_panels_skip_workflow_agents_without_tool_use_id(tmp_path):
-    panels = load_subagent_panels(_layout(tmp_path))
+    panels = {}
+    for sub in subagent_transcripts(_layout(tmp_path)):
+        panel = _subagent_panel(sub)
+        if panel is not None:
+            panels[panel[0]] = panel[1]
     assert set(panels) == {"toolu_1"}

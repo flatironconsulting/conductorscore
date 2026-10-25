@@ -1,8 +1,7 @@
 """Claude Code JSONL → normalized Event parsing.
 
 This is the real implementation of the Claude transcript reader. The legacy
-``scripts.events`` facade re-exports ``read_events`` / ``read_events_and_text``
-/ ``load_subagent_panels`` from here so existing imports keep working
+``scripts.events`` facade re-exports ``read_events`` / ``read_events_and_text`` from here so existing imports keep working
 unchanged. Behavior is identical to the pre-refactor ``scripts.events``.
 
 Privacy: raw user text is hashed (sha256[:16]) before storage and never
@@ -1042,40 +1041,8 @@ def read_events_and_text(
     return events, text_map
 
 
-def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
-    """Return ``{parent_tool_use_id: (description, sub_jsonl_path)}``.
-
-    Subagent transcripts live alongside the parent JSONL at
-    ``<jsonl_path.stem>/subagents/**/agent-<sid>.jsonl`` (see
-    ``discovery.subagent_transcripts``) with a sibling
-    ``agent-<sid>.meta.json`` whose ``toolUseId`` field links back to the
-    parent's ``Agent`` tool_use call.
-
-    Returns an empty dict if the ``subagents/`` directory doesn't exist.
-    Workflow agents carry no ``toolUseId`` and are skipped.
-
-    The caller parses the sub_jsonl_path on demand.
-    """
-    panels: dict[str, tuple[str, Path]] = {}
-    for sub_jsonl in subagent_transcripts(Path(jsonl_path)):
-        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(meta, dict):
-            continue
-        tool_use_id = meta.get("toolUseId")
-        description = meta.get("description") or meta.get("agentType") or "subagent"
-        if not isinstance(tool_use_id, str):
-            continue
-        panels[tool_use_id] = (description, sub_jsonl)
-    return panels
-
-
 __all__ = [
     "MainThreadEvents",
-    "load_subagent_panels",
     "file_usage_events",
     "subagent_usage_events",
     "events_from_records",

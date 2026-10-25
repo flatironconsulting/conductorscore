@@ -43,7 +43,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
-from scripts.agents.claude.discovery import subagent_transcripts
 from scripts.agents.claude.events import (
     SubagentRecords,
     parse_transcript_records,
@@ -721,29 +720,6 @@ def _subagent_panel(
     return tool_use_id, (description, _parse_subagent_messages(sub_jsonl, records))
 
 
-def _load_subagent_panels(
-    jsonl_path: Path,
-    *,
-    records: SubagentRecords | None = None,
-) -> dict[str, tuple[str, list[TimelineMessage]]]:
-    """Return ``{parent_tool_use_id: (description, sub_messages)}``.
-
-    Reads each ``agent-<sid>.meta.json`` to discover the parent's
-    ``toolUseId`` and the subagent's ``description``, then parses the
-    matching ``.jsonl`` (or takes it from ``records``,
-    ``load_subagent_records`` output). See ``_subagent_panel``;
-    ``render_session`` builds the same dict one file at a time.
-    """
-    panels: dict[str, tuple[str, list[TimelineMessage]]] = {}
-    for sub_jsonl in subagent_transcripts(jsonl_path):
-        panel = _subagent_panel(
-            sub_jsonl, records.get(sub_jsonl, []) if records is not None else None
-        )
-        if panel is not None:
-            panels[panel[0]] = panel[1]
-    return panels
-
-
 # ---------------------------------------------------------------------------
 # Streak derivation
 # ---------------------------------------------------------------------------
@@ -1009,31 +985,6 @@ def _split_turns_at_idle(
             out.append(t)
     out.sort(key=lambda t: t.start_ts_ms)
     return out
-
-
-def _tool_runtime_seconds(events: list, aborted_ids: set[str] | None = None) -> float:
-    """Total wall-seconds spent inside paired tool calls.
-
-    Pairs each main-thread ``ASSISTANT_TOOL`` with its matching
-    ``TOOL_RESULT`` by ``tool_use_id`` and sums ``result_ts - call_ts``.
-    EXCLUDES calls the user aborted/interrupted mid-run (Codex
-    ``aborted_ids`` / Claude ``is_denied``) — a hung command the user killed
-    is not real tool runtime, matching the live card's id-pairing exclusion.
-    """
-    aborted_ids = aborted_ids or set()
-    calls: dict[str, int] = {}
-    total_ms = 0
-    for e in sorted(events, key=lambda ev: ev.timestamp_ms):
-        if getattr(e, "is_sidechain", False):
-            continue
-        if e.kind == EventKind.ASSISTANT_TOOL and e.tool_use_id:
-            calls[e.tool_use_id] = e.timestamp_ms
-        elif e.kind == EventKind.TOOL_RESULT and e.tool_use_id in calls:
-            call_ts = calls.pop(e.tool_use_id)
-            aborted = e.tool_use_id in aborted_ids or getattr(e, "is_denied", False)
-            if e.timestamp_ms > call_ts and not aborted:
-                total_ms += e.timestamp_ms - call_ts
-    return total_ms / 1000.0
 
 
 # ---------------------------------------------------------------------------

@@ -755,15 +755,18 @@ def test_read_events_populates_stop_reason_and_tool_use_id(tmp_path):
     assert len(results) == 1 and results[0].tool_use_id == "toolu_1"
 
 
-def test_load_subagent_panels_pairs_tool_use_ids(tmp_path):
-    from scripts.events import load_subagent_panels
+def test_subagent_panel_pairs_tool_use_ids(tmp_path):
+    from scripts.agents.claude.discovery import subagent_transcripts
+    from scripts.session_viewer import _subagent_panel
     from tests.fixtures.synthetic.builder import build_session_with_one_subagent
     main = build_session_with_one_subagent(tmp_path)
-    panels = load_subagent_panels(main)
-    assert "toolu_a1" in panels
-    description, sub_jsonl_path = panels["toolu_a1"]
+    subs = list(subagent_transcripts(main))
+    assert len(subs) == 1
+    tool_use_id, (description, messages) = _subagent_panel(subs[0])
+    assert tool_use_id == "toolu_a1"
     assert description == "find files"
-    assert sub_jsonl_path.exists()
+    # The parsed bubbles come from the subagent's own .jsonl (its Bash call).
+    assert any(m.role == "assistant_tool" and m.tool_name == "Bash" for m in messages)
 
 
 def test_read_events_flags_script_sent_prompts(tmp_path):

@@ -16,7 +16,6 @@ from pathlib import Path
 from scripts.agents.claude.discovery import claude_home, find_sessions
 from scripts.agents.claude.events import (
     SubagentRecords,
-    load_subagent_panels,
 )
 from scripts.agents.claude.events import read_events as _claude_read_events
 from scripts.agents.claude.events import (
@@ -103,7 +102,6 @@ __all__ = [
     "find_codex_sessions",
     "find_cursor_sessions",
     "find_sessions",
-    "load_subagent_panels",
     "read_events",
     "read_events_and_text",
 ]

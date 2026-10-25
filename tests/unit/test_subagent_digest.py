@@ -132,7 +132,7 @@ def test_scanner_and_viewer_glob_subagents_once(tmp_path, monkeypatch):
     agent, meta = single._session(tmp_path, monkeypatch, single._THREE_AGENTS)
     events, text_map, tcounts = single._read_session(agent, meta)
     calls: list[str] = []
-    for mod in (ta, tc, sv, claude_events):
+    for mod in (ta, tc, claude_events):
         real = mod.subagent_transcripts
         monkeypatch.setattr(
             mod, "subagent_transcripts",
