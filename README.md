@@ -79,8 +79,9 @@ run, and subagent panels — and opens it in your browser.
 token counts + tool names, exactly what an upload would contain), so a rendered
 page is safe to share. Add `--no-redact` to reveal the real transcript text —
 safe locally, since the viewer uploads nothing, and most useful for hands-on
-debugging. The viewer reuses the same classifier ([`scripts/turn_classifier.py`](scripts/turn_classifier.py))
-that produces your score, so the bars it draws match the numbers you're scored on.
+debugging. The viewer reuses the same time accounting ([`scripts/time_accounting.py`](scripts/time_accounting.py),
+built on [`scripts/turn_classifier.py`](scripts/turn_classifier.py)) that produces your score, so the
+bars it draws match the numbers you're scored on.
 
 ## Auditing this repo
 
