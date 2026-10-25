@@ -71,7 +71,7 @@ class Event:
       ``edit_line_count`` — ASSISTANT_TOOL Edit/Write/MultiEdit: estimated
         line count touched (max of new/old string newlines).
       ``is_excluded_edit_path`` — ASSISTANT_TOOL Edit/Write/MultiEdit:
-        ``.claude/`` / ``.git/`` / basename ``CLAUDE.md`` — boolean only.
+        per ``scripts.core.edits.is_excluded_edit_path`` — boolean only.
       ``edit_files`` — ASSISTANT_TOOL edit events that touch MULTIPLE files
         in a single call (Codex ``apply_patch``). A tuple of
         ``(path_hash, line_count, is_excluded)`` triples — one per file in

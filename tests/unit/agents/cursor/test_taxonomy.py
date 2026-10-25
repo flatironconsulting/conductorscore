@@ -191,3 +191,16 @@ def test_bundle_confirmed_ide_raw_names_normalize_to_pascal():
     assert canonical_tool_name("read_semsearch_files") == "SemanticSearch"
     assert canonical_tool_name("task_v2") == "Task"
     assert canonical_tool_name("web_fetch") == "WebFetch"
+
+
+def test_edit_footprint_excludes_codex_dir():
+    _, _, excluded = edit_footprint("Write", {"file_path": "/p/.codex/config.toml", "contents": "x"})
+    assert excluded is True
+
+
+def test_edit_footprint_has_no_line_floor():
+    # Shared core.edits estimator: nothing to count is 0 lines (was floored at 1).
+    _, lines, _ = edit_footprint("Delete", {"file_path": "/p/a.py"})
+    assert lines == 0
+    _, lines, _ = edit_footprint("Write", {"file_path": "/p/a.py", "contents": ""})
+    assert lines == 0

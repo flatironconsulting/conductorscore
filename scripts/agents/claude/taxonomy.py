@@ -74,17 +74,11 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "request interrupted by user for tool use",
 )
 
-# Paths the Coding-without-a-plan metric must NOT count as a code edit.
-EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".git/")
-EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md"})
-
 
 __all__ = [
     "AUTO_COMPACT_BANNER",
     "DENIAL_MARKERS",
     "EDIT_TOOL_NAMES",
-    "EXCLUDED_EDIT_BASENAMES",
-    "EXCLUDED_EDIT_DIR_PARTS",
     "MACHINE_PROMPT_OPENERS",
     "MACHINE_TURN_ORIGINS",
     "RAW_INPUT_TOOLS",

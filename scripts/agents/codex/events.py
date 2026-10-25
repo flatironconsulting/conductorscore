@@ -35,10 +35,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from scripts.core.edits import is_excluded_edit_path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
-from scripts.agents.claude.events import _is_excluded_edit_path
 from scripts.plan_signals import is_plan_shaped_path
 from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
 from scripts.core.prompt_origin import mark_scheduled_repeats
@@ -388,7 +388,7 @@ def _edit_craft_from_files(files: list[tuple[str, int]]) -> dict:
     is_plan_write = False
     for path, lines in files:
         edit_files.append(
-            (_sha16(path), lines, _is_excluded_edit_path(path))
+            (_sha16(path), lines, is_excluded_edit_path(path))
         )
         if path.lower().endswith(".md") and is_plan_shaped_path(path):
             is_plan_write = True

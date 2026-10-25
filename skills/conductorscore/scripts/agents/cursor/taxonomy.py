@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import json
 import re
-from os.path import basename
 
+from scripts.core.edits import estimate_edit_line_count, is_excluded_edit_path
 from scripts.core.text import sha16 as _sha16
 
 # ---------------------------------------------------------------------------
@@ -149,41 +149,8 @@ def normalize_shell_command(args: object) -> str | None:
 # Edit footprint: path hash + line count + exclusion, no raw path escapes.
 # ---------------------------------------------------------------------------
 #
-# Paths the edit-footprint metrics must NOT count as a code edit. This is
-# the SAME set Claude's reader excludes (``scripts/agents/claude/taxonomy.py
-# ::EXCLUDED_EDIT_DIR_PARTS`` / ``EXCLUDED_EDIT_BASENAMES``, applied by
-# ``scripts/agents/claude/events.py::_is_excluded_edit_path``), extended
-# with Cursor's own config directory and its AGENTS.md convention. Matching
-# is a plain substring test against the (backslash-normalized) path for
-# directory parts, and an exact basename match -- same semantics as the
-# Claude function, deliberately not diverged from (e.g. no lowercasing).
-
-EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".git/", ".cursor/")
-EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md", "AGENTS.md"})
-
-
-def _is_excluded_edit_path(path: str) -> bool:
-    """Mirrors ``scripts.agents.claude.events._is_excluded_edit_path``
-    exactly (substring dir match + exact basename match, backslash
-    normalized for cross-platform paths), extended with ``.cursor/`` and
-    ``AGENTS.md``."""
-    if not path:
-        return False
-    norm = path.replace("\\", "/")
-    if any(part in norm for part in EXCLUDED_EDIT_DIR_PARTS):
-        return True
-    return basename(norm) in EXCLUDED_EDIT_BASENAMES
-
-
-def _line_count(args: dict) -> int:
-    """max(line_count(old_string), line_count(new_string/contents/content),
-    1) -- symmetric with Codex/Claude's edit-line estimate. A Write's empty
-    old_string collapses this to line_count(new content)."""
-    old = args.get("old_string") or ""
-    new = args.get("new_string") or args.get("contents") or args.get("content") or ""
-    old_lines = str(old).count("\n") + 1 if old else 0
-    new_lines = str(new).count("\n") + 1 if new else 0
-    return max(old_lines, new_lines, 1)
+# Exclusion set and line estimate are the shared ``scripts.core.edits``
+# rules, identical for every agent.
 
 
 def edit_footprint(name: str, args: dict) -> tuple[str | None, int, bool]:
@@ -198,13 +165,11 @@ def edit_footprint(name: str, args: dict) -> tuple[str | None, int, bool]:
     path = args.get("file_path") or args.get("path") or args.get("target_file")
     if not isinstance(path, str) or not path:
         return None, 0, False
-    return _sha16(path), _line_count(args), _is_excluded_edit_path(path)
+    return _sha16(path), estimate_edit_line_count(name, args), is_excluded_edit_path(path)
 
 
 __all__ = [
     "EDIT_TOOL_NAMES",
-    "EXCLUDED_EDIT_BASENAMES",
-    "EXCLUDED_EDIT_DIR_PARTS",
     "KNOWN_TOOL_NAMES",
     "SHELL_TOOL_NAMES",
     "TASK_TOOL_NAMES",
