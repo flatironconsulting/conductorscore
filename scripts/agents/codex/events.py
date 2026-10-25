@@ -39,7 +39,7 @@ from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
 from scripts.core.prompt_origin import mark_scheduled_repeats
-from scripts.core.timestamps import parse_iso_ts_ms
+from scripts.core.timestamps import parse_row_ts_ms
 from scripts.agents.codex.taxonomy import (
     DENIAL_MARKER,
     EDIT_TOOL_NAMES,
@@ -115,15 +115,10 @@ def _iter_rows(jsonl_path: Path):
             continue
         if not isinstance(d, dict):
             continue
-        ts_ms = _parse_ts_ms(d)
+        ts_ms = parse_row_ts_ms(d)
         if ts_ms is None:
             continue
         yield d, ts_ms
-
-
-def _parse_ts_ms(d: dict) -> int | None:
-    """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
-    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def is_codex_jsonl(jsonl_path: Path) -> bool:
@@ -285,7 +280,7 @@ def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
     return in_total, cached, out
 
 
-def _message_text(payload: dict) -> str:
+def message_text(payload: dict) -> str:
     """Flatten a ``response_item.message`` content list to flat text.
 
     Content blocks are ``{"type":"input_text"|"output_text","text":...}``.
@@ -546,7 +541,7 @@ def _handle_response_item(
     if ptype == "message" and ctx.use_response_items:
         role = payload.get("role")
         if role == "user":
-            text = _message_text(payload)
+            text = message_text(payload)
             if not text or is_injected_context(text):
                 return
             token_count = _approx_token_count(text)

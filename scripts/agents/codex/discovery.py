@@ -23,7 +23,7 @@ from scripts.agents.base import (
     preflight_from,
 )
 from scripts.core.normalized import SessionMeta
-from scripts.core.timestamps import parse_iso_ts_ms
+from scripts.core.timestamps import parse_row_ts_ms
 from scripts.agents.codex.events import read_rollout_lines
 
 
@@ -46,18 +46,13 @@ def codex_home() -> Path:
     )
 
 
-def _parse_ts_ms(d: dict) -> int | None:
-    """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
-    return parse_iso_ts_ms(d.get("timestamp"))
-
-
 def _line_ts_ms(line: str) -> int | None:
-    """``_parse_ts_ms`` for a raw JSONL line; ``None`` if it isn't a row."""
+    """``parse_row_ts_ms`` for a raw JSONL line; ``None`` if it isn't a row."""
     try:
         d = json.loads(line.strip())
     except (json.JSONDecodeError, ValueError):
         return None
-    return _parse_ts_ms(d) if isinstance(d, dict) else None
+    return parse_row_ts_ms(d) if isinstance(d, dict) else None
 
 
 def _session_meta_fields(lines: list[str]) -> tuple[str | None, str | None]:
@@ -142,7 +137,7 @@ def preflight(now_ms: int, window_ms: int) -> dict:
                 except (json.JSONDecodeError, ValueError):
                     continue
                 if isinstance(d, dict):
-                    last = _parse_ts_ms(d)
+                    last = parse_row_ts_ms(d)
                     if last is not None:
                         break
             yield last
@@ -181,7 +176,7 @@ def find_sessions() -> list[SessionMeta]:
             except (json.JSONDecodeError, ValueError):
                 continue
             if isinstance(d, dict):
-                ts = _parse_ts_ms(d)
+                ts = parse_row_ts_ms(d)
                 if ts is not None:
                     stamps.append(ts)
         first = min(stamps) if stamps else None

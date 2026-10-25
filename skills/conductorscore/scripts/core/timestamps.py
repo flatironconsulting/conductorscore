@@ -29,4 +29,13 @@ def parse_iso_ts_ms(value) -> int | None:
         return None
 
 
-__all__ = ["parse_iso_ts_ms"]
+def parse_row_ts_ms(d: dict) -> int | None:
+    """Epoch-ms of a JSONL row's top-level ISO-8601 ``timestamp`` field.
+
+    Codex and the session viewer's row readers all carry the timestamp at
+    ``d["timestamp"]``; this is the single dict-unwrapping wrapper for them.
+    """
+    return parse_iso_ts_ms(d.get("timestamp"))
+
+
+__all__ = ["parse_iso_ts_ms", "parse_row_ts_ms"]

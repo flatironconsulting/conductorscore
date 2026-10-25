@@ -49,6 +49,7 @@ from scripts.agents.claude.events import (
     parse_transcript_records,
 )
 from scripts.agents.codex.events import is_codex_jsonl as _is_codex_jsonl
+from scripts.agents.codex.events import message_text, read_rollout_lines
 from scripts.agents.cursor.events import (
     read_events_and_text as _cursor_read_events_and_text,
 )
@@ -57,7 +58,7 @@ from scripts.core.paths import cache_dir
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content
 from scripts.core.text import sha16 as _sha16
-from scripts.core.timestamps import parse_iso_ts_ms
+from scripts.core.timestamps import parse_row_ts_ms
 from scripts.events import EventKind, _strip_synthetic_content, read_events
 from scripts.time_accounting import (
     Segment,
@@ -277,10 +278,6 @@ def _redact_panels(
 # ---------------------------------------------------------------------------
 
 
-def _parse_ts_ms(d: dict) -> int | None:
-    return parse_iso_ts_ms(d.get("timestamp"))
-
-
 def _flatten_text(content) -> str:
     return flatten_content(content)
 
@@ -302,41 +299,9 @@ def _tool_input_summary(inp) -> str:
     return "  ".join(parts)
 
 
-def _tool_result_text(block: dict) -> str:
-    """Extract a short text representation of a tool_result block's content."""
-    content = block.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for sub in content:
-            if isinstance(sub, dict) and sub.get("type") == "text":
-                t = sub.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts)
-    return ""
-
-
 # ---------------------------------------------------------------------------
 # Main JSONL parsing — produces timeline messages.
 # ---------------------------------------------------------------------------
-
-
-def _codex_message_text(payload: dict) -> str:
-    """Flatten a Codex ``response_item.message`` content list to flat text."""
-    content = payload.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts)
-    return ""
 
 
 def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
@@ -360,28 +325,27 @@ def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
 
     rows: list[tuple[dict, int]] = []
     has_response_messages = False
-    with jsonl_path.open(encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(d, dict):
-                continue
-            ts_ms = _parse_ts_ms(d)
-            if ts_ms is None:
-                continue
-            rows.append((d, ts_ms))
-            payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
-            if (
-                d.get("type") == "response_item"
-                and payload.get("type") == "message"
-                and payload.get("role") in ("user", "assistant")
-            ):
-                has_response_messages = True
+    for line in read_rollout_lines(jsonl_path) or []:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        ts_ms = parse_row_ts_ms(d)
+        if ts_ms is None:
+            continue
+        rows.append((d, ts_ms))
+        payload = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+        if (
+            d.get("type") == "response_item"
+            and payload.get("type") == "message"
+            and payload.get("role") in ("user", "assistant")
+        ):
+            has_response_messages = True
 
     for d, ts_ms in rows:
         top = d.get("type")
@@ -390,7 +354,7 @@ def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
             ptype = payload.get("type")
             if ptype == "message" and has_response_messages:
                 role = payload.get("role")
-                text = _codex_message_text(payload)
+                text = message_text(payload)
                 if not text:
                     continue
                 if role == "user":
@@ -583,7 +547,7 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
                 continue
             if not isinstance(d, dict):
                 continue
-            ts_ms = _parse_ts_ms(d)
+            ts_ms = parse_row_ts_ms(d)
             if ts_ms is None:
                 continue
             if d.get("isSidechain"):
@@ -610,7 +574,7 @@ def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
                             messages[idx].end_ts_ms = ts_ms
                             # AskUserQuestion answer: render as USER bubble.
                             if tool_name == "AskUserQuestion":
-                                answer = _tool_result_text(block)
+                                answer = flatten_content(block.get("content"))
                                 if answer:
                                     messages.append(
                                         TimelineMessage(
@@ -679,7 +643,7 @@ def _parse_subagent_messages(
     if records is None:
         records = parse_transcript_records(sub_jsonl_path)
     for d in records:
-        ts_ms = _parse_ts_ms(d)
+        ts_ms = parse_row_ts_ms(d)
         if ts_ms is None:
             continue
         msg = d.get("message") if isinstance(d.get("message"), dict) else None
