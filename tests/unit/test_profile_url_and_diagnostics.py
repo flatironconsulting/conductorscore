@@ -219,6 +219,29 @@ def test_zero_sessions_skips_upload_and_writes_no_sessions_status(tmp_path, monk
     assert status["providers"] == ["claude"]
 
 
+def test_zero_sessions_names_the_scanned_provider_not_claude(tmp_path, monkeypatch, capsys):
+    # An empty extract reports providers_seen=("claude",) by default (wire
+    # back-compat). A Codex-launched scan that finds nothing must still say
+    # it looked at Codex, not "Claude Code".
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(scan, "_load_auth", _fake_auth)
+    monkeypatch.setattr(scan.auth_store, "load_or_create_device_id", lambda: "dev1")
+    monkeypatch.setattr(scan.consent_mod, "decide", lambda: _fake_decision(["codex"]))
+    empty_output = ExtractorOutput(
+        device=DeviceMeta(device_id="dev1", client_version="0.0.0", extracted_at_ms=0),
+        sessions=(),
+    )
+    monkeypatch.setattr(scan, "extract", lambda **kwargs: empty_output)
+    monkeypatch.setattr(scan, "_upload", lambda *a, **kw: ("ok", {}))
+
+    assert scan.main() == 0
+
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["providers"] == ["codex"]
+    out = capsys.readouterr().out
+    assert "No sessions found in the last 30 days for: Codex." in out
+
+
 def test_one_session_still_uploads(tmp_path, monkeypatch):
     # Guard must fire ONLY on zero sessions — a 1-session payload uploads as before.
     monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path))

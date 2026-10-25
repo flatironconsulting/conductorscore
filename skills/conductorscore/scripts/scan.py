@@ -285,6 +285,9 @@ def main() -> int:
     # exact path uploaded an empty payload and got rejected). Skip the POST
     # entirely and surface a friendly "nothing to upload" outcome instead.
     if sessions is not None and len(sessions) == 0:
+        # An empty extract reports providers_seen=("claude",) by default, so
+        # name the providers this scan actually looked at instead.
+        seen_list = list(decision.providers) or list(seen_list)
         providers_str = ", ".join(
             consent_mod.PROVIDER_LABELS.get(p, p.title()) for p in seen_list
         )
