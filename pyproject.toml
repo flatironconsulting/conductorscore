@@ -17,7 +17,7 @@ dev = ["pytest>=8", "pytest-cov>=5", "pytest-httpserver>=1.0"]
 version = { file = "VERSION" }  # the one place the release version is written
 
 [tool.setuptools.packages.find]
-exclude = ["tests*"]  # tests are not shipped in the installed skill
+include = ["scripts*"]  # only the scanner ships; skills/, tests/, tmp/, assets/, hooks/ are not packages
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import json
 import re
-from os.path import basename
 
+from scripts.core.edits import estimate_edit_line_count, is_excluded_edit_path
 from scripts.core.text import sha16 as _sha16
 
 # ---------------------------------------------------------------------------
@@ -149,41 +149,8 @@ def normalize_shell_command(args: object) -> str | None:
 # Edit footprint: path hash + line count + exclusion, no raw path escapes.
 # ---------------------------------------------------------------------------
 #
-# Paths the edit-footprint metrics must NOT count as a code edit. This is
-# the SAME set Claude's reader excludes (``scripts/agents/claude/taxonomy.py
-# ::EXCLUDED_EDIT_DIR_PARTS`` / ``EXCLUDED_EDIT_BASENAMES``, applied by
-# ``scripts/agents/claude/events.py::_is_excluded_edit_path``), extended
-# with Cursor's own config directory and its AGENTS.md convention. Matching
-# is a plain substring test against the (backslash-normalized) path for
-# directory parts, and an exact basename match -- same semantics as the
-# Claude function, deliberately not diverged from (e.g. no lowercasing).
-
-EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".git/", ".cursor/")
-EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md", "AGENTS.md"})
-
-
-def _is_excluded_edit_path(path: str) -> bool:
-    """Mirrors ``scripts.agents.claude.events._is_excluded_edit_path``
-    exactly (substring dir match + exact basename match, backslash
-    normalized for cross-platform paths), extended with ``.cursor/`` and
-    ``AGENTS.md``."""
-    if not path:
-        return False
-    norm = path.replace("\\", "/")
-    if any(part in norm for part in EXCLUDED_EDIT_DIR_PARTS):
-        return True
-    return basename(norm) in EXCLUDED_EDIT_BASENAMES
-
-
-def _line_count(args: dict) -> int:
-    """max(line_count(old_string), line_count(new_string/contents/content),
-    1) -- symmetric with Codex/Claude's edit-line estimate. A Write's empty
-    old_string collapses this to line_count(new content)."""
-    old = args.get("old_string") or ""
-    new = args.get("new_string") or args.get("contents") or args.get("content") or ""
-    old_lines = str(old).count("\n") + 1 if old else 0
-    new_lines = str(new).count("\n") + 1 if new else 0
-    return max(old_lines, new_lines, 1)
+# Exclusion set and line estimate are the shared ``scripts.core.edits``
+# rules, identical for every agent.
 
 
 def edit_footprint(name: str, args: dict) -> tuple[str | None, int, bool]:
@@ -198,18 +165,61 @@ def edit_footprint(name: str, args: dict) -> tuple[str | None, int, bool]:
     path = args.get("file_path") or args.get("path") or args.get("target_file")
     if not isinstance(path, str) or not path:
         return None, 0, False
-    return _sha16(path), _line_count(args), _is_excluded_edit_path(path)
+    return _sha16(path), estimate_edit_line_count(name, args), is_excluded_edit_path(path)
+
+
+# "default" is Cursor's placeholder/alias model string (unresolved model
+# selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
+# strings", Decision 5. It must never be reported as a real model.
+MODEL_SENTINEL = "default"
+
+
+def model_or_none(raw: object) -> str | None:
+    """Map the ``"default"`` sentinel (and absence) to ``None``; pass any
+    other non-empty string through unchanged."""
+    if isinstance(raw, str) and raw and raw != MODEL_SENTINEL:
+        return raw
+    return None
+
+
+def tool_craft(name: str, args: dict) -> dict:
+    """Craft fields for an ASSISTANT_TOOL ``Event`` from a canonical tool
+    ``name`` and its ``args`` dict. Shared by the IDE and CLI readers so the
+    shared counters treat both identically."""
+    craft: dict = {}
+    if name in SHELL_TOOL_NAMES:
+        cmd = normalize_shell_command(args)
+        if cmd is not None:
+            # RAW, unreduced command string -- in-memory only (Event.raw_input
+            # is repr=False and never serialized). Reduction/privacy-collapse
+            # is approval_counter.signature_for_bash's job, not ours.
+            craft["raw_input"] = {"command": cmd}
+    elif name in EDIT_TOOL_NAMES:
+        path_hash, lines, excluded = edit_footprint(name, args)
+        if path_hash is not None:
+            craft["edit_file_path_hash"] = path_hash
+            craft["edit_line_count"] = lines
+            craft["is_excluded_edit_path"] = excluded
+            raw_path = args.get("file_path") or args.get("path") or args.get("target_file")
+            if isinstance(raw_path, str):
+                # In-memory only, like Codex's raw_input for edit paths.
+                craft["raw_input"] = {"file_path": raw_path}
+    elif name in TODO_TOOL_NAMES:
+        todos = args.get("todos")
+        craft["todo_count"] = len(todos) if isinstance(todos, list) else 0
+    return craft
 
 
 __all__ = [
     "EDIT_TOOL_NAMES",
-    "EXCLUDED_EDIT_BASENAMES",
-    "EXCLUDED_EDIT_DIR_PARTS",
     "KNOWN_TOOL_NAMES",
+    "MODEL_SENTINEL",
     "SHELL_TOOL_NAMES",
     "TASK_TOOL_NAMES",
     "TODO_TOOL_NAMES",
     "canonical_tool_name",
     "edit_footprint",
+    "model_or_none",
     "normalize_shell_command",
+    "tool_craft",
 ]

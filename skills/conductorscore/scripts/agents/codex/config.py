@@ -20,7 +20,6 @@ Parsed with ``tomllib`` (Python 3.11+). Never raises — returns all-zero
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 try:  # Python 3.11+
@@ -28,13 +27,9 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - we run on 3.13
     tomllib = None  # type: ignore[assignment]
 
+from scripts.agents.codex.discovery import codex_home
+from scripts.core.config_counts import count_lines, count_skill_dirs
 from scripts.output_schema import ConfigCounts
-
-
-def codex_home() -> Path:
-    return Path(
-        os.environ.get("CONDUCTORSCORE_CODEX_HOME", str(Path.home() / ".codex"))
-    )
 
 
 def _load_toml(config_toml: Path) -> dict:
@@ -76,30 +71,12 @@ def _count_skills(base: Path) -> int:
         except OSError:
             pass
 
-    count = 0
-    seen: set[Path] = set()
-    for root in skill_roots:
-        if root in seen or not root.is_dir():
-            continue
-        seen.add(root)
-        try:
-            for child in root.iterdir():
-                if child.is_dir() and not child.name.startswith("."):
-                    count += 1
-        except OSError:
-            continue
-    return count
+    return count_skill_dirs(skill_roots)
 
 
 def _count_agents_md_lines(base: Path) -> int:
     """Line count of ``<base>/AGENTS.md`` (Codex's instruction file)."""
-    path = base / "AGENTS.md"
-    if not path.is_file():
-        return 0
-    try:
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError:
-        return 0
+    return count_lines(base / "AGENTS.md")
 
 
 def scan_config(home: Path | None = None) -> ConfigCounts:

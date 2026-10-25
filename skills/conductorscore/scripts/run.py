@@ -39,6 +39,7 @@ if __package__ in (None, ""):
 
 import scripts.auth_store as auth_store
 import scripts.version_check as version_check
+from scripts.core.paths import cache_dir
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
@@ -114,17 +115,15 @@ def _version_banner() -> bool:
 
 
 def _cache_dir() -> Path:
-    explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
-    if explicit:
-        return Path(explicit)
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
+    return cache_dir()
 
 
 def _writable_cache_dir() -> Path:
     """Return a cache dir we can actually write to.
 
-    Prefer `_cache_dir()` (CONDUCTORSCORE_CACHE_DIR / XDG / ~/.cache). Probe it
+    Prefer `_cache_dir()`, i.e. core.paths.cache_dir() (CONDUCTORSCORE_CACHE_DIR /
+    $XDG_CACHE_HOME/conductorscore / ~/.cache/conductorscore; never
+    CLAUDE_PLUGIN_DATA -- see core/paths.py). Probe it
     by creating the dir and writing+unlinking a sentinel. If anything raises
     OSError (read-only FS, permission denied, etc.), fall back to a fresh
     `tempfile.mkdtemp()` dir so a scan never crashes the host session.

@@ -11,7 +11,7 @@ from scripts.approval_counter import count_redundant_approvals
 from scripts.commit_counter import count_commits
 from scripts.config_scanner import scan_config
 from scripts.core.text import sha16 as _sha16
-from scripts.core.thresholds import WINDOW_MS
+from scripts.core.thresholds import PRIOR_ARTIFACT_LOOKBACK_MS, WINDOW_MS
 from scripts.edit_counter import count_edits
 from scripts.feature_cache import FeatureCache, entry_key, file_fingerprint
 from scripts.events import (
@@ -63,8 +63,6 @@ from scripts.tool_counter import (
 if TYPE_CHECKING:
     from scripts.agents.base import AgentAdapter
     from scripts.agents.claude import ClaudeAdapter
-
-PRIOR_ARTIFACT_LOOKBACK_MS = 24 * 60 * 60 * 1000  # 24h cross-session lookback
 
 # Cursor sessions very often carry NO resolved model id: Cursor's on-disk
 # model of record is the ``default``/``auto`` sentinel (mapped to ``None`` by
@@ -210,6 +208,49 @@ def _aggregate_tokens_by_model(events, provider: str) -> dict[str, dict[str, int
 # Time accounting v2 is dual-reported: a failure in it must never cost the
 # session its legacy fields. One stderr line per scan (reset by ``extract``).
 _time_accounting_warned = False
+
+# Per-session error policy: a session whose parser raises is skipped and the
+# rest of the scan proceeds. Exception type names -> count, in first-seen
+# order; reset by ``extract`` and flushed as ONE stderr line at its end. Names
+# the exception type and a count only -- never a path, session id or content.
+_skipped_sessions: dict[str, int] = {}
+# session_hash of each skipped session (a wire field, derivable without
+# parsing). ``extract`` returns it so the upload can keep the session's
+# already-stored copy in the scored set.
+_skipped_hashes: list[str] = []
+# Exception type name for each entry of ``_skipped_hashes`` (parallel list).
+_skipped_types: list[str] = []
+
+
+def _session_hash(provider: str, session_id: str) -> str:
+    """Claude stays UNPREFIXED (v0.11 byte-identity); other providers are
+    namespaced ``<provider>:`` so ids can't collide across providers."""
+    return _sha16(session_id if provider == "claude" else f"{provider}:{session_id}")
+
+
+def _read_session_or_skip(agent: "AgentAdapter", s):
+    """``_read_session``, or None (the session is skipped) when it raises an
+    ``Exception``. ``KeyboardInterrupt``/``SystemExit`` still propagate."""
+    try:
+        return _read_session(agent, s)
+    except Exception as e:  # noqa: BLE001 — one broken session must not abort the scan
+        name = type(e).__name__
+        _skipped_sessions[name] = _skipped_sessions.get(name, 0) + 1
+        _skipped_hashes.append(_session_hash(agent.agent_id, s.session_id))
+        _skipped_types.append(name)
+        return None
+
+
+def _flush_skip_warning() -> None:
+    if not _skipped_sessions:
+        return
+    n = sum(_skipped_sessions.values())
+    print(
+        f"warning: skipped {n} session{'' if n == 1 else 's'} "
+        f"({', '.join(_skipped_sessions)})",
+        file=sys.stderr,
+    )
+    _skipped_sessions.clear()
 
 
 def _permission_signal(provider: str) -> str:
@@ -476,11 +517,10 @@ def _build_per_session(
     # byte-identical; only non-default providers (codex) get the
     # ``<provider>:`` prefix. Same for the project hash, since two agents
     # in the same cwd would otherwise collapse to one project bucket.
+    session_hash = _session_hash(provider, s.session_id)
     if provider == "claude":
-        session_hash = _sha16(s.session_id)
         project_hash = _sha16(s.project_root)
     else:
-        session_hash = _sha16(f"{provider}:{s.session_id}")
         project_hash = _sha16(f"{provider}:{s.project_root}")
 
     return PerSession(
@@ -624,6 +664,9 @@ def extract(
     home = home_dot_claude.parent
     global _time_accounting_warned
     _time_accounting_warned = False  # one time-accounting warning per scan
+    _skipped_sessions.clear()  # one skipped-session warning per scan
+    _skipped_hashes.clear()
+    _skipped_types.clear()
 
     # Resolve the cross-provider consent decision: which providers we are
     # allowed to scan. The launch provider is always scanned; the OTHER
@@ -673,7 +716,11 @@ def extract(
             parsed = None
             produced_artifact = cached["plan_artifact"]
         else:
-            parsed = _read_session(agent, s)
+            parsed = _read_session_or_skip(agent, s)
+            if parsed is None:
+                if on_progress is not None:
+                    on_progress(i + 1, total)
+                continue
             produced_artifact = bool(parsed[0]) and session_produced_plan_artifact(parsed[0])
         loaded.append((s, agent, fp, cached, parsed, produced_artifact))
         project_roots.add(s.project_root)
@@ -714,7 +761,11 @@ def extract(
             # session's plan artifact entered/left the 24h lookback — the
             # latter wasn't parsed in Pass 1, so read it now.
             if parsed is None:
-                parsed = _read_session(agent, s)
+                parsed = _read_session_or_skip(agent, s)
+                if parsed is None:
+                    if on_stage is not None:
+                        on_stage("score", i + 1, total)
+                    continue
             events, text_map, tc = parsed
             per_session = _build_per_session(
                 s, provider, events, text_map, tc, artifact_times_by_project
@@ -726,6 +777,7 @@ def extract(
         if on_stage is not None:
             on_stage("score", i + 1, total)
     cache.save()
+    _flush_skip_warning()
     # ``providers_seen`` defaults to ("claude",) so a Claude-only run stays
     # byte-equivalent to v0.11 (output_schema omits the key in that case).
     # Empty scans (no sessions) also report the default Claude-only set.
@@ -739,6 +791,8 @@ def extract(
         config=config,
         sessions=tuple(sessions),
         providers_seen=seen,  # type: ignore[arg-type]
+        skipped_session_hashes=tuple(_skipped_hashes),
+        skipped_session_types=tuple(_skipped_types),
     )
 
 

@@ -32,6 +32,11 @@ RUNTIME_ARTIFACTS = (
 # the model (no auth / no network) → the caller should skip rather than fail.
 MODEL_REACHED_MARKER = "tokens used"
 
+# The developer's real home, captured at import (test collection) — before the
+# suite's autouse fixture repoints HOME at a temp dir. Auth/config/extension
+# lookups must read the REAL home; the sandbox itself lives under ``tmp``.
+_REAL_HOME = Path.home()
+
 
 def find_codex_binary() -> Path | None:
     """Return a runnable ``codex`` path, or ``None`` if none is usable.
@@ -45,7 +50,7 @@ def find_codex_binary() -> Path | None:
     if which and Path(which).resolve().exists():
         return Path(which)
 
-    ext = Path.home() / ".vscode-server" / "extensions"
+    ext = _REAL_HOME / ".vscode-server" / "extensions"
     candidates = sorted(
         ext.glob("openai.chatgpt-*/bin/*/codex"),
         key=lambda p: p.parts[p.parts.index("extensions") + 1],  # extension version dir
@@ -59,7 +64,7 @@ def find_codex_binary() -> Path | None:
 
 def codex_auth_available() -> bool:
     """True if there's a real ``~/.codex/auth.json`` to seed the sandbox with."""
-    return (Path.home() / ".codex" / "auth.json").is_file()
+    return (_REAL_HOME / ".codex" / "auth.json").is_file()
 
 
 def _strip_mcp(toml_text: str) -> str:
@@ -92,14 +97,22 @@ def make_sandbox(tmp: Path) -> dict:
     codex_home.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
 
-    real = Path.home() / ".codex"
+    real = _REAL_HOME / ".codex"
     shutil.copyfile(real / "auth.json", codex_home / "auth.json")
     config = real / "config.toml"
     if config.is_file():
         (codex_home / "config.toml").write_text(_strip_mcp(config.read_text()))
 
-    env = dict(os.environ)
+    # Drop the suite's isolation overrides (CONDUCTORSCORE_* agent/cache dirs,
+    # CLAUDE_PLUGIN_DATA) so run.py resolves everything from the sandbox HOME,
+    # and pin XDG dirs under it so nothing is written outside the sandbox.
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("CONDUCTORSCORE_") and k != "CLAUDE_PLUGIN_DATA"
+    }
     env["HOME"] = str(home)
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["CODEX_HOME"] = str(codex_home)
     env["WORK_DIR"] = str(work)
     return env

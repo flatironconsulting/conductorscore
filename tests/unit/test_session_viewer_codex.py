@@ -75,3 +75,22 @@ def test_parse_codex_session_tool_output_attaches_duration(tmp_path):
     ]
     # Each call bubble got its output's timestamp as end_ts (duration marker).
     assert all(m.end_ts_ms is not None for m in tool_msgs)
+
+
+def test_parse_codex_session_reads_zst(tmp_path, monkeypatch):
+    """A ``.jsonl.zst`` rollout renders the same bubbles as the plain file.
+
+    Uses the same backend seam as ``test_discovery_zst``, but the fake
+    "compression" is byte reversal (so the file is NOT readable as plain
+    JSONL) -- the plumbing is proven without a zstd library.
+    """
+    import scripts.agents.codex.events as codex_events
+
+    src = FIXTURES / "tool_edit_plan_session.jsonl"
+    zst = tmp_path / "rollout.jsonl.zst"
+    zst.write_bytes(src.read_bytes()[::-1])
+    monkeypatch.setattr(codex_events, "_zstd_decompress", lambda data: data[::-1])
+
+    expected = parse_codex_session(src)
+    assert expected
+    assert parse_codex_session(zst) == expected

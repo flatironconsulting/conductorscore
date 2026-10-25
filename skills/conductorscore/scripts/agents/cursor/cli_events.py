@@ -48,7 +48,9 @@ Shell commands/edit paths are pulled only as far as
 ``scripts.agents.cursor.taxonomy`` needs to compute craft fields; the raw
 values live in ``Event.raw_input`` (``repr=False``, never serialized).
 
-Soft-fail contract (never raises): an unopenable/corrupt db, invalid/absent
+Soft-fail contract: sqlite3/OS trouble soft-fails, but parse-shaped errors
+(``store.PARSE_ERRORS``) propagate to the scanner's per-session policy (skip +
+one warning). Specifically: an unopenable/corrupt db, invalid/absent
 meta hex, a missing or unwalkable root, or one malformed message each
 degrade gracefully. Total failure (bad db, bad meta, missing root, empty
 walk) returns ``([], {})``. A single bad message inside an otherwise good
@@ -63,16 +65,11 @@ import sqlite3
 from pathlib import Path
 
 from scripts.agents.cursor import taxonomy
-from scripts.agents.cursor.store import open_ro
+from scripts.agents.cursor.store import PARSE_ERRORS, open_ro
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content
 from scripts.core.text import sha16 as _sha16
-
-# "default" is Cursor's placeholder/alias model string (unresolved model
-# selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
-# strings", Decision 5. Same sentinel the IDE reader guards against.
-_MODEL_SENTINEL = "default"
 
 # Defensive bounds on the tree walk -- a corrupt/adversarial/cyclic chain
 # must never hang the scanner or blow the recursion stack. Real sessions
@@ -257,14 +254,6 @@ def _message_ts(base_ts: int, end_ts: int | None, i: int, n: int) -> int:
     if end_ts is not None and end_ts > base_ts and n >= 2:
         return base_ts + round((end_ts - base_ts) * i / (n - 1))
     return base_ts + i * _SYNTHETIC_TS_STEP_MS
-
-
-def _model_or_none(name: object) -> str | None:
-    """Map the ``"default"`` sentinel (and absence) to ``None``; pass any
-    other non-empty string through unchanged."""
-    if isinstance(name, str) and name and name != _MODEL_SENTINEL:
-        return name
-    return None
 
 
 def _strip_user_query_wrapper(text: str) -> str:
@@ -545,27 +534,7 @@ def _tool_call_event(session_id: str, ts: int, model: str | None, item: dict) ->
     tool_use_id = raw_tool_use_id if isinstance(raw_tool_use_id, str) else None
     args = item.get("args")
     args = args if isinstance(args, dict) else {}
-    craft: dict = {}
-
-    if name in taxonomy.SHELL_TOOL_NAMES:
-        cmd = taxonomy.normalize_shell_command(args)
-        if cmd is not None:
-            # RAW, unreduced command string -- in-memory only (Event.raw_input
-            # is repr=False and never serialized). Reduction is
-            # approval_counter.signature_for_bash's job, not ours.
-            craft["raw_input"] = {"command": cmd}
-    elif name in taxonomy.EDIT_TOOL_NAMES:
-        path_hash, lines, excluded = taxonomy.edit_footprint(name, args)
-        if path_hash is not None:
-            craft["edit_file_path_hash"] = path_hash
-            craft["edit_line_count"] = lines
-            craft["is_excluded_edit_path"] = excluded
-            raw_path = args.get("file_path") or args.get("path") or args.get("target_file")
-            if isinstance(raw_path, str):
-                craft["raw_input"] = {"file_path": raw_path}
-    elif name in taxonomy.TODO_TOOL_NAMES:
-        todos = args.get("todos")
-        craft["todo_count"] = len(todos) if isinstance(todos, list) else 0
+    craft = taxonomy.tool_craft(name, args)
 
     return Event(
         kind=EventKind.ASSISTANT_TOOL,
@@ -628,7 +597,7 @@ def _events_for_message(
     # sits on a CONTENT ITEM's providerOptions (observed on ``reasoning``
     # items) -- so scan the top level first, then the items. More specific
     # than the session-level model, so it wins; the sentinel filter
-    # (``_model_or_none``) still applies.
+    # (``taxonomy.model_or_none``) still applies.
     def _routed_model(container: object) -> str | None:
         if not isinstance(container, dict):
             return None
@@ -638,7 +607,7 @@ def _events_for_message(
         cursor_po = po.get("cursor")
         if not isinstance(cursor_po, dict):
             return None
-        return _model_or_none(cursor_po.get("modelName"))
+        return taxonomy.model_or_none(cursor_po.get("modelName"))
 
     routed = _routed_model(msg)
     if routed is None and isinstance(content, list):
@@ -741,8 +710,9 @@ def read_cli_events_and_text(
 
     Opens ``db_path`` via ``store.open_ro`` EXACTLY ONCE, loads the entire
     ``blobs`` table into memory in that same call, walks the tree from
-    ``meta.latestRootBlobId``, and normalizes the ordered messages. Never
-    raises -- see the module docstring's soft-fail contract.
+    ``meta.latestRootBlobId``, and normalizes the ordered messages. sqlite3/OS
+    errors soft-fail to ``([], {})``; parse-shaped errors propagate -- see the
+    module docstring's soft-fail contract.
     """
     con = open_ro(db_path)
     if con is None:
@@ -764,7 +734,7 @@ def read_cli_events_and_text(
             return [], {}
         messages = list(reversed(leaves_newest_first))  # oldest -> newest
 
-        model = _model_or_none(meta.get("lastUsedModel"))
+        model = taxonomy.model_or_none(meta.get("lastUsedModel"))
         created_at = meta.get("createdAt")
         base_ts = created_at if isinstance(created_at, int) else 0
         end_ts = _session_end_ms(db_path)
@@ -805,7 +775,9 @@ def read_cli_events_and_text(
                 continue
 
         return events, text_map
-    except Exception:
+    except PARSE_ERRORS:
+        raise
+    except Exception:  # sqlite3 / OS trouble: soft-fail the one session
         return [], {}
     finally:
         con.close()

@@ -1,0 +1,8 @@
+[mcp_servers.somems]
+command = "npx"
+
+[mcp_servers.other]
+url = "https://x"
+
+[plugins."cool@github:org/repo"]
+enabled = true

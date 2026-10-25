@@ -30,7 +30,9 @@ see ``CURSOR_FORMAT.md`` § "Rejection/denial shapes actually found"
 (addendum). A live-store example is still unobserved (recon sessions ran
 auto-approved), so keep fixtures for this branch marked synthetic.
 
-Soft-fail contract (never raises): a corrupt/unopenable DB, a missing
+Soft-fail contract: a locked/missing/corrupt store (sqlite3/OS errors) soft-fails; parse-shaped
+errors (``store.PARSE_ERRORS``) propagate to the scanner's per-session policy
+(skip + one warning). Specifically: a corrupt/unopenable DB, a missing
 ``composerData`` doc, or a single malformed bubble each degrade gracefully
 -- the whole read returns ``([], {})``, or (for one bad bubble) that bubble
 is simply skipped and the rest of the session is still read. A composer with
@@ -43,26 +45,13 @@ import json
 from pathlib import Path
 
 from scripts.agents.cursor import taxonomy
-from scripts.agents.cursor.store import kv_get_json, open_ro, parse_locator
+from scripts.agents.cursor.store import PARSE_ERRORS, kv_get_json, open_ro, parse_locator
 from scripts.core.normalized import Event, EventKind
 from scripts.core.prompt_origin import mark_scheduled_repeats
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
 from scripts.core.timestamps import parse_iso_ts_ms as _parse_iso_ms
-
-# "default" is Cursor's placeholder/alias model string (unresolved model
-# selection), never a concrete model id -- CURSOR_FORMAT.md §5 "Model-ID
-# strings", Decision 5. It must never be reported as a real model.
-_MODEL_SENTINEL = "default"
-
-
-def _model_or_none(name: object) -> str | None:
-    """Map the ``"default"`` sentinel to ``None``; pass any other non-empty
-    string through unchanged."""
-    if isinstance(name, str) and name and name != _MODEL_SENTINEL:
-        return name
-    return None
-
+from scripts.plan_signals import is_structured_prompt
 
 def _bubble_ts_ms(b: dict, fallback: int) -> int:
     """Resolve a bubble's timestamp in epoch ms.
@@ -131,28 +120,7 @@ def _tool_events(session_id: str, ts: int, model: str | None, tfd: dict) -> list
     raw_tool_use_id = tfd.get("toolCallId")
     tool_use_id = raw_tool_use_id if isinstance(raw_tool_use_id, str) else None
     args = _args_dict(tfd)
-    craft: dict = {}
-
-    if name in taxonomy.SHELL_TOOL_NAMES:
-        cmd = taxonomy.normalize_shell_command(args)
-        if cmd is not None:
-            # RAW, unreduced command string -- in-memory only (Event.raw_input
-            # is repr=False and never serialized). Reduction/privacy-collapse
-            # is approval_counter.signature_for_bash's job, not ours.
-            craft["raw_input"] = {"command": cmd}
-    elif name in taxonomy.EDIT_TOOL_NAMES:
-        path_hash, lines, excluded = taxonomy.edit_footprint(name, args)
-        if path_hash is not None:
-            craft["edit_file_path_hash"] = path_hash
-            craft["edit_line_count"] = lines
-            craft["is_excluded_edit_path"] = excluded
-            raw_path = args.get("file_path") or args.get("path") or args.get("target_file")
-            if isinstance(raw_path, str):
-                # Mirrors Codex's in-memory-only raw_input for edit paths.
-                craft["raw_input"] = {"file_path": raw_path}
-    elif name in taxonomy.TODO_TOOL_NAMES:
-        todos = args.get("todos")
-        craft["todo_count"] = len(todos) if isinstance(todos, list) else 0
+    craft = taxonomy.tool_craft(name, args)
 
     call = Event(
         kind=EventKind.ASSISTANT_TOOL,
@@ -198,7 +166,7 @@ def _read_ide(
             return [], {}
 
         mc = doc.get("modelConfig")
-        session_model = _model_or_none(mc.get("modelName")) if isinstance(mc, dict) else None
+        session_model = taxonomy.model_or_none(mc.get("modelName")) if isinstance(mc, dict) else None
 
         headers = doc.get("fullConversationHeadersOnly")
         if not isinstance(headers, list):
@@ -225,7 +193,7 @@ def _read_ide(
                 model = session_model
                 mi = b.get("modelInfo")
                 if isinstance(mi, dict):
-                    bubble_model = _model_or_none(mi.get("modelName"))
+                    bubble_model = taxonomy.model_or_none(mi.get("modelName"))
                     if bubble_model is not None:
                         model = bubble_model
 
@@ -240,10 +208,6 @@ def _read_ide(
                     if not isinstance(text, str):
                         text = ""
                     token_count = _approx_token_count(text)
-                    # Late import to avoid a cycle: plan_signals imports
-                    # Event from core.normalized (same pattern as codex).
-                    from scripts.plan_signals import is_structured_prompt
-
                     ev = Event(
                         kind=EventKind.USER,
                         session_id=composer_id,
@@ -314,7 +278,9 @@ def _read_ide(
         # Rule 3 (IDE only: bubbles carry real timestamps; the CLI reader's
         # are spread evenly, so every repeat there would look scheduled).
         return mark_scheduled_repeats(events, text_map)
-    except Exception:
+    except PARSE_ERRORS:
+        raise
+    except Exception:  # sqlite3 / OS trouble: soft-fail the one session
         return [], {}
     finally:
         con.close()
@@ -329,9 +295,10 @@ def _read(locator: Path, *, want_text: bool) -> tuple[list[Event], dict[int, str
 
         try:
             return read_cli_events_and_text(db_path, session_id, want_text=want_text)
+        except PARSE_ERRORS:
+            raise
         except Exception:
-            # cli_events soft-fails internally already; this is belt-and-
-            # suspenders against an unforeseen crash in that module.
+            # sqlite3 / OS trouble: soft-fail the one session.
             return [], {}
     return _read_ide(db_path, session_id, want_text=want_text)
 
@@ -345,8 +312,9 @@ def read_events_and_text(locator: Path) -> tuple[list[Event], dict[int, str]]:
 
 def read_events(locator: Path) -> list[Event]:
     """Parse a Cursor session locator (``store.make_locator`` output) into
-    normalized Events. Never raises -- corrupt/missing data soft-fails to
-    an empty list."""
+    normalized Events. A corrupt/missing/locked store soft-fails to an empty
+    list; parse-shaped errors (``store.PARSE_ERRORS``) propagate to the
+    scanner's per-session skip policy."""
     events, _ = _read(locator, want_text=False)
     return events
 

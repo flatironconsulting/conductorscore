@@ -35,11 +35,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from scripts.core.edits import is_excluded_edit_path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import sha16 as _sha16
+from scripts.plan_signals import is_plan_shaped_path
+from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
 from scripts.core.prompt_origin import mark_scheduled_repeats
-from scripts.core.timestamps import parse_iso_ts_ms
+from scripts.core.timestamps import parse_row_ts_ms
 from scripts.agents.codex.taxonomy import (
     DENIAL_MARKER,
     EDIT_TOOL_NAMES,
@@ -115,15 +118,10 @@ def _iter_rows(jsonl_path: Path):
             continue
         if not isinstance(d, dict):
             continue
-        ts_ms = _parse_ts_ms(d)
+        ts_ms = parse_row_ts_ms(d)
         if ts_ms is None:
             continue
         yield d, ts_ms
-
-
-def _parse_ts_ms(d: dict) -> int | None:
-    """Codex rows carry a top-level ISO-8601 ``timestamp`` (``...Z``)."""
-    return parse_iso_ts_ms(d.get("timestamp"))
 
 
 def is_codex_jsonl(jsonl_path: Path) -> bool:
@@ -285,7 +283,7 @@ def _last_token_usage(payload: dict) -> tuple[int, int, int] | None:
     return in_total, cached, out
 
 
-def _message_text(payload: dict) -> str:
+def message_text(payload: dict) -> str:
     """Flatten a ``response_item.message`` content list to flat text.
 
     Content blocks are ``{"type":"input_text"|"output_text","text":...}``.
@@ -384,21 +382,13 @@ def _edit_craft_from_files(files: list[tuple[str, int]]) -> dict:
     consumers. A plan-shaped ``.md`` target fires ``is_plan_file_write``.
     Returns ``{}`` when ``files`` is empty.
     """
-    # Late import to avoid a cycle: claude events imports plan_signals which
-    # imports Event from core.normalized.
-    from scripts.agents.claude.events import (
-        _is_excluded_edit_path,
-        _sha16 as _edit_sha16,
-    )
-    from scripts.plan_signals import is_plan_shaped_path
-
     if not files:
         return {}
     edit_files: list[tuple[str, int, bool]] = []
     is_plan_write = False
     for path, lines in files:
         edit_files.append(
-            (_edit_sha16(path), lines, _is_excluded_edit_path(path))
+            (_sha16(path), lines, is_excluded_edit_path(path))
         )
         if path.lower().endswith(".md") and is_plan_shaped_path(path):
             is_plan_write = True
@@ -546,7 +536,7 @@ def _handle_response_item(
     if ptype == "message" and ctx.use_response_items:
         role = payload.get("role")
         if role == "user":
-            text = _message_text(payload)
+            text = message_text(payload)
             if not text or is_injected_context(text):
                 return
             token_count = _approx_token_count(text)
@@ -879,9 +869,6 @@ def _handle_patch_apply_end(ctx: _ReadContext, payload: dict, ts_ms: int) -> Non
 def _read(
     jsonl_path: Path, *, want_text: bool
 ) -> tuple[list[Event], dict[int, str]]:
-    # Late import to avoid a cycle: plan_signals imports Event from us.
-    from scripts.plan_signals import is_structured_prompt as _is_structured_prompt
-
     session_id = jsonl_path.stem
     ctx = _ReadContext(
         session_id=session_id,

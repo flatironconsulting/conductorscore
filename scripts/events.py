@@ -16,7 +16,6 @@ from pathlib import Path
 from scripts.agents.claude.discovery import claude_home, find_sessions
 from scripts.agents.claude.events import (
     SubagentRecords,
-    load_subagent_panels,
 )
 from scripts.agents.claude.events import read_events as _claude_read_events
 from scripts.agents.claude.events import (
@@ -38,9 +37,7 @@ from scripts.agents.cursor.store import is_cursor_locator
 # Re-export it so that consumer keeps working after the move to the Claude
 # adapter edge.
 from scripts.agents.claude.events import (  # noqa: F401
-    _is_excluded_edit_path,
     _strip_synthetic_content,
-    basename,
 )
 from scripts.core.normalized import Event, EventKind, SessionMeta
 
@@ -103,7 +100,6 @@ __all__ = [
     "find_codex_sessions",
     "find_cursor_sessions",
     "find_sessions",
-    "load_subagent_panels",
     "read_events",
     "read_events_and_text",
 ]

@@ -12,7 +12,7 @@ The counter reads ASSISTANT_TOOL events whose ``tool_name`` is one of
     file counting without leaking the path),
   * estimated lines touched (``edit_line_count``), and
   * flagged whether the path falls under an excluded prefix
-    (``.claude/``, ``.git/``, basename ``CLAUDE.md``).
+    (``scripts.core.edits.is_excluded_edit_path``).
 
 So this module is a pure aggregator — it never inspects raw input
 strings.
@@ -57,7 +57,7 @@ def count_edits(events: list[Event]) -> EditCounts:
 
     Same file edited multiple times counts once for ``files_modified``;
     line counts sum across operations on it. Excluded paths
-    (``.claude/``, ``.git/``, basename ``CLAUDE.md``) are dropped before
+    (``scripts.core.edits.is_excluded_edit_path``) are dropped before
     aggregation. The Event reader has already pre-flagged excluded paths
     via ``is_excluded_edit_path`` so we never inspect raw paths here.
     """

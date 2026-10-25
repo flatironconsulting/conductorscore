@@ -22,7 +22,7 @@ your own machine to compute metrics, then uploads results to
   message text, prompts, code, file contents, and file paths are **never**
   uploaded; message and file text is reduced on-device to a truncated SHA-256
   hash. The exact wire payload is documented in
-  [WIRE_FORMAT.md](WIRE_FORMAT.md) (`wire_format_sample.json` is a real sample).
+  [WIRE_FORMAT.md](WIRE_FORMAT.md) (`wire_format_sample.json` is a synthetic example generated from the real emitter).
 - **Consented and gated.** Uploads happen only after you pair this device, only
   for the agents you consent to scan, and never on an unpaired machine. The
   background daily refresh can be disabled with `CONDUCTORSCORE_NO_AUTO=1`.

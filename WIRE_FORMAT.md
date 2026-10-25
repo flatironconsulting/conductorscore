@@ -45,20 +45,79 @@ fields.
 
 ## Current schema
 
-Skeleton — fleshed out per feature as fields are added.
+The current version is `SCHEMA_VERSION` in `scripts/output_schema.py` — the
+last row of the table above. For a complete, current example payload see
+`wire_format_sample.json` beside this file; it is generated from the emitter
+by `tools/gen_wire_format_sample.py` (never hand-edited), so its envelope,
+field set, `digest` values and `session_chain` are exactly what the client
+sends. The per-version sections below spell out each field.
 
-```json
-{
-  "device": {
-    "device_id": "uuid",
-    "client_version": "0.1.0",
-    "schema_version": "0.1",
-    "extracted_at_ms": 0,
-    "window_days": 30
-  },
-  "sessions": []
-}
-```
+### `sessions[]` field list (current)
+
+Every `PerSession` field in `scripts/output_schema.py`, sorted. A full
+session element carries these keys plus `digest`; a few are emitted only
+when non-default (`provider` when not `"claude"`, `token_data_missing` for
+Cursor sessions with no token data, `model_skill_invocations`,
+`model_plugin_invocations`, `model_skill_invocations_by_name` and
+`time_accounting` when present), so a given payload may omit them. The
+list is pinned to the dataclass by `tests/unit/test_wire_format_doc.py`.
+
+<!-- per-session-fields:start -->
+- `afk_dispatch_minutes`
+- `afk_intervals`
+- `afk_max_streak_minutes`
+- `afk_minutes`
+- `afk_parallel_minutes_foreground`
+- `afk_tool_minutes`
+- `agent_dispatches`
+- `assistant_msgs_by_model`
+- `auto_compaction_events`
+- `builtin_tool_invocations`
+- `cache_creation_input_tokens`
+- `cache_input_tokens`
+- `commit_count`
+- `cron_parallel_minutes`
+- `distinct_builtin_tools`
+- `distinct_mcp_tools`
+- `distinct_skills`
+- `ended_at_ms`
+- `files_modified`
+- `hitl_mcp_invocations`
+- `hitl_minutes`
+- `hitl_tool_minutes`
+- `idle_minutes`
+- `is_planned`
+- `is_scripted_session`
+- `is_significant_edit_session`
+- `mcp_invocations_by_name`
+- `model_plugin_invocations`
+- `model_skill_invocations`
+- `model_skill_invocations_by_name`
+- `plugin_invocations`
+- `plugin_invocations_by_name`
+- `project_hash`
+- `provider`
+- `qualifying_pairs`
+- `rage_quit_event`
+- `redundant_approvals_per_signature`
+- `repetitive_pairs`
+- `revert_count`
+- `session_hash`
+- `skill_invocations_by_name`
+- `started_at_ms`
+- `strong_plan_signals`
+- `time_accounting`
+- `token_accounting_version`
+- `token_data_missing`
+- `tokens_by_model`
+- `tool_error_count`
+- `top_afk_streaks`
+- `total_input_tokens`
+- `total_lines_edited`
+- `total_output_tokens`
+- `user_skill_invocations`
+- `weak_plan_signals`
+<!-- per-session-fields:end -->
 
 ## Schema v0.1
 
@@ -312,7 +371,7 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 | `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
 | `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`. |
 | `is_planned`                   | boolean          | no       | True iff `len(strong_plan_signals) >= 1` OR `len(weak_plan_signals) >= 2`. Per outline § "planned". |
-| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding `.claude/`, `.git/`, and basename `CLAUDE.md`. Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
+| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding paths containing `.claude/`, `.cursor/`, `.codex/` or `.git/`, and basenames `CLAUDE.md` / `AGENTS.md` (see [Excluded edit paths](#excluded-edit-paths)). Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
 | `total_lines_edited`           | integer          | no       | Outline approximation: `sum over Edit/Write/MultiEdit of max(line_count(new_string), line_count(old_string))`. For Write this collapses to `line_count(content)`. For MultiEdit the per-edit max is summed across the `edits` array. Excluded-path edits contribute 0. |
 | `commit_count`                 | integer          | no       | Number of commit-creating `git commit` invocations counted from the session's shell COMMAND text (Claude `Bash`; Codex `shell`/`exec_command`/`shell_command`). `--amend`, `--dry-run`, `commit-tree`, and `-h`/`--help` are excluded. Chained commands are split on `&&`/`\|\|`/`;`/newline so each real segment counts once. Transcript-only — no GitHub data is fetched; only the integer count crosses the wire (the command/message text is consumed in-memory and never serialized). |
 | `is_significant_edit_session`  | boolean          | no       | True iff `files_modified > 5` OR `total_lines_edited > 200`. Per outline § "significant edits"; gates the Coding-without-a-plan denominator. |
@@ -360,11 +419,18 @@ boundary is pinned by `tests/test_edit_counter.py`.
 ### Excluded edit paths
 
 Edits to the following are NEVER counted toward `files_modified` or
-`total_lines_edited` (they're tracked by other metrics or are noise):
+`total_lines_edited` (they're tracked by other metrics or are noise). The
+same rule applies to every agent (Claude, Codex, Cursor); it lives in
+`scripts/core/edits.py`:
 
-- any path containing `.claude/`,
-- any path containing `.git/`,
-- any path whose basename is `CLAUDE.md`.
+- any path containing the directory part `.claude/`, `.cursor/`, `.codex/` or `.git/`
+  (plain substring test, so `a/.claude/x` and `.git/config` both match),
+- any path whose basename is exactly `CLAUDE.md` or `AGENTS.md`.
+
+Matching is case-sensitive (`src/agents.md` is a real code file and counts),
+and backslashes are normalized to `/` first so Windows paths behave the same.
+Line counts have no floor: an edit with nothing to count (an empty Write, a
+Delete) contributes 0 lines.
 
 ### Example
 

@@ -28,13 +28,9 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolated_conductorscore_cache(tmp_path_factory, monkeypatch):
-    """Never let a test read the developer's real ~/.cache/conductorscore.
+def _isolated_user_dirs(tmp_path_factory, monkeypatch):
+    """Never let a test read or write the developer's real home, config, cache
+    or agent (Claude/Codex/Cursor) dirs. Tests needing a specific dir override."""
+    from tests._isolation import isolate_user_dirs
 
-    A real run persists the cross-provider consent choice there; with it
-    present, extract() in a fake-Claude-home test also scans the machine's real
-    ~/.codex sessions. Tests that need a specific cache dir still override this.
-    """
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("xdg-cache")))
-    monkeypatch.delenv("CONDUCTORSCORE_CACHE_DIR", raising=False)
-    monkeypatch.delenv("CONDUCTORSCORE_PROVIDERS", raising=False)
+    return isolate_user_dirs(monkeypatch, tmp_path_factory.mktemp("home"))

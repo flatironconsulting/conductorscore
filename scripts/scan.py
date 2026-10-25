@@ -32,11 +32,21 @@ if __package__ in (None, ""):
 import scripts.auth_store as auth_store
 from scripts._http import open_url
 from scripts.agents import consent as consent_mod
-from scripts.delta_upload import build_body, ledger_from_payload, load_ledger, save_ledger
+from scripts.delta_upload import (
+    build_body,
+    chain_stub,
+    ledger_from_payload,
+    load_chain_stubs,
+    load_ledger,
+    preserved_for,
+    save_ledger,
+    unpreservable_for,
+)
 from scripts.output_schema import CLIENT_VERSION
 from scripts.scanner import extract
 from scripts.status_writer import StatusWriter
 import scripts.version_check as version_check
+from scripts.core.paths import cache_dir
 
 API_BASE = os.environ.get("CONDUCTORSCORE_API_BASE", "https://conductorscore.com").rstrip("/")
 
@@ -51,11 +61,7 @@ PROGRESS_STAGES = {
 
 
 def _cache_dir() -> Path:
-    explicit = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
-    if explicit:
-        return Path(explicit)
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".cache") / "conductorscore"
+    return cache_dir()
 
 
 def _status_path() -> Path:
@@ -142,9 +148,20 @@ def _unresolved_refs(result) -> list[str] | None:
     return hashes or None
 
 
-def _send(payload: dict, device_token: str):
+def _send(
+    payload: dict,
+    device_token: str,
+    skipped: tuple[str, ...] = (),
+    skipped_types: tuple[str, ...] = (),
+):
     """Delta-upload ``payload`` (an ExtractorOutput dict). Returns what
-    ``_upload`` returns.
+    ``_upload`` returns, or ``("skipped", (count, type_names))`` when nothing
+    was sent (see below).
+
+    If a session skipped this scan was uploaded before but its ledger entry
+    lacks the chain integers needed to keep it as a ref, NOTHING is uploaded
+    and the ledger is left untouched: the server's previous score stands rather
+    than being recomputed without that session.
 
     Sessions whose digest matches the local ledger go as refs. If the server
     answers 409 ``unresolved_refs``, exactly the listed sessions are expanded
@@ -165,18 +182,37 @@ def _send(payload: dict, device_token: str):
         return any(s.get("ref") is True for s in body.get("sessions", []))
 
     ledger_path = _cache_dir() / "uploaded.json"
-    result = post(build_body(payload, load_ledger(ledger_path)))
+    ledger = load_ledger(ledger_path)
+    stubs = load_chain_stubs(ledger_path)
+    # A skipped, already-uploaded session we can't keep as a ref: don't upload
+    # (and don't touch the ledger) rather than lower the stored score.
+    lost = unpreservable_for(skipped, payload, ledger, stubs)
+    if lost:
+        type_of = dict(zip(skipped, skipped_types))
+        names = list(dict.fromkeys(type_of.get(h, "Exception") for h in lost))
+        return "skipped", (len(lost), names)
+    # Sessions skipped this scan (parser raised) that the server already holds
+    # stay scored: sent as refs from the ledger, and kept in the ledger.
+    preserved = preserved_for(skipped, payload, ledger, stubs)
+    result = post(build_body(payload, ledger, preserved=preserved))
     hashes = _unresolved_refs(result)
     if hashes is not None:
         result = post(
-            build_body(payload, load_ledger(ledger_path), frozenset(hashes))
+            build_body(payload, ledger, frozenset(hashes), preserved=preserved)
         )
         if _unresolved_refs(result) is not None:
             result = post(build_body(payload, {}))
     if result[0] == "http" and result[1][0] == 422 and has_refs(last_body):
         result = post(build_body(payload, {}))
     if result[0] == "ok":
-        save_ledger(ledger_path, ledger_from_payload(payload))
+        digests = ledger_from_payload(payload)
+        chain = {x["session_hash"]: chain_stub(x) for x in payload["sessions"]}
+        sent = {x["session_hash"] for x in last_body.get("sessions", [])}
+        for p in preserved:
+            if p["session_hash"] in sent:
+                digests[p["session_hash"]] = p["digest"]
+                chain[p["session_hash"]] = stubs[p["session_hash"]]
+        save_ledger(ledger_path, digests, chain)
     return result
 
 
@@ -285,6 +321,9 @@ def main() -> int:
     # exact path uploaded an empty payload and got rejected). Skip the POST
     # entirely and surface a friendly "nothing to upload" outcome instead.
     if sessions is not None and len(sessions) == 0:
+        # An empty extract reports providers_seen=("claude",) by default, so
+        # name the providers this scan actually looked at instead.
+        seen_list = list(decision.providers) or list(seen_list)
         providers_str = ", ".join(
             consent_mod.PROVIDER_LABELS.get(p, p.title()) for p in seen_list
         )
@@ -309,7 +348,12 @@ def main() -> int:
 
     # The dataclass isn't JSON-serialisable; _send delta-encodes its dict form.
     features_payload = features.to_dict()
-    kind, payload = _send(features_payload, auth["device_token"])
+    kind, payload = _send(
+        features_payload,
+        auth["device_token"],
+        tuple(getattr(features, "skipped_session_hashes", ())),
+        tuple(getattr(features, "skipped_session_types", ())),
+    )
 
     # On a 401 the stored token is rejected. Attempt ONE silent re-auth (no
     # browser) + retry — never delete the credential (non-destructive, D8).
@@ -325,8 +369,24 @@ def main() -> int:
             sw.write(phase="error", message="reauth_needed: token rejected (401)")
             print("reauth_needed: 401", file=sys.stderr)
             return 1
-        kind, payload = _send(features_payload, auth["device_token"])
+        kind, payload = _send(
+            features_payload,
+            auth["device_token"],
+            tuple(getattr(features, "skipped_session_hashes", ())),
+            tuple(getattr(features, "skipped_session_types", ())),
+        )
 
+    if kind == "skipped":
+        # Same end state as the pre-skip-policy abort: no upload, ledger
+        # unchanged, the old score stands. Counts + type names only.
+        n, names = payload
+        msg = (
+            f"upload skipped this run; {n} previously-uploaded session(s) "
+            f"could not be read ({', '.join(names)})"
+        )
+        sw.write(phase="error", message=f"upload_skipped: {msg}")
+        print(f"warning: {msg}", file=sys.stderr)
+        return 1
     if kind == "ok":
         resp = payload
     elif kind == "http":

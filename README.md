@@ -16,7 +16,7 @@ conductorscore.com              (scoring)
 
 ## What gets uploaded
 
-Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~38 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
+Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~50 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
 
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
@@ -91,13 +91,14 @@ If you're here to verify the data path before installing, these are the files th
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | [`scripts/scanner.py`](scripts/scanner.py)             | Top-level extractor. Reads JSONL, builds the payload, and hashes the session id + project root (`sha256[:16]`, no salts, not reversible). |
 | [`scripts/output_schema.py`](scripts/output_schema.py) | The exact shape of the upload payload. Every field is named here.                    |
-| [`scripts/events.py`](scripts/events.py)               | JSONL event parsing — what the client reads off disk.                                |
+| [`scripts/agents/*/events.py`](scripts/agents) and [`scripts/core/`](scripts/core) | Per-agent (Claude, Codex, Cursor) transcript parsers and shared helpers — what the client reads off disk. |
 | [`scripts/scan.py`](scripts/scan.py)                   | Runs the scan and uploads the payload — the score upload (`POST /api/ingest`) is here. |
 | [`scripts/run.py`](scripts/run.py)                     | CLI orchestrator: spawns `scan.py`, polls a local status file, prints the summary.   |
 | [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py) | GitHub OAuth device-flow login — identity only, separate from the score upload. |
 | [`WIRE_FORMAT.md`](WIRE_FORMAT.md)                     | Versioned schema, including a per-version changelog.                                 |
+| [`docs/CURSOR_FORMAT.md`](docs/CURSOR_FORMAT.md)       | Field-name-level notes on the Cursor on-disk formats the Cursor parser reads.        |
 
-Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is under 4k lines of Python.
+Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is about 17k lines of Python (`scripts/`, excluding tests).
 
 ## Install
 

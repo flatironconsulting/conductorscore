@@ -31,6 +31,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_parent))
 
 import scripts.version_check as version_check
+from scripts.core.paths import cache_dir
 
 THROTTLE_SECONDS = 20 * 3600
 
@@ -113,18 +114,15 @@ def enable_daily(provider: str) -> DailyResult:
     )
 
 def _data_dir() -> Path:
-    # CONDUCTORSCORE_CACHE_DIR is the already-resolved writable dir run.py chose
-    # (and exports into the scan subprocess env). Honor it first — verbatim — so
-    # the daily stamp persists in the SAME place run.py reads and the
-    # orchestrator + subprocess never split-brain.
-    shared = os.environ.get("CONDUCTORSCORE_CACHE_DIR")
-    if shared:
-        base = Path(shared)
+    # CONDUCTORSCORE_CACHE_DIR (run.py's resolved dir) wins; then the plugin
+    # runtime's CLAUDE_PLUGIN_DATA (verbatim) -- applied only here, never in the
+    # shared resolver (see scripts/core/paths.py); then the shared XDG/home rule.
+    if os.environ.get("CONDUCTORSCORE_CACHE_DIR"):
+        base = cache_dir()
     elif d := os.environ.get("CLAUDE_PLUGIN_DATA"):
         base = Path(d)
     else:
-        cache = os.environ.get("XDG_CACHE_HOME")
-        base = (Path(cache) if cache else Path.home() / ".cache") / "conductorscore"
+        base = cache_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
 

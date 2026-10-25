@@ -1,8 +1,7 @@
 """Claude Code JSONL → normalized Event parsing.
 
 This is the real implementation of the Claude transcript reader. The legacy
-``scripts.events`` facade re-exports ``read_events`` / ``read_events_and_text``
-/ ``load_subagent_panels`` from here so existing imports keep working
+``scripts.events`` facade re-exports ``read_events`` / ``read_events_and_text`` from here so existing imports keep working
 unchanged. Behavior is identical to the pre-refactor ``scripts.events``.
 
 Privacy: raw user text is hashed (sha256[:16]) before storage and never
@@ -16,17 +15,22 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
+from scripts.core.edits import estimate_edit_line_count, is_excluded_edit_path
 from scripts.core.normalized import Event, EventKind
 from scripts.core.text import approx_token_count as _approx_token_count
 from scripts.core.text import flatten_content as _flatten_text
 from scripts.core.text import sha16 as _sha16
+from scripts.plan_signals import (
+    is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
+)
+from scripts.plan_signals import (
+    is_structured_prompt as _plan_signals_is_structured_prompt,
+)
 from scripts.agents.claude.discovery import _parse_ts_ms, subagent_transcripts
 from scripts.agents.claude.taxonomy import (
     AUTO_COMPACT_BANNER,
     DENIAL_MARKERS,
     EDIT_TOOL_NAMES,
-    EXCLUDED_EDIT_BASENAMES,
-    EXCLUDED_EDIT_DIR_PARTS,
     MACHINE_PROMPT_OPENERS,
     MACHINE_TURN_ORIGINS,
     RAW_INPUT_TOOLS,
@@ -237,65 +241,6 @@ def _is_system_auto_compaction(d: dict) -> bool:
         if msg.get("compactType") == "auto":
             return True
     return False
-
-
-def basename(path: str) -> str:
-    """Return the final path component for POSIX or Windows separators."""
-    return path.replace("\\", "/").rsplit("/", 1)[-1]
-
-
-def _is_excluded_edit_path(path: str) -> bool:
-    """Outline § coding session: edits to .claude/, .git/, basename
-    CLAUDE.md are excluded from the edit footprint. Cross-platform: normalize
-    Windows backslashes so the same paths are excluded on Windows.
-    """
-    if not path:
-        return False
-    norm = path.replace("\\", "/")
-    if any(part in norm for part in EXCLUDED_EDIT_DIR_PARTS):
-        return True
-    return basename(norm) in EXCLUDED_EDIT_BASENAMES
-
-
-def _count_string_lines(s) -> int:
-    """Newline-count + 1 (so ``"abc"`` is 1 line, ``"abc\\ndef"`` is 2)."""
-    if not isinstance(s, str) or not s:
-        return 0
-    return s.count("\n") + 1
-
-
-def _estimate_edit_line_count(tool_name: str, inp: dict) -> int:
-    """Estimate lines touched by a single Edit/Write/MultiEdit call.
-
-    Per outline § Common definitions:
-      total_lines_edited ≈ sum across Edit/Write/MultiEdit operations of
-        max(line_count(new_string), line_count(old_string))
-      (Write has empty old_string, so this collapses to line_count(new_string)).
-
-    For MultiEdit we sum the per-edit max() over the ``edits`` array.
-    """
-    if not isinstance(inp, dict):
-        return 0
-    if tool_name == "Write":
-        return _count_string_lines(inp.get("content"))
-    if tool_name == "Edit":
-        return max(
-            _count_string_lines(inp.get("new_string")),
-            _count_string_lines(inp.get("old_string")),
-        )
-    if tool_name == "MultiEdit":
-        total = 0
-        edits = inp.get("edits")
-        if isinstance(edits, list):
-            for ed in edits:
-                if not isinstance(ed, dict):
-                    continue
-                total += max(
-                    _count_string_lines(ed.get("new_string")),
-                    _count_string_lines(ed.get("old_string")),
-                )
-        return total
-    return 0
 
 
 def _extract_skill_name(inp: dict) -> str | None:
@@ -638,14 +583,6 @@ def events_from_records(records: list[dict], session_id: str) -> list[Event]:
     """Build ``read_events``' Events from already-parsed JSON-object lines
     (``_parse_records`` / ``parse_transcript_records`` output), in file
     order. Opens no file."""
-    # Late import to avoid a cycle: plan_signals imports Event from us.
-    from scripts.plan_signals import (
-        is_plan_shaped_path as _plan_signals_is_plan_shaped_path,
-    )
-    from scripts.plan_signals import (
-        is_structured_prompt as _plan_signals_is_structured_prompt,
-    )
-
     events: list[Event] = []
     # Usage is attributed once per API message, to the first event of its
     # first line, whatever the block type (thinking / tool_use / text).
@@ -845,8 +782,8 @@ def events_from_records(records: list[dict], session_id: str) -> list[Event]:
                         path = inp.get("file_path") if isinstance(inp, dict) else None
                         if isinstance(path, str) and path:
                             edit_file_path_hash_val = _sha16(path)
-                            is_excluded_edit_path_val = _is_excluded_edit_path(path)
-                            edit_line_count_val = _estimate_edit_line_count(name, inp)
+                            is_excluded_edit_path_val = is_excluded_edit_path(path)
+                            edit_line_count_val = estimate_edit_line_count(name, inp)
                             # Plan-shaped .md write fires the strong signal.
                             if (
                                 path.lower().endswith(".md")
@@ -987,11 +924,6 @@ def read_events_and_text(
     map (the scanner passes it to the detectors which emit counts /
     booleans only).
     """
-    # Late import (cycle).
-    from scripts.plan_signals import (
-        is_structured_prompt as _plan_signals_is_structured_prompt,
-    )
-
     if not include_subagent_usage and subagent_records is not None:
         raise ValueError("subagent_records needs include_subagent_usage=True")
     events = read_events(jsonl_path)
@@ -1042,40 +974,8 @@ def read_events_and_text(
     return events, text_map
 
 
-def load_subagent_panels(jsonl_path: Path) -> dict[str, tuple[str, Path]]:
-    """Return ``{parent_tool_use_id: (description, sub_jsonl_path)}``.
-
-    Subagent transcripts live alongside the parent JSONL at
-    ``<jsonl_path.stem>/subagents/**/agent-<sid>.jsonl`` (see
-    ``discovery.subagent_transcripts``) with a sibling
-    ``agent-<sid>.meta.json`` whose ``toolUseId`` field links back to the
-    parent's ``Agent`` tool_use call.
-
-    Returns an empty dict if the ``subagents/`` directory doesn't exist.
-    Workflow agents carry no ``toolUseId`` and are skipped.
-
-    The caller parses the sub_jsonl_path on demand.
-    """
-    panels: dict[str, tuple[str, Path]] = {}
-    for sub_jsonl in subagent_transcripts(Path(jsonl_path)):
-        meta_path = sub_jsonl.with_name(sub_jsonl.stem + ".meta.json")
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(meta, dict):
-            continue
-        tool_use_id = meta.get("toolUseId")
-        description = meta.get("description") or meta.get("agentType") or "subagent"
-        if not isinstance(tool_use_id, str):
-            continue
-        panels[tool_use_id] = (description, sub_jsonl)
-    return panels
-
-
 __all__ = [
     "MainThreadEvents",
-    "load_subagent_panels",
     "file_usage_events",
     "subagent_usage_events",
     "events_from_records",

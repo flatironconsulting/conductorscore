@@ -66,4 +66,9 @@ def flatten_content(content, sep: str = " ") -> str:
     return ""
 
 
-__all__ = ["approx_token_count", "flatten_content", "sha16"]
+def basename(path: str) -> str:
+    """Return the final path component for POSIX or Windows separators."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+__all__ = ["approx_token_count", "basename", "flatten_content", "sha16"]

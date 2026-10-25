@@ -793,30 +793,6 @@ def afk_intervals(turns: tuple[Turn, ...] | list[Turn]) -> list[tuple[int, int]]
     return out
 
 
-def classify_minutes(
-    events: list[Event], window: tuple[int, int]
-) -> dict[int, MinuteBucket]:
-    """Map each minute in ``window`` to its containing turn's label.
-
-    A minute is HITL if it lies inside a HITL turn, AFK if inside an
-    AFK turn, else IDLE. Used by the legacy session-viewer renderer
-    that draws per-minute chips. The dashboard scorer reads
-    ``TurnAggregates`` directly and does not call this.
-    """
-    start, end_excl = window
-    turns = segment_turns(events)
-    out: dict[int, MinuteBucket] = {}
-    for m in range(start, end_excl):
-        out[m] = MinuteBucket.IDLE
-    for t in turns:
-        bucket = MinuteBucket.HITL if t.label == "HITL" else MinuteBucket.AFK
-        start_m = max(start, t.start_ts_ms // 60_000)
-        end_m = min(end_excl - 1, t.end_ts_ms // 60_000)
-        for m in range(start_m, end_m + 1):
-            out[m] = bucket
-    return out
-
-
 __all__ = [
     "ASK_USER_QUESTION_TOOL",
     "DISPATCH_TOOLS",
@@ -830,7 +806,6 @@ __all__ = [
     "AgentActivity",
     "afk_parallel_subagent_seconds",
     "afk_streaks",
-    "classify_minutes",
     "compute_turn_aggregates",
     "hitl_minute_set",
     "longest_afk_streak_seconds",

@@ -29,6 +29,7 @@ import json
 from pathlib import Path
 
 from scripts.agents.cursor.discovery import cursor_home
+from scripts.core.config_counts import count_lines, count_skill_dirs
 from scripts.output_schema import ConfigCounts
 
 
@@ -72,35 +73,16 @@ def _count_skill_dirs(base: Path) -> int:
     ``.sync-manifest.json``) and must never contribute to the user
     customization signal (CURSOR_FORMAT.md §8 / Decision 9).
     """
-    skills_dir = base / "skills"
-    if not skills_dir.is_dir():
-        return 0
-    count = 0
-    try:
-        for child in skills_dir.iterdir():
-            if child.is_dir() and not child.name.startswith("."):
-                count += 1
-    except OSError:
-        return count
-    return count
+    return count_skill_dirs([base / "skills"])
 
 
 def _has_hooks(base: Path) -> bool:
     return (base / "hooks.json").is_file()
 
 
-def _line_count(path: Path) -> int:
-    if not path.is_file():
-        return 0
-    try:
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError:
-        return 0
-
-
 def _count_instruction_lines(base: Path) -> int:
     """Line count of ``<base>/AGENTS.md`` plus every ``<base>/rules/*.mdc`` file."""
-    total = _line_count(base / "AGENTS.md")
+    total = count_lines(base / "AGENTS.md")
     rules_dir = base / "rules"
     if rules_dir.is_dir():
         try:
@@ -108,7 +90,7 @@ def _count_instruction_lines(base: Path) -> int:
         except OSError:
             mdc_files = []
         for mdc in mdc_files:
-            total += _line_count(mdc)
+            total += count_lines(mdc)
     return total
 
 
