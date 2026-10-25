@@ -121,7 +121,9 @@ def _cache_dir() -> Path:
 def _writable_cache_dir() -> Path:
     """Return a cache dir we can actually write to.
 
-    Prefer `_cache_dir()` (CONDUCTORSCORE_CACHE_DIR / XDG / ~/.cache). Probe it
+    Prefer `_cache_dir()`, i.e. core.paths.cache_dir() (CONDUCTORSCORE_CACHE_DIR /
+    $XDG_CACHE_HOME/conductorscore / ~/.cache/conductorscore; never
+    CLAUDE_PLUGIN_DATA -- see core/paths.py). Probe it
     by creating the dir and writing+unlinking a sentinel. If anything raises
     OSError (read-only FS, permission denied, etc.), fall back to a fresh
     `tempfile.mkdtemp()` dir so a scan never crashes the host session.

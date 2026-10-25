@@ -114,7 +114,15 @@ def enable_daily(provider: str) -> DailyResult:
     )
 
 def _data_dir() -> Path:
-    base = cache_dir()
+    # CONDUCTORSCORE_CACHE_DIR (run.py's resolved dir) wins; then the plugin
+    # runtime's CLAUDE_PLUGIN_DATA (verbatim) -- applied only here, never in the
+    # shared resolver (see scripts/core/paths.py); then the shared XDG/home rule.
+    if os.environ.get("CONDUCTORSCORE_CACHE_DIR"):
+        base = cache_dir()
+    elif d := os.environ.get("CLAUDE_PLUGIN_DATA"):
+        base = Path(d)
+    else:
+        base = cache_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
 

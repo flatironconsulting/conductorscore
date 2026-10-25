@@ -13,10 +13,12 @@ def test_explicit_cache_dir_wins_verbatim(monkeypatch, tmp_path):
     assert cache_dir() == tmp_path / "x"
 
 
-def test_plugin_data_used_verbatim(monkeypatch, tmp_path):
+def test_shared_resolver_ignores_plugin_data(monkeypatch, tmp_path):
+    # Foreground run/scan/consent/viewer must not move to CLAUDE_PLUGIN_DATA;
+    # only daily.py applies that rule (tested below).
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "plug"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
-    assert cache_dir() == tmp_path / "plug"
+    assert cache_dir() == tmp_path / "xdg" / "conductorscore"
 
 
 def test_xdg_cache_home(monkeypatch, tmp_path):
@@ -140,3 +142,29 @@ def test_daily_data_dir_honors_conductorscore_cache_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(pref))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "y"))
     assert daily._data_dir() == pref
+
+
+def test_daily_data_dir_uses_plugin_data_verbatim(monkeypatch, tmp_path):
+    from scripts import daily
+
+    monkeypatch.delenv("CONDUCTORSCORE_CACHE_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "plug"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "y"))
+    assert daily._data_dir() == tmp_path / "plug"
+
+
+def test_daily_data_dir_explicit_beats_plugin_data(monkeypatch, tmp_path):
+    from scripts import daily
+
+    monkeypatch.setenv("CONDUCTORSCORE_CACHE_DIR", str(tmp_path / "shared"))
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "plug"))
+    assert daily._data_dir() == tmp_path / "shared"
+
+
+def test_daily_data_dir_falls_back_to_shared_resolver(monkeypatch, tmp_path):
+    from scripts import daily
+
+    monkeypatch.delenv("CONDUCTORSCORE_CACHE_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "y"))
+    assert daily._data_dir() == tmp_path / "y" / "conductorscore"
