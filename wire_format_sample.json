@@ -135,9 +135,11 @@
       },
       "token_accounting_version": 2,
       "model_skill_invocations": 2,
+      "model_plugin_invocations": 1,
       "model_skill_invocations_by_name": {
         "test-driven-development": 1,
-        "verification-before-completion": 1
+        "verification-before-completion": 1,
+        "superpowers:brainstorming": 1
       },
       "time_accounting": {
         "version": 2,
@@ -213,7 +215,7 @@
         "longest_run_minutes": 25,
         "permission_signal": "available"
       },
-      "digest": "ff73788db29bb5c4"
+      "digest": "94570268fbdef19a"
     },
     {
       "_comment": "Session B: a short HITL-only session — quick docs fix, no AFK leverage, no plan needed (under significant-edit threshold).",

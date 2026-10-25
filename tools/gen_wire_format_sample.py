@@ -139,7 +139,12 @@ SESSIONS = [
         mcp_invocations_by_name={"mcp__github__add_comment": 1},
         plugin_invocations_by_name={"deploy-kit:release": 1, "test-runner:all": 1},
         model_skill_invocations=2,
-        model_skill_invocations_by_name={"test-driven-development": 1, "verification-before-completion": 1},
+        model_plugin_invocations=1,
+        model_skill_invocations_by_name={
+            "test-driven-development": 1,
+            "verification-before-completion": 1,
+            "superpowers:brainstorming": 1,
+        },
         time_accounting=TimeAccounting(
             wall_clock_minutes=135,
             interactive_turns=3,
