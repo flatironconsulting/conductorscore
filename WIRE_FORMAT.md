@@ -885,6 +885,13 @@ render plaintext on both the owner's dashboard and the public profile
 tokens already emitted in `distinct_skills` / counted in
 `user_skill_invocations`.
 
+**Server-side built-in filtering.** The client emits every command name it
+sees, including the agent's own built-ins (`/model`, `/clear`, Codex system
+skills). The server drops those per agent (`web/lib/scorer/builtinCommands.ts`)
+before building the "Top by invocations" table, and — for sessions starting
+2026-10-26 or later — before counting `distinct_skills` /
+`user_skill_invocations` toward Customization. The wire format is unchanged.
+
 ### Per-session additions
 
 | Field                        | Type                | Default | Notes                                                                                                                       |
