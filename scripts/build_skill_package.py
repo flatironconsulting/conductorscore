@@ -26,8 +26,11 @@ import shutil
 import sys
 from pathlib import Path
 
-# Junk that must never leak into a copied skill package.
-IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "tests")
+# Junk that must never leak into a copied skill package (the builder itself is
+# a repo-maintenance tool, not part of the shipped skill).
+IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".venv", "tests", "build_skill_package.py"
+)
 
 
 def write_plugin_manifest(root: Path) -> None:
