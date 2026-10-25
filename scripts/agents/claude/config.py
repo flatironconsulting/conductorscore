@@ -10,9 +10,9 @@ to the pre-refactor ``scripts.config_scanner``.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
+from scripts.core.config_counts import count_lines, count_skill_dirs
 from scripts.output_schema import ConfigCounts
 
 
@@ -77,16 +77,8 @@ def read_installed_plugins(home: Path) -> list[str]:
 
 
 def count_claude_md_lines(path: Path) -> int:
-    """Return the number of lines in a CLAUDE.md file (0 if missing /
-    unreadable). Uses ``read_text().splitlines()`` so trailing newlines
-    are NOT counted as a phantom extra line.
-    """
-    if not path.is_file():
-        return 0
-    try:
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
-    except OSError:
-        return 0
+    """Line count of a CLAUDE.md (0 if missing / unreadable)."""
+    return count_lines(path)
 
 
 def _count_mcp_servers(home: Path) -> int:
@@ -165,27 +157,7 @@ def _count_skill_dirs(home: Path, project_roots: list[str] | None) -> int:
     itself be ``home``, so each skill dir is de-duplicated by its resolved
     real path. Only the count leaves this function — never a name or path.
     """
-    seen_roots: set[str] = set()
-    seen_skills: set[str] = set()
-    for root in _skill_roots(home, project_roots):
-        try:
-            if not root.is_dir():
-                continue
-            real_root = os.path.realpath(root)
-            if real_root in seen_roots:
-                continue
-            seen_roots.add(real_root)
-            children = list(root.iterdir())
-        except OSError:
-            continue
-        for child in children:
-            try:
-                if child.name.startswith(".") or not child.is_dir():
-                    continue
-                seen_skills.add(os.path.realpath(child))
-            except OSError:
-                continue
-    return len(seen_skills)
+    return count_skill_dirs(_skill_roots(home, project_roots))
 
 
 def scan_config(
