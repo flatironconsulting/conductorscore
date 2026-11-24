@@ -26,7 +26,7 @@ def test_parse_agent_selection_single_providers():
 
 
 def test_parse_agent_selection_all_is_canonical_order():
-    assert parse_agent_selection("all") == ["claude", "codex", "cursor"]
+    assert parse_agent_selection("all") == ["claude", "codex", "cursor", "antigravity"]
 
 
 def test_parse_agent_selection_comma_list_preserves_order_dedupes():
@@ -70,7 +70,7 @@ def test_enabled_agents_codex_selects_only_codex():
 
 def test_enabled_agents_all_returns_every_registered_agent():
     agents = enabled_agents(env={"CONDUCTORSCORE_PROVIDERS": "all"})
-    assert [a.agent_id for a in agents] == ["claude", "codex", "cursor"]
+    assert [a.agent_id for a in agents] == ["claude", "codex", "cursor", "antigravity"]
 
 
 def test_enabled_agents_comma_list_selects_both_in_order():

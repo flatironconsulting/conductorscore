@@ -671,6 +671,32 @@ def count_cursor_tools(events) -> ToolCounts:
     )
 
 
+def count_antigravity_tools(events) -> ToolCounts:
+    """Count Antigravity tool usage from a session's normalized ``Event`` stream."""
+    from scripts.agents.antigravity.taxonomy import KNOWN_TOOL_NAMES, TASK_TOOL_NAMES
+
+    def classify(name: str) -> str:
+        if is_mcp_tool_name(name):
+            return "mcp"
+        if name in KNOWN_TOOL_NAMES:
+            return "builtin"
+        return "unknown"
+
+    result = _count_tools_from_events(
+        events,
+        classify=classify,
+        is_dispatch=lambda name: name in TASK_TOOL_NAMES,
+    )
+
+    return ToolCounts(
+        distinct_skills=[],
+        distinct_mcp_tools=result["mcp"],
+        distinct_builtin_tools=result["builtin"],
+        builtin_tool_invocations=result["builtin_invocations"],
+        agent_dispatches=result["agent_dispatches"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # v0.6 — Task 8.1 client: HITL-window MCP counting.
 # ---------------------------------------------------------------------------

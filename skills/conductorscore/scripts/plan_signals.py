@@ -193,11 +193,11 @@ def detect_plan_signals(
     if any(e.tool_name == "EnterPlanMode" for e in tool_events):
         strong.append("EnterPlanMode")
 
-    # 1b. Codex ``update_plan`` tool call — the Codex structured-plan
-    # affordance (steps with statuses). A strong plan signal, the rough
-    # analog of Claude's TodoWrite/EnterPlanMode. The categorical signal
-    # name stays provider-neutral.
-    if any(e.tool_name == "update_plan" for e in tool_events):
+    # 1b. Codex ``update_plan`` / Antigravity ``update_steps`` tool call —
+    # structured-plan affordance (steps with statuses). A strong plan signal,
+    # the rough analog of Claude's TodoWrite/EnterPlanMode. The categorical
+    # signal name stays provider-neutral.
+    if any(e.tool_name in ("update_plan", "update_steps") for e in tool_events):
         strong.append("update_plan")
 
     # 2 & 3. /writing-plans and /brainstorming skill invocations.

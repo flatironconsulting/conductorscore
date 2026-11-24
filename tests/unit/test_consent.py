@@ -88,9 +88,9 @@ def test_detect_launch_provider_windows_backslash_skill_dir():
 
 
 def test_other_providers_is_canonical_order_minus_launch():
-    assert C._other_providers("claude") == ["codex", "cursor"]
-    assert C._other_providers("codex") == ["claude", "cursor"]
-    assert C._other_providers("cursor") == ["claude", "codex"]
+    assert C._other_providers("claude") == ["codex", "cursor", "antigravity"]
+    assert C._other_providers("codex") == ["claude", "cursor", "antigravity"]
+    assert C._other_providers("cursor") == ["claude", "codex", "antigravity"]
 
 
 def test_claude_launch_codex_discovered_no_consent_asks(tmp_path):
@@ -142,7 +142,7 @@ def test_explicit_providers_override_bypasses_preflight(tmp_path):
         "CONDUCTORSCORE_API_BASE": "http://t",
     }
     d = C.decide(env, now_ms=1_000_000_000_000, adapters=adapters)
-    assert d.providers == ["claude", "codex", "cursor"]
+    assert d.providers == ["claude", "codex", "cursor", "antigravity"]
     assert d.permission_needed == ()
     assert d.source == "override"
     # Override must NOT preflight any other provider.
@@ -225,7 +225,7 @@ def test_providers_override_all_selects_all_three_no_permission_needed(tmp_path)
         "CONDUCTORSCORE_API_BASE": "http://t",
     }
     d = C.decide(env, now_ms=1_000_000_000_000, adapters=_adapters(codex_sessions=1, cursor_sessions=1))
-    assert d.providers == ["claude", "codex", "cursor"]
+    assert d.providers == ["claude", "codex", "cursor", "antigravity"]
     assert d.permission_needed == ()
     assert d.source == "override"
 

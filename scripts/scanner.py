@@ -52,6 +52,7 @@ from scripts.time_accounting import (
 from scripts.tool_counter import (
     SessionToolFields,
     ToolCounts,
+    count_antigravity_tools,
     count_codex_tools,
     count_compaction_and_tokens,
     count_cursor_tools,
@@ -618,6 +619,8 @@ def _read_session(
     events, text_map = agent.read_events_and_text(s.jsonl_path)
     if agent.agent_id == "cursor":
         tc = count_cursor_tools(events)
+    elif agent.agent_id == "antigravity":
+        tc = count_antigravity_tools(events)
     else:
         tc = count_codex_tools(events)
     return events, text_map, tc

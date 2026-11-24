@@ -66,12 +66,21 @@ _CURSOR_INSTRUCTION = (
 )
 
 
+_ANTIGRAVITY_INSTRUCTION = (
+    "Antigravity daily scoring can be scheduled via Antigravity's `/schedule` "
+    "or your OS scheduler running `/conductorscore` once per day. The "
+    "ConductorScore skill throttles itself, so a daily trigger is safe."
+)
+
+
 def enable_daily(provider: str) -> DailyResult:
     """Enable once-per-day scoring for ``provider``. Never raises."""
     if provider == "codex":
         return DailyResult(kind="codex_automation", instruction=_CODEX_INSTRUCTION)
     if provider == "cursor":
         return DailyResult(kind="cursor_automation", instruction=_CURSOR_INSTRUCTION)
+    if provider == "antigravity":
+        return DailyResult(kind="antigravity_automation", instruction=_ANTIGRAVITY_INSTRUCTION)
 
     # Claude (and any settings.json-based provider): merge a SessionStart hook.
     run_py = _run_py_path()

@@ -52,8 +52,8 @@ prose), then re-run `run.py` with the matching flag:
   `run.py --step` with NO new flag — it resumes the login and continues. On
   Cancel, stop.
 - `providers` → re-run `run.py --step` with `--providers=all` (All),
-  `--providers=claude` (Claude Code), `--providers=codex` (Codex), or
-  `--providers=cursor` (Cursor). On Cancel, stop.
+  `--providers=claude` (Claude Code), `--providers=codex` (Codex),
+  `--providers=cursor` (Cursor), or `--providers=antigravity` (Antigravity). On Cancel, stop.
 - `update` → asked BEFORE any scanning, when a newer ConductorScore is
   published. Present EXACTLY the two printed choices, **Update now** and
   **Not now**. On **Not now**, re-run `run.py --step --skip-update` (it scans

@@ -36,7 +36,7 @@ CONSENT_SCHEMA_VERSION = 1
 
 # Canonical adapter order — the provider list is always emitted sorted/canonical
 # so the cache key and providers_seen are stable.
-_CANONICAL_ORDER: list[AgentId] = ["claude", "codex", "cursor"]
+_CANONICAL_ORDER: list[AgentId] = ["claude", "codex", "cursor", "antigravity"]
 
 # Human-readable labels for provider ids, shared by run.py/scan.py so the
 # cross-provider prompts (TTY picker, ASK line, permission-needed wording)
@@ -46,6 +46,7 @@ PROVIDER_LABELS: dict[AgentId, str] = {
     "claude": "Claude Code",
     "codex": "Codex",
     "cursor": "Cursor",
+    "antigravity": "Antigravity",
 }
 
 
@@ -92,6 +93,8 @@ def detect_launch_provider(env: Mapping[str, str] = os.environ) -> AgentId:
         return "codex"
     if "/.cursor/" in skill_dir or skill_dir.endswith("/.cursor"):
         return "cursor"
+    if "/.gemini/" in skill_dir or skill_dir.endswith("/.gemini") or "/.agents/" in skill_dir or skill_dir.endswith("/.agents"):
+        return "antigravity"
     return "claude"
 
 
