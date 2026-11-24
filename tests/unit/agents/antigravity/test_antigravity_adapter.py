@@ -34,7 +34,7 @@ def test_registry_and_consent_include_antigravity():
     assert adapters[0].agent_id == "antigravity"
     assert PROVIDER_LABELS["antigravity"] == "Antigravity"
     assert detect_launch_provider({"CONDUCTORSCORE_LAUNCH_PROVIDER": "antigravity"}) == "antigravity"
-    assert detect_launch_provider({"CONDUCTORSCORE_SKILL_DIR": r"C:\Users\u\.agents\skills\conductorscore"}) == "antigravity"
+    assert detect_launch_provider({"CONDUCTORSCORE_SKILL_DIR": r"C:\Users\u\.agents\skills\conductorscore"}) == "claude"
     assert detect_launch_provider({"CONDUCTORSCORE_SKILL_DIR": "/home/u/.gemini/config/skills/conductorscore"}) == "antigravity"
     assert enable_daily("antigravity").kind == "antigravity_automation"
     assert _parse_args(["--step", "--providers=antigravity"]).providers == "antigravity"
@@ -115,11 +115,15 @@ def test_events_gemini_models_tokens_and_tools(tmp_path):
     assert heads[0].model == "gemini-3.8-flash-high"
     assert is_gemini_model(heads[0].model)
     assert heads[0].input_tokens == 1200
+    assert heads[0].cache_creation_input_tokens == 1200
     assert heads[0].output_tokens == 350
     assert heads[0].cache_input_tokens == 800
+    assert heads[0].stop_reason == "tool_use"
 
     tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
     assert len(tools) == 5
+    tool_results = [e for e in events if e.kind == EventKind.TOOL_RESULT]
+    assert {t.tool_use_id for t in tools if t.tool_use_id} & {r.tool_use_id for r in tool_results if r.tool_use_id}
     edit_ev = next(e for e in tools if e.tool_name == "edit_file")
     assert edit_ev.edit_line_count == 4
     assert edit_ev.edit_file_path_hash is not None
@@ -144,3 +148,45 @@ def test_config_scan_counts_skills_mcps_and_instructions(tmp_path):
     assert counts.mcp_servers == 2
     assert counts.custom_commands == 2
     assert counts.global_agents_md_lines == 3
+
+
+def test_antigravity_ide_tools_and_home_discovery(tmp_path, monkeypatch):
+    from scripts.agents.antigravity.discovery import antigravity_homes, find_sessions
+
+    monkeypatch.delenv("CONDUCTORSCORE_ANTIGRAVITY_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    ide_home = tmp_path / ".gemini" / "antigravity-ide"
+    logs_dir = ide_home / "brain" / "sess-ide-1" / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    rows = [
+        {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-24T10:00:00Z", "content": "hi"},
+        {"step_index": 1, "type": "VIEW_FILE", "source": "MODEL", "created_at": "2026-11-24T10:00:05Z"},
+        {
+            "step_index": 2,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": "2026-11-24T10:01:00Z",
+            "tool_calls": [
+                {"name": "task_boundary", "args": {"TaskName": "Plan"}},
+                {"name": "replace_file_content", "args": {"TargetFile": "/repo/a.py", "ReplacementContent": "a\nb\nc"}},
+                {"name": "multi_replace_file_content", "args": {"TargetFile": "/repo/b.py", "ReplacementChunks": [{"ReplacementContent": "x\ny"}]}},
+                {"name": "write_to_file", "args": {"TargetFile": "/repo/c.py", "CodeContent": "1\n2\n3\n4"}},
+            ],
+        },
+        {"step_index": 3, "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": "2026-11-24T10:02:00Z", "content": "done"},
+    ]
+    p = logs_dir / "transcript.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    homes = antigravity_homes()
+    assert ide_home in homes
+    assert len(find_sessions()) == 1
+
+    events, _ = read_events_and_text(p)
+    heads = [e for e in events if e.kind == EventKind.ASSISTANT_TEXT]
+    assert len(heads) == 2
+    assert heads[0].stop_reason == "tool_use"
+    assert heads[1].stop_reason == "end_turn"
+    tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
+    assert [t.edit_line_count for t in tools if t.edit_line_count] == [3, 2, 4]

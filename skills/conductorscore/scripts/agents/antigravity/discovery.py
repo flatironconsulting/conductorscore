@@ -19,17 +19,40 @@ from scripts.core.timestamps import parse_iso_ts_ms
 
 
 def antigravity_home() -> Path:
-    """Return the Antigravity home directory.
+    """Return the primary Antigravity home directory.
 
     Override with ``CONDUCTORSCORE_ANTIGRAVITY_HOME`` (mirrors
     ``CONDUCTORSCORE_CLAUDE_HOME`` and ``CONDUCTORSCORE_CODEX_HOME``).
     """
-    return Path(
-        os.environ.get(
-            "CONDUCTORSCORE_ANTIGRAVITY_HOME",
-            str(Path.home() / ".gemini" / "antigravity"),
-        )
-    )
+    override = os.environ.get("CONDUCTORSCORE_ANTIGRAVITY_HOME")
+    if override:
+        return Path(override)
+    primary = Path.home() / ".gemini" / "antigravity"
+    if is_dir_safe(primary):
+        return primary
+    ide_alt = Path.home() / ".gemini" / "antigravity-ide"
+    if is_dir_safe(ide_alt):
+        return ide_alt
+    return primary
+
+
+def antigravity_homes() -> list[Path]:
+    """Return all Antigravity home directories to scan.
+
+    When ``CONDUCTORSCORE_ANTIGRAVITY_HOME`` is set, scans ONLY that directory.
+    Otherwise probes both ``~/.gemini/antigravity`` and ``~/.gemini/antigravity-ide``.
+    """
+    override = os.environ.get("CONDUCTORSCORE_ANTIGRAVITY_HOME")
+    if override:
+        return [Path(override)]
+    homes: list[Path] = []
+    for candidate in (
+        Path.home() / ".gemini" / "antigravity",
+        Path.home() / ".gemini" / "antigravity-ide",
+    ):
+        if is_dir_safe(candidate):
+            homes.append(candidate)
+    return homes or [Path.home() / ".gemini" / "antigravity"]
 
 
 def _transcript_files(brain_dir: Path) -> list[Path]:
@@ -88,37 +111,39 @@ def _last_ts_only(jsonl_path: Path) -> int | None:
 
 
 def find_sessions() -> list[SessionMeta]:
-    """Discover Antigravity sessions under ``antigravity_home()/brain/``."""
-    home = antigravity_home()
-    brain_dir = home / "brain"
+    """Discover Antigravity sessions under ``antigravity_homes()``."""
     sessions: list[SessionMeta] = []
-    for jsonl in _transcript_files(brain_dir):
-        bounds = _first_and_last_ts_ms(jsonl)
-        if bounds is None:
-            continue
-        first_ts, last_ts = bounds
-        # Path is <brain>/<session_id>/.system_generated/logs/transcript.jsonl
-        session_id = jsonl.parent.parent.parent.name
-        sessions.append(
-            SessionMeta(
-                session_id=session_id,
-                project_root="",
-                first_ts_ms=first_ts,
-                last_ts_ms=last_ts,
-                jsonl_path=jsonl,
+    for home in antigravity_homes():
+        brain_dir = home / "brain"
+        for jsonl in _transcript_files(brain_dir):
+            bounds = _first_and_last_ts_ms(jsonl)
+            if bounds is None:
+                continue
+            first_ts, last_ts = bounds
+            # Path is <brain>/<session_id>/.system_generated/logs/transcript.jsonl
+            session_id = jsonl.parent.parent.parent.name
+            sessions.append(
+                SessionMeta(
+                    session_id=session_id,
+                    project_root="",
+                    first_ts_ms=first_ts,
+                    last_ts_ms=last_ts,
+                    jsonl_path=jsonl,
+                )
             )
-        )
     return sessions
 
 
 def preflight(now_ms: int, window_ms: int) -> dict:
     """Metadata-only probe of Antigravity home for cross-provider consent."""
-    home = antigravity_home()
-    brain_dir = home / "brain"
+    homes = antigravity_homes()
+    home = homes[0]
 
     def _last_ts_iter():
-        for jsonl in _transcript_files(brain_dir):
-            yield _last_ts_only(jsonl)
+        for h in homes:
+            brain_dir = h / "brain"
+            for jsonl in _transcript_files(brain_dir):
+                yield _last_ts_only(jsonl)
 
     return preflight_from(
         home=home,

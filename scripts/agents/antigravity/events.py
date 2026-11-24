@@ -56,7 +56,8 @@ def read_events_and_text(
     session_id = jsonl_path.parent.parent.parent.name
     events: list[Event] = []
     text_map: dict[int, str] = {}
-    pending_tool_result = False
+    pending_tool_ids: list[str] = []
+    tool_seq = 0
 
     for raw in raw_lines:
         line = raw.strip()
@@ -79,7 +80,7 @@ def read_events_and_text(
         is_error = status == "ERROR"
 
         if step_type == "USER_INPUT" and source == "USER_EXPLICIT":
-            pending_tool_result = False
+            pending_tool_ids.clear()
             content = d.get("content")
             text = content if isinstance(content, str) else ""
             approx_tokens = _approx_token_count(text)
@@ -96,20 +97,22 @@ def read_events_and_text(
             text_map[id(ev)] = text
             continue
 
-        if step_type == "GENERIC" and source == "MODEL" and pending_tool_result:
-            events.append(
-                Event(
-                    kind=EventKind.TOOL_RESULT,
-                    session_id=session_id,
-                    timestamp_ms=ts_ms,
-                    is_error=is_error,
+        if step_type == "GENERIC" and source == "MODEL" and pending_tool_ids:
+            for tid in pending_tool_ids:
+                events.append(
+                    Event(
+                        kind=EventKind.TOOL_RESULT,
+                        session_id=session_id,
+                        timestamp_ms=ts_ms,
+                        tool_use_id=tid,
+                        is_error=is_error,
+                    )
                 )
-            )
-            pending_tool_result = False
+            pending_tool_ids.clear()
             continue
 
-        if step_type == "PLANNER_RESPONSE" or source == "MODEL":
-            pending_tool_result = False
+        if step_type == "PLANNER_RESPONSE":
+            pending_tool_ids.clear()
             model_raw = d.get("model")
             model = model_raw.strip() if isinstance(model_raw, str) and model_raw.strip() else None
             in_tok = _safe_int(d.get("input_tokens"))
@@ -117,6 +120,7 @@ def read_events_and_text(
             cache_tok = _safe_int(d.get("cache_read_tokens"))
             tool_calls = d.get("tool_calls")
             tc_list = tool_calls if isinstance(tool_calls, list) else []
+            turn_stop = "tool_use" if tc_list else "end_turn"
 
             # Emit one message-head ASSISTANT_TEXT event carrying the step's
             # token usage and Gemini model identifier.
@@ -127,9 +131,11 @@ def read_events_and_text(
                     timestamp_ms=ts_ms,
                     model=model,
                     input_tokens=in_tok,
+                    cache_creation_input_tokens=in_tok,
                     output_tokens=out_tok,
                     cache_input_tokens=cache_tok,
                     is_message_head=True,
+                    stop_reason=turn_stop,
                     is_error=is_error,
                 )
             )
@@ -164,12 +170,17 @@ def read_events_and_text(
                 else:
                     todo_count = extract_todo_count(tname, args)
 
+                tool_seq += 1
+                tid = f"ag_{tool_seq}"
+                pending_tool_ids.append(tid)
                 events.append(
                     Event(
                         kind=EventKind.ASSISTANT_TOOL,
                         session_id=session_id,
                         timestamp_ms=ts_ms,
                         tool_name=tname,
+                        tool_use_id=tid,
+                        stop_reason="tool_use",
                         model=model,
                         is_error=is_error,
                         raw_input={"command": shell_cmd} if shell_cmd else None,
@@ -181,7 +192,6 @@ def read_events_and_text(
                         todo_count=todo_count,
                     )
                 )
-                pending_tool_result = True
 
     return mark_scheduled_repeats(events, text_map)
 

@@ -10,9 +10,17 @@ from scripts.core.edits import is_excluded_edit_path
 from scripts.plan_signals import is_plan_shaped_path
 
 SHELL_TOOL_NAMES: frozenset[str] = frozenset({"run_command"})
-EDIT_TOOL_NAMES: frozenset[str] = frozenset({"edit_file", "write_file"})
+EDIT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "edit_file",
+        "write_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_to_file",
+    }
+)
 READ_TOOL_NAMES: frozenset[str] = frozenset({"read_file", "view_file"})
-PLAN_TOOL_NAMES: frozenset[str] = frozenset({"update_steps", "update_focus"})
+PLAN_TOOL_NAMES: frozenset[str] = frozenset({"update_steps", "update_focus", "task_boundary"})
 TASK_TOOL_NAMES: frozenset[str] = frozenset({"invoke_subagent", "swarm"})
 
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
@@ -22,8 +30,12 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "view_file",
         "edit_file",
         "write_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_to_file",
         "update_steps",
         "update_focus",
+        "task_boundary",
         "invoke_subagent",
         "swarm",
         "manage_subagents",
@@ -94,12 +106,25 @@ def extract_edit_info(tool_name: str, args: object) -> tuple[str | None, int, bo
         return None, 0, False, False
     path = path.strip()
 
-    if tool_name == "write_file":
-        content = args.get("Content") or ""
+    if tool_name in ("write_file", "write_to_file"):
+        content = args.get("Content") or args.get("CodeContent") or ""
         line_count = len(content.splitlines()) if isinstance(content, str) else 0
+    elif tool_name == "multi_replace_file_content":
+        chunks = args.get("ReplacementChunks")
+        line_count = 0
+        if isinstance(chunks, list):
+            for ch in chunks:
+                if not isinstance(ch, dict):
+                    continue
+                rc = ch.get("ReplacementContent") or ""
+                tc = ch.get("TargetContent") or ""
+                line_count += max(
+                    len(rc.splitlines()) if isinstance(rc, str) else 0,
+                    len(tc.splitlines()) if isinstance(tc, str) else 0,
+                )
     else:
-        repl = args.get("Replacement") or ""
-        target = args.get("Target") or ""
+        repl = args.get("Replacement") or args.get("ReplacementContent") or ""
+        target = args.get("Target") or args.get("TargetContent") or ""
         repl_lines = len(repl.splitlines()) if isinstance(repl, str) else 0
         target_lines = len(target.splitlines()) if isinstance(target, str) else 0
         line_count = max(repl_lines, target_lines)

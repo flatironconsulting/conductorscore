@@ -41,7 +41,19 @@ from scripts.events import Event, EventKind
 # a confirmed divergence (task-2 audit); using the narrower shared set here
 # would silently drop all Codex edit counting.
 EDIT_TOOLS: frozenset[str] = frozenset(
-    {"Edit", "Write", "MultiEdit", "apply_patch", "StrReplace", "Delete", "edit_file", "write_file"}
+    {
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "apply_patch",
+        "StrReplace",
+        "Delete",
+        "edit_file",
+        "write_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_to_file",
+    }
 )
 
 

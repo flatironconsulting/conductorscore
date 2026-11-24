@@ -36,7 +36,18 @@ SHELL_TOOL_NAMES: frozenset[str] = frozenset(
 # Cursor's canonical ``StrReplace``/``Delete`` (Cursor's ``Write`` is shared
 # with Claude's name) and Antigravity's ``edit_file``/``write_file``.
 EDIT_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Edit", "Write", "MultiEdit", "StrReplace", "Delete", "edit_file", "write_file"}
+    {
+        "Edit",
+        "Write",
+        "MultiEdit",
+        "StrReplace",
+        "Delete",
+        "edit_file",
+        "write_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_to_file",
+    }
 )
 
 # Splits a shell command line into top-level segments on ``&&``, ``||``,

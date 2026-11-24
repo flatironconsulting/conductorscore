@@ -93,7 +93,7 @@ def detect_launch_provider(env: Mapping[str, str] = os.environ) -> AgentId:
         return "codex"
     if "/.cursor/" in skill_dir or skill_dir.endswith("/.cursor"):
         return "cursor"
-    if "/.gemini/" in skill_dir or skill_dir.endswith("/.gemini") or "/.agents/" in skill_dir or skill_dir.endswith("/.agents"):
+    if "/.gemini/" in skill_dir or skill_dir.endswith("/.gemini"):
         return "antigravity"
     return "claude"
 
