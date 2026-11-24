@@ -21,7 +21,7 @@ Per Claude Code, Codex, Cursor, or Google Antigravity session in the last 30 day
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
 - a **boolean** — including a small number of provider-specific flags, e.g. `token_data_missing` (Cursor-only in practice: set when the device couldn't read a session's token usage, so the server excludes it from cost/efficiency denominators instead of treating it as zero-cost), or
-- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, model IDs like `claude-opus-4-7` / `gpt-5-codex` / `composer-2.5` / `gemini-4-hydrogen-medium`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), a closed `provider` enum (`claude` / `codex` / `cursor` / `antigravity`), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, model IDs like `claude-opus-4-7` / `gpt-5-codex` / `composer-2.5` (and `gemini-*` when logged), slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), a closed `provider` enum (`claude` / `codex` / `cursor` / `antigravity`), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
 
 ## What is never uploaded
 

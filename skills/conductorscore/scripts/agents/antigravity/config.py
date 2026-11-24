@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.agents.antigravity.discovery import antigravity_home
+from scripts.agents.antigravity.discovery import antigravity_home, antigravity_homes
 from scripts.core.config_counts import count_lines, count_skill_dirs
 from scripts.output_schema import ConfigCounts
 
@@ -52,12 +52,22 @@ def _count_instruction_lines(base: Path) -> int:
 
 
 def scan_config(home: Path | None = None) -> ConfigCounts:
-    """Scan Antigravity home for customization counts. Never raises."""
-    base = home if home is not None else antigravity_home()
+    """Scan Antigravity home(s) for customization counts. Never raises."""
+    homes = [home] if home is not None else antigravity_homes()
+    mcp_servers = sum(_count_mcp_servers(h) for h in homes)
+    skill_roots = [h / "skills" for h in homes]
+    gemini_dirs = list({h.parent for h in homes})
+    for gd in gemini_dirs:
+        skill_roots.append(gd / "config" / "skills")
+    custom_commands = count_skill_dirs(skill_roots)
+    instr_lines = sum(count_lines(gd / "GEMINI.md") for gd in gemini_dirs)
+    instr_lines += sum(
+        count_lines(h / "GEMINI.md") + count_lines(h / "AGENTS.md") for h in homes
+    )
     return ConfigCounts(
-        mcp_servers=_count_mcp_servers(base),
-        custom_commands=_count_skills(base),
-        global_agents_md_lines=_count_instruction_lines(base),
+        mcp_servers=mcp_servers,
+        custom_commands=custom_commands,
+        global_agents_md_lines=instr_lines,
     )
 
 

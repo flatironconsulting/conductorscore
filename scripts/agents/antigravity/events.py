@@ -97,18 +97,17 @@ def read_events_and_text(
             text_map[id(ev)] = text
             continue
 
-        if step_type == "GENERIC" and source == "MODEL" and pending_tool_ids:
-            for tid in pending_tool_ids:
-                events.append(
-                    Event(
-                        kind=EventKind.TOOL_RESULT,
-                        session_id=session_id,
-                        timestamp_ms=ts_ms,
-                        tool_use_id=tid,
-                        is_error=is_error,
-                    )
+        if step_type not in ("USER_INPUT", "PLANNER_RESPONSE") and pending_tool_ids:
+            tid = pending_tool_ids.pop(0)
+            events.append(
+                Event(
+                    kind=EventKind.TOOL_RESULT,
+                    session_id=session_id,
+                    timestamp_ms=ts_ms,
+                    tool_use_id=tid,
+                    is_error=(is_error or step_type == "ERROR_MESSAGE"),
                 )
-            pending_tool_ids.clear()
+            )
             continue
 
         if step_type == "PLANNER_RESPONSE":
@@ -123,7 +122,7 @@ def read_events_and_text(
             turn_stop = "tool_use" if tc_list else "end_turn"
 
             # Emit one message-head ASSISTANT_TEXT event carrying the step's
-            # token usage and Gemini model identifier.
+            # token usage and model identifier (if present).
             events.append(
                 Event(
                     kind=EventKind.ASSISTANT_TEXT,
@@ -131,7 +130,7 @@ def read_events_and_text(
                     timestamp_ms=ts_ms,
                     model=model,
                     input_tokens=in_tok,
-                    cache_creation_input_tokens=in_tok,
+                    cache_creation_input_tokens=max(0, in_tok - cache_tok),
                     output_tokens=out_tok,
                     cache_input_tokens=cache_tok,
                     is_message_head=True,

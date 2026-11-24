@@ -17,7 +17,7 @@ Transcripts are discovered at:
 <home>/brain/<session_id>/.system_generated/logs/transcript.jsonl
 ```
 
-For fast `preflight()` checks, `_last_ts_only()` tail-reads the last 64 KiB of `transcript.jsonl` for the latest valid `created_at` / `timestamp` ISO-8601 timestamp.
+Sessions are deduplicated by `session_id` across homes. `project_root` is extracted from the first observed `run_command` `Cwd` (or `cwd`) argument and hashed as `antigravity:<cwd>` into `project_hash` (never serialized raw). For `preflight()`, `_last_ts_only()` tail-reads the last 64 KiB of `transcript.jsonl` (falling back to a full read only if no timestamp is found in the tail).
 
 ---
 
@@ -28,20 +28,20 @@ Each line is a JSON object with:
 | Field | Type | Notes |
 |---|---|---|
 | `step_index` | int | Monotonic step index |
-| `type` | string | `"USER_INPUT"`, `"PLANNER_RESPONSE"`, `"GENERIC"`, or tool/step rows |
+| `type` | string | `"USER_INPUT"`, `"PLANNER_RESPONSE"`, `"GENERIC"`, `"ERROR_MESSAGE"`, or tool-step rows (`VIEW_FILE`, `RUN_COMMAND`, `CODE_ACTION`, etc.) |
 | `source` | string | `"USER_EXPLICIT"` (human prompt), `"MODEL"`, or non-explicit/automated sources |
 | `status` | string | `"DONE"`, `"ERROR"`, etc. |
 | `created_at` / `timestamp` | string | ISO-8601 timestamp |
 | `content` | string | User prompt text or assistant response text (never uploaded; hashed locally) |
-| `model` | string (optional) | Present on builds/sessions that log model IDs (e.g. `gemini-4-hydrogen-medium`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`). Omitted on some IDE builds. |
-| `input_tokens`, `output_tokens`, `cache_read_tokens` | int (optional) | Token usage counters when logged by the build. |
+| `model` | string (optional) | Model identifier when logged by the build; absent on IDE builds that omit per-step model metadata. |
+| `input_tokens`, `output_tokens`, `cache_read_tokens` | int (optional) | Token usage counters when logged; absent on IDE builds that omit per-step token metadata. |
 | `tool_calls` | list[dict] (optional) | Tool invocations `{name, args}` inside `PLANNER_RESPONSE` rows. |
 
 ### Event Mapping (`events.py`)
 
 - `type == "USER_INPUT"` -> `EventKind.USER`, with `is_scripted_prompt=(source != "USER_EXPLICIT")`.
-- `type == "PLANNER_RESPONSE"` -> `EventKind.ASSISTANT_TEXT` (`is_message_head=True`), `cache_creation_input_tokens=input_tokens`, and `stop_reason="tool_use"` when `tool_calls` is non-empty (else `"end_turn"`).
-- Each tool call in `tool_calls` emits `EventKind.ASSISTANT_TOOL` with a sequential `tool_use_id` (`ag_<seq>`), paired with `EventKind.TOOL_RESULT` on subsequent `type == "GENERIC"` (`source == "MODEL"`) rows or flushed at the next `PLANNER_RESPONSE`.
+- `type == "PLANNER_RESPONSE"` -> `EventKind.ASSISTANT_TEXT` (`is_message_head=True`), `cache_creation_input_tokens=max(0, input_tokens - cache_read_tokens)`, and `stop_reason="tool_use"` when `tool_calls` is non-empty (else `"end_turn"`).
+- Each tool call in `tool_calls` emits `EventKind.ASSISTANT_TOOL` with a sequential `tool_use_id` (`ag_<seq>`). The next non-`USER_INPUT`, non-`PLANNER_RESPONSE` row pairs 1-to-1 with the oldest pending `tool_use_id` as `EventKind.TOOL_RESULT` (`is_error=True` on `status == "ERROR"` or `type == "ERROR_MESSAGE"`). Any still-unpaired `pending_tool_ids` are cleared when the next `PLANNER_RESPONSE` or `USER_INPUT` arrives.
 
 ---
 
@@ -50,9 +50,10 @@ Each line is a JSON object with:
 Both Antigravity agent and Antigravity IDE tool vocabularies are supported:
 
 - **Edit tools**: `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`
-  - Path keys: `Path`, `TargetFile`, `file_path`, `path` (hashed via SHA-256 prefix; never serialized in plaintext)
-  - Line-count keys: `Content`, `CodeContent`, `Replacement`, `ReplacementContent`, `ReplacementChunks[].ReplacementContent`
-- **Plan tools**: `update_steps`, `task_boundary`
+  - Path keys: `Path`, `TargetFile`, `path` (hashed via SHA-256 prefix; never serialized in plaintext)
+  - Read path keys: `Path`, `AbsolutePath`, `path`
+  - Line-count keys: `Content`, `CodeContent`, `Target`, `TargetContent`, `Replacement`, `ReplacementContent`, `ReplacementChunks[].ReplacementContent`, `ReplacementChunks[].TargetContent`
+- **Plan signals**: `update_steps`, `task_boundary`, `update_focus`, plus reads/writes of `implementation_plan.md`, `task.md`, or plan-shaped `.md` files
 - **Shell tool**: `run_command` (registered in `scripts/core/shell.py` and `scripts/approval_counter.py` for commit, revert, and approval detection)
 - **Dispatch tools**: `invoke_subagent`, `swarm`
 - **MCP tools**: `mcp__<server>__<tool>`
@@ -61,8 +62,8 @@ Both Antigravity agent and Antigravity IDE tool vocabularies are supported:
 
 ## 4. Config Scanning (`config.py`)
 
-From `<home>` and `~/.gemini/`:
+Across `<home>` (`~/.gemini/antigravity` / `~/.gemini/antigravity-ide`) and `~/.gemini/`:
 
 - **MCP servers**: `<home>/mcp_config.json` (`mcpServers` keys)
-- **Instructions**: `~/.gemini/GEMINI.md` line count
-- **Skills**: `<home>/skills/*` and `~/.gemini/config/skills/*`
+- **Instructions**: `~/.gemini/GEMINI.md`, `<home>/GEMINI.md`, and `<home>/AGENTS.md` line counts
+- **Skills**: `<home>/skills/*` and `~/.gemini/config/skills/*` (excluding shared `~/.agents/skills`)

@@ -130,7 +130,10 @@ def extract_edit_info(tool_name: str, args: object) -> tuple[str | None, int, bo
         line_count = max(repl_lines, target_lines)
 
     excluded = is_excluded_edit_path(path)
-    is_plan_md = is_plan_shaped_path(path) and path.lower().endswith(".md")
+    base_name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    is_plan_md = (
+        is_plan_shaped_path(path) or base_name in ("implementation_plan.md", "task.md")
+    ) and path.lower().endswith(".md")
     return path, line_count, excluded, is_plan_md
 
 
@@ -142,7 +145,10 @@ def extract_read_is_plan_md(args: object) -> bool:
     if not isinstance(path, str) or not path.strip():
         return False
     p = path.strip()
-    return is_plan_shaped_path(p) and p.lower().endswith(".md")
+    base_name = p.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return (
+        is_plan_shaped_path(p) or base_name in ("implementation_plan.md", "task.md")
+    ) and p.lower().endswith(".md")
 
 
 def extract_todo_count(tool_name: str, args: object) -> int:

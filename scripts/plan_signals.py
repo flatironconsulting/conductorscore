@@ -194,13 +194,11 @@ def detect_plan_signals(
         strong.append("EnterPlanMode")
 
     # 1b. Codex ``update_plan`` / Antigravity plan tools (``update_steps``,
-    # ``task_boundary``) — structured-plan affordance. A strong plan signal,
-    # the rough analog of Claude's TodoWrite/EnterPlanMode. The categorical
-    # signal name stays provider-neutral.
-    from scripts.agents.antigravity.taxonomy import PLAN_TOOL_NAMES as ANTIGRAVITY_PLAN_TOOL_NAMES
-
+    # ``task_boundary``, ``update_focus``) — structured-plan affordance. A
+    # strong plan signal, the rough analog of Claude's TodoWrite/EnterPlanMode.
+    # The categorical signal name stays provider-neutral.
     if any(
-        e.tool_name == "update_plan" or e.tool_name in ANTIGRAVITY_PLAN_TOOL_NAMES
+        e.tool_name in ("update_plan", "update_steps", "task_boundary", "update_focus")
         for e in tool_events
     ):
         strong.append("update_plan")

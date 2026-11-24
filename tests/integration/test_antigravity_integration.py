@@ -69,7 +69,7 @@ def test_antigravity_extract_and_no_secret_leak(tmp_path, monkeypatch):
     assert s.total_input_tokens == 2500
     assert s.total_output_tokens == 600
     assert s.cache_input_tokens == 1500
-    assert s.tokens_by_model["gemini-4-hydrogen-medium"]["input_miss"] == 2500
+    assert s.tokens_by_model["gemini-4-hydrogen-medium"]["input_miss"] == 1000
     assert s.is_planned is True
     assert s.files_modified == 1
     assert s.total_lines_edited == 3

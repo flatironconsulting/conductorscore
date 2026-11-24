@@ -82,26 +82,51 @@ def _row_ts_ms(line: str) -> int | None:
     return parse_iso_ts_ms(d.get("created_at") or d.get("timestamp"))
 
 
-def _first_and_last_ts_ms(jsonl_path: Path) -> tuple[int, int] | None:
-    """Read first and last valid timestamps from ``transcript.jsonl``."""
+def _scan_session_meta(jsonl_path: Path) -> tuple[int, int, str] | None:
+    """Read first timestamp, last timestamp, and first observed project cwd from ``transcript.jsonl``."""
     try:
         text = jsonl_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     first_ts: int | None = None
     last_ts: int | None = None
+    project_root = ""
     for raw in text.splitlines():
-        if not raw.strip():
+        line = raw.strip()
+        if not line:
             continue
-        ts = _row_ts_ms(raw)
-        if ts is None:
+        try:
+            d = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
             continue
-        if first_ts is None:
-            first_ts = ts
-        last_ts = ts
+        if not isinstance(d, dict):
+            continue
+        ts = parse_iso_ts_ms(d.get("created_at") or d.get("timestamp"))
+        if ts is not None:
+            if first_ts is None:
+                first_ts = ts
+            last_ts = ts
+        if not project_root:
+            tcs = d.get("tool_calls")
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    args = tc.get("args")
+                    if isinstance(args, dict):
+                        cwd = args.get("Cwd") or args.get("cwd")
+                        if isinstance(cwd, str) and cwd.strip():
+                            project_root = cwd.strip()
+                            break
     if first_ts is None or last_ts is None:
         return None
-    return first_ts, last_ts
+    return first_ts, last_ts, project_root
+
+
+def _first_and_last_ts_ms(jsonl_path: Path) -> tuple[int, int] | None:
+    """Read first and last valid timestamps from ``transcript.jsonl``."""
+    meta = _scan_session_meta(jsonl_path)
+    return (meta[0], meta[1]) if meta is not None else None
 
 
 def _last_ts_only(jsonl_path: Path) -> int | None:
@@ -125,21 +150,25 @@ def _last_ts_only(jsonl_path: Path) -> int | None:
 
 
 def find_sessions() -> list[SessionMeta]:
-    """Discover Antigravity sessions under ``antigravity_homes()``."""
+    """Discover deduplicated Antigravity sessions under ``antigravity_homes()``."""
     sessions: list[SessionMeta] = []
+    seen_ids: set[str] = set()
     for home in antigravity_homes():
         brain_dir = home / "brain"
         for jsonl in _transcript_files(brain_dir):
-            bounds = _first_and_last_ts_ms(jsonl)
-            if bounds is None:
-                continue
-            first_ts, last_ts = bounds
             # Path is <brain>/<session_id>/.system_generated/logs/transcript.jsonl
             session_id = jsonl.parent.parent.parent.name
+            if session_id in seen_ids:
+                continue
+            meta = _scan_session_meta(jsonl)
+            if meta is None:
+                continue
+            first_ts, last_ts, project_root = meta
+            seen_ids.add(session_id)
             sessions.append(
                 SessionMeta(
                     session_id=session_id,
-                    project_root="",
+                    project_root=project_root,
                     first_ts_ms=first_ts,
                     last_ts_ms=last_ts,
                     jsonl_path=jsonl,

@@ -956,8 +956,8 @@ tests are unaffected.
 `provider` and `providers_seen` are closed-set categorical labels
 (`"claude"` / `"codex"` / `"cursor"`) — no transcript content. Codex and
 Cursor sessions follow the same privacy invariant as Claude: the project
-`cwd` is hashed into `project_hash` (namespaced `codex:<cwd>` / `cursor:<cwd>`
-to avoid cross-provider hash collisions), user prose is reduced to a hash +
+`cwd` is hashed into `project_hash` (namespaced `codex:<cwd>` / `cursor:<cwd>` /
+`antigravity:<cwd>` to avoid cross-provider hash collisions), user prose is reduced to a hash +
 token count, and shell commands / `apply_patch` file paths are never
 serialized. The Codex model id (e.g. `gpt-5-codex`) and the Cursor model id
 (e.g. `composer-2.5`) are public categoricals and ride plaintext in
@@ -1010,12 +1010,11 @@ shape.
 
 ### Changelog
 
-- **2026-11-25 (v0.14)** — Google Antigravity added as a fourth provider:
-  `provider` / `providers_seen` closed enum extended to include `"antigravity"`;
-  `project_hash` namespacing note extended with `antigravity:<cwd>`; Gemini
-  model IDs (e.g. `gemini-4-hydrogen-medium`, `gemini-3.8-flash-medium`)
-  supported in `assistant_msgs_by_model` / `tokens_by_model`. `schema_version`
-  bumped to `"0.14"`. See `docs/ANTIGRAVITY_FORMAT.md`.
+- **2026-11-25** — Google Antigravity added as a fourth provider (additive on
+  the existing v0.14 envelope, no `schema_version` bump): `provider` /
+  `providers_seen` closed enum extended to include `"antigravity"`;
+  `project_hash` namespacing note extended with `antigravity:<cwd>`. See
+  `docs/ANTIGRAVITY_FORMAT.md`.
 - **2026-07-17** — Cursor added as a third provider: `provider` /
   `providers_seen` closed enum extended from (`"claude"` \| `"codex"`) to
   (`"claude"` \| `"codex"` \| `"cursor"`); `project_hash` namespacing note

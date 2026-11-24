@@ -115,7 +115,7 @@ def test_events_gemini_models_tokens_and_tools(tmp_path):
     assert heads[0].model == "gemini-3.8-flash-high"
     assert is_gemini_model(heads[0].model)
     assert heads[0].input_tokens == 1200
-    assert heads[0].cache_creation_input_tokens == 1200
+    assert heads[0].cache_creation_input_tokens == 400
     assert heads[0].output_tokens == 350
     assert heads[0].cache_input_tokens == 800
     assert heads[0].stop_reason == "tool_use"

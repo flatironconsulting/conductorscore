@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scripts.agents.antigravity.taxonomy import EDIT_TOOL_NAMES as ANTIGRAVITY_EDIT_TOOL_NAMES
 from scripts.core.thresholds import SIGNIFICANT_FILES_FLOOR, SIGNIFICANT_LINES_FLOOR
 from scripts.events import Event, EventKind
 
@@ -49,7 +48,11 @@ EDIT_TOOLS: frozenset[str] = frozenset(
         "apply_patch",
         "StrReplace",
         "Delete",
-        *ANTIGRAVITY_EDIT_TOOL_NAMES,
+        "edit_file",
+        "write_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "write_to_file",
     }
 )
 
