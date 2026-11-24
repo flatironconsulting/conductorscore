@@ -31,14 +31,15 @@ def _count_mcp_servers(base: Path) -> int:
     return len(servers) if isinstance(servers, dict) else 0
 
 
-def _count_skills(base: Path) -> int:
+def _count_skills(base: Path, *, include_user_agents_dir: bool) -> int:
     """Count user-installed Antigravity skills across standard skill roots."""
     gemini_dir = base.parent
     skill_roots = [
         base / "skills",
         gemini_dir / "config" / "skills",
-        gemini_dir.parent / ".agents" / "skills",
     ]
+    if include_user_agents_dir:
+        skill_roots.append(gemini_dir.parent / ".agents" / "skills")
     return count_skill_dirs(skill_roots)
 
 
@@ -54,10 +55,17 @@ def _count_instruction_lines(base: Path) -> int:
 
 def scan_config(home: Path | None = None) -> ConfigCounts:
     """Scan Antigravity home for customization counts. Never raises."""
+    import os
+
     base = home if home is not None else antigravity_home()
+    is_overridden = home is not None or bool(
+        os.environ.get("CONDUCTORSCORE_ANTIGRAVITY_HOME")
+    )
     return ConfigCounts(
         mcp_servers=_count_mcp_servers(base),
-        custom_commands=_count_skills(base),
+        custom_commands=_count_skills(
+            base, include_user_agents_dir=not is_overridden
+        ),
         global_agents_md_lines=_count_instruction_lines(base),
     )
 

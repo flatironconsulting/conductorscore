@@ -56,6 +56,7 @@ def read_events_and_text(
     session_id = jsonl_path.parent.parent.parent.name
     events: list[Event] = []
     text_map: dict[int, str] = {}
+    pending_tool_result = False
 
     for raw in raw_lines:
         line = raw.strip()
@@ -78,6 +79,7 @@ def read_events_and_text(
         is_error = status == "ERROR"
 
         if step_type == "USER_INPUT" and source == "USER_EXPLICIT":
+            pending_tool_result = False
             content = d.get("content")
             text = content if isinstance(content, str) else ""
             approx_tokens = _approx_token_count(text)
@@ -94,7 +96,20 @@ def read_events_and_text(
             text_map[id(ev)] = text
             continue
 
+        if step_type == "GENERIC" and source == "MODEL" and pending_tool_result:
+            events.append(
+                Event(
+                    kind=EventKind.TOOL_RESULT,
+                    session_id=session_id,
+                    timestamp_ms=ts_ms,
+                    is_error=is_error,
+                )
+            )
+            pending_tool_result = False
+            continue
+
         if step_type == "PLANNER_RESPONSE" or source == "MODEL":
+            pending_tool_result = False
             model_raw = d.get("model")
             model = model_raw.strip() if isinstance(model_raw, str) and model_raw.strip() else None
             in_tok = _safe_int(d.get("input_tokens"))
@@ -166,6 +181,7 @@ def read_events_and_text(
                         todo_count=todo_count,
                     )
                 )
+                pending_tool_result = True
 
     return mark_scheduled_repeats(events, text_map)
 

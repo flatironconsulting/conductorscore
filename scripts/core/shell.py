@@ -29,16 +29,14 @@ import re
 # extraction, which newline-joins literal ``shell(...)`` commands onto
 # ``raw_input["command"]``).
 SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
+    {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec", "run_command"}
 )
 
 # Edit-family tool names: Claude's ``Edit``/``Write``/``MultiEdit`` plus
 # Cursor's canonical ``StrReplace``/``Delete`` (Cursor's ``Write`` is shared
-# with Claude's name). Codex's ``apply_patch`` is deliberately NOT a member —
-# consumers that need it (``scripts.approval_counter``) check it separately
-# because it carries a multi-file footprint, not a single ``file_path``.
+# with Claude's name) and Antigravity's ``edit_file``/``write_file``.
 EDIT_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Edit", "Write", "MultiEdit", "StrReplace", "Delete"}
+    {"Edit", "Write", "MultiEdit", "StrReplace", "Delete", "edit_file", "write_file"}
 )
 
 # Splits a shell command line into top-level segments on ``&&``, ``||``,

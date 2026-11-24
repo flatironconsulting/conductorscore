@@ -16,7 +16,7 @@ def test_antigravity_extract_and_no_secret_leak(tmp_path, monkeypatch):
 
     secret_prompt = "SECRET_PROMPT_XYZ_999"
     secret_path = "/Users/secretuser/clients/acme_corp/secret_module.py"
-    secret_cmd = "API_KEY=SECRET_TOKEN_777 python deploy_secret.py"
+    secret_cmd = "API_KEY=SECRET_TOKEN_777 python deploy_secret.py && git commit -m 'feat: secret commit'"
     secret_thinking = "SECRET_THOUGHT_AAA"
 
     rows = [
@@ -72,6 +72,7 @@ def test_antigravity_extract_and_no_secret_leak(tmp_path, monkeypatch):
     assert s.is_planned is True
     assert s.files_modified == 1
     assert s.total_lines_edited == 3
+    assert s.commit_count == 1
 
     for forbidden in (
         secret_prompt,

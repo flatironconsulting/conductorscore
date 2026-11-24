@@ -13,6 +13,7 @@ from scripts.agents.consent import PROVIDER_LABELS, detect_launch_provider
 from scripts.agents.registry import adapters_for, parse_agent_selection
 from scripts.core.normalized import EventKind
 from scripts.daily import enable_daily
+from scripts.run import _parse_args
 from scripts.tool_counter import count_antigravity_tools
 
 
@@ -36,6 +37,7 @@ def test_registry_and_consent_include_antigravity():
     assert detect_launch_provider({"CONDUCTORSCORE_SKILL_DIR": r"C:\Users\u\.agents\skills\conductorscore"}) == "antigravity"
     assert detect_launch_provider({"CONDUCTORSCORE_SKILL_DIR": "/home/u/.gemini/config/skills/conductorscore"}) == "antigravity"
     assert enable_daily("antigravity").kind == "antigravity_automation"
+    assert _parse_args(["--step", "--providers=antigravity"]).providers == "antigravity"
 
 
 def test_discovery_and_preflight(tmp_path, monkeypatch):
@@ -92,12 +94,21 @@ def test_events_gemini_models_tokens_and_tools(tmp_path):
                     {"name": "mcp__github__get_issue", "args": {"id": 1}},
                 ],
             },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "source": "MODEL",
+                "status": "DONE",
+                "created_at": "2026-11-24T10:06:04Z",
+                "content": "tool done",
+            },
         ],
     )
     events, text_map = read_events_and_text(p)
     user_evs = [e for e in events if e.kind == EventKind.USER]
     assert len(user_evs) == 1
     assert "Phase 1" in text_map[id(user_evs[0])]
+    assert any(e.kind == EventKind.TOOL_RESULT for e in events)
 
     heads = [e for e in events if e.kind == EventKind.ASSISTANT_TEXT]
     assert len(heads) == 1
