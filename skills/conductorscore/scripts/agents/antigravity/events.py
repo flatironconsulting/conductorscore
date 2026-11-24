@@ -79,7 +79,7 @@ def read_events_and_text(
         status = d.get("status")
         is_error = status == "ERROR"
 
-        if step_type == "USER_INPUT" and source == "USER_EXPLICIT":
+        if step_type == "USER_INPUT":
             pending_tool_ids.clear()
             content = d.get("content")
             text = content if isinstance(content, str) else ""
@@ -91,7 +91,7 @@ def read_events_and_text(
                 user_text_hash=_sha16(text),
                 user_text_token_count=approx_tokens,
                 is_structured_prompt=_is_structured_prompt(text, approx_tokens),
-                is_scripted_prompt=False,
+                is_scripted_prompt=(source != "USER_EXPLICIT"),
             )
             events.append(ev)
             text_map[id(ev)] = text

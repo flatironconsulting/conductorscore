@@ -935,13 +935,13 @@ below) — also additive, also no schema-version bump.
 
 | Field      | Type   | Default    | Notes                                                                                   |
 |------------|--------|------------|-----------------------------------------------------------------------------------------|
-| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"` \| `"cursor"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"` / `"cursor"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
+| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"` \| `"cursor"` \| `"antigravity"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"` / `"cursor"` / `"antigravity"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
 
 ### Top-level `providers_seen`
 
 | Field            | Type             | Default      | Notes                                                                                  |
 |------------------|------------------|--------------|----------------------------------------------------------------------------------------|
-| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run — a subset of `["claude","codex","cursor"]` in sorted order (e.g. `["claude"]`, `["codex"]`, `["cursor"]`, `["claude","codex"]`, `["claude","codex","cursor"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
+| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run — a subset of `["claude","codex","cursor","antigravity"]` in sorted order (e.g. `["claude"]`, `["codex"]`, `["cursor"]`, `["antigravity"]`, `["claude","antigravity"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
 
 ### Byte-equivalence guarantee
 
@@ -1005,11 +1005,17 @@ shape.
 - `provider` defaults to `"claude"`; `providers_seen` defaults to
   `["claude"]`; `token_data_missing` defaults to `false`. The server MUST
   treat absence identically to those defaults.
-- `provider` values are a CLOSED enum (`"claude"`, `"codex"`, `"cursor"`).
+- `provider` values are a CLOSED enum (`"claude"`, `"codex"`, `"cursor"`, `"antigravity"`).
   Unknown provider strings indicate a drift the server hasn't acknowledged.
 
 ### Changelog
 
+- **2026-11-25 (v0.14)** — Google Antigravity added as a fourth provider:
+  `provider` / `providers_seen` closed enum extended to include `"antigravity"`;
+  `project_hash` namespacing note extended with `antigravity:<cwd>`; Gemini
+  model IDs (e.g. `gemini-4-hydrogen-medium`, `gemini-3.8-flash-medium`)
+  supported in `assistant_msgs_by_model` / `tokens_by_model`. `schema_version`
+  bumped to `"0.14"`. See `docs/ANTIGRAVITY_FORMAT.md`.
 - **2026-07-17** — Cursor added as a third provider: `provider` /
   `providers_seen` closed enum extended from (`"claude"` \| `"codex"`) to
   (`"claude"` \| `"codex"` \| `"cursor"`); `project_hash` namespacing note

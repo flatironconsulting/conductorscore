@@ -105,7 +105,21 @@ def _first_and_last_ts_ms(jsonl_path: Path) -> tuple[int, int] | None:
 
 
 def _last_ts_only(jsonl_path: Path) -> int | None:
-    """Metadata-only helper for ``preflight()``: reads only the last timestamp."""
+    """Tail-read helper for ``preflight()``: reads only the last 64 KiB for the last timestamp."""
+    try:
+        with jsonl_path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for raw in reversed(tail.splitlines()):
+        if not raw.strip():
+            continue
+        ts = _row_ts_ms(raw)
+        if ts is not None:
+            return ts
     pair = _first_and_last_ts_ms(jsonl_path)
     return pair[1] if pair is not None else None
 
