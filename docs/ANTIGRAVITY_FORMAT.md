@@ -55,8 +55,11 @@ Both Antigravity agent and Antigravity IDE tool vocabularies are supported:
   - Line-count keys: `Content`, `CodeContent`, `Target`, `TargetContent`, `Replacement`, `ReplacementContent`, `ReplacementChunks[].ReplacementContent`, `ReplacementChunks[].TargetContent`
 - **Plan signals**: `update_steps`, `task_boundary`, `update_focus`, plus reads/writes of `implementation_plan.md`, `task.md`, or plan-shaped `.md` files
 - **Shell tool**: `run_command` (registered in `scripts/core/shell.py` and `scripts/approval_counter.py` for commit, revert, and approval detection)
-- **Dispatch tools**: `invoke_subagent`, `swarm`
+- **Dispatch tools**: `invoke_subagent`, `swarm`, `browser_subagent`
+- **Permission tools (builtin)**: `list_permissions`, `ask_permission`
+- **Skills (`◐`)**: Inferred from `read_file` / `view_file` / `run_command` reads targeting `.../skills/<name>/SKILL.md`
 - **MCP tools**: `mcp__<server>__<tool>`
+- **Local session viewer & facade**: `scripts/events.py` and `scripts/session_viewer.py` auto-detect Antigravity `transcript.jsonl` via `is_antigravity_transcript()`
 
 ---
 

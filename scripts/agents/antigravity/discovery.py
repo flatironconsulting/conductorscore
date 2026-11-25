@@ -226,4 +226,27 @@ def preflight(now_ms: int, window_ms: int) -> dict:
     )
 
 
-__all__ = ["antigravity_home", "find_sessions", "preflight"]
+def is_antigravity_transcript(jsonl_path: Path) -> bool:
+    """Return True if ``jsonl_path`` looks like an Antigravity ``transcript.jsonl``."""
+    try:
+        p = Path(jsonl_path)
+    except TypeError:
+        return False
+    if p.name != "transcript.jsonl":
+        return False
+    if ".system_generated" in p.parts and "logs" in p.parts:
+        return True
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                d = json.loads(s)
+                return isinstance(d, dict) and "step_index" in d and "source" in d and "type" in d
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return False
+
+
+__all__ = ["antigravity_home", "antigravity_homes", "find_sessions", "is_antigravity_transcript", "preflight"]

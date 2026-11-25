@@ -26,6 +26,7 @@ from scripts.agents.antigravity.taxonomy import (
     extract_edit_info,
     extract_read_is_plan_md,
     extract_shell_command,
+    extract_skill_name_from_read,
     extract_todo_count,
 )
 from scripts.core.normalized import Event, EventKind
@@ -161,6 +162,7 @@ def read_events_and_text(
                 is_excl = False
                 is_plan_write = False
                 is_plan_read = False
+                skill_name: str | None = None
                 todo_count = 0
 
                 if tname in SHELL_TOOL_NAMES:
@@ -173,6 +175,7 @@ def read_events_and_text(
                         edit_hash = _sha16(raw_path)
                 elif tname in READ_TOOL_NAMES:
                     is_plan_read = extract_read_is_plan_md(args)
+                    skill_name = extract_skill_name_from_read(args)
                 else:
                     todo_count = extract_todo_count(tname, args)
 
@@ -195,6 +198,7 @@ def read_events_and_text(
                         is_excluded_edit_path=is_excl,
                         is_plan_file_write=is_plan_write,
                         is_plan_md_read=is_plan_read,
+                        skill_name=skill_name,
                         todo_count=todo_count,
                     )
                 )

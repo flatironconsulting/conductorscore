@@ -6,6 +6,8 @@ retaining raw file paths, command arguments, or prompt text on ``Event``.
 """
 from __future__ import annotations
 
+import re
+
 from scripts.core.edits import is_excluded_edit_path
 from scripts.plan_signals import is_plan_shaped_path
 
@@ -21,7 +23,7 @@ EDIT_TOOL_NAMES: frozenset[str] = frozenset(
 )
 READ_TOOL_NAMES: frozenset[str] = frozenset({"read_file", "view_file"})
 PLAN_TOOL_NAMES: frozenset[str] = frozenset({"update_steps", "update_focus", "task_boundary"})
-TASK_TOOL_NAMES: frozenset[str] = frozenset({"invoke_subagent", "swarm"})
+TASK_TOOL_NAMES: frozenset[str] = frozenset({"invoke_subagent", "swarm", "browser_subagent"})
 
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -38,6 +40,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "task_boundary",
         "invoke_subagent",
         "swarm",
+        "browser_subagent",
         "manage_subagents",
         "manage_task",
         "send_message",
@@ -45,6 +48,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "search_web",
         "ask_question",
         "list_plugin_accounts",
+        "list_permissions",
+        "ask_permission",
         "run_workflow",
         "define_subagent",
         "search_marketplace",
@@ -157,6 +162,38 @@ def extract_read_is_plan_md(args: object) -> bool:
     ) and p.lower().endswith(".md")
 
 
+_SKILL_MD_RE = re.compile(r"(?:^|[/\s\"'])(?:[^\s\"']*/)?skills/([^/\s\"']+)/SKILL\.md", re.IGNORECASE)
+_SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+
+
+def extract_skill_name_from_read(args: object) -> str | None:
+    """Infer an invoked skill name when a read tool opens ``.../skills/<name>/SKILL.md``."""
+    if not isinstance(args, dict):
+        return None
+    p = _clean_path(args.get("Path") or args.get("AbsolutePath") or args.get("path"))
+    if not p:
+        return None
+    norm = p.replace("\\", "/")
+    m = _SKILL_MD_RE.search(norm)
+    if not m:
+        return None
+    name = m.group(1)
+    return name if _SAFE_SKILL_NAME_RE.match(name) else None
+
+
+def skill_names_from_shell_command(cmd: str) -> tuple[str, ...]:
+    """Infer de-duplicated skill names from ``run_command`` reads of ``.../skills/<name>/SKILL.md``."""
+    if not cmd:
+        return ()
+    norm = cmd.replace("\\", "/")
+    seen: list[str] = []
+    for m in _SKILL_MD_RE.finditer(norm):
+        name = m.group(1)
+        if name not in seen and _SAFE_SKILL_NAME_RE.match(name):
+            seen.append(name)
+    return tuple(seen)
+
+
 def extract_todo_count(tool_name: str, args: object) -> int:
     """Count plan items in ``update_steps`` calls."""
     if tool_name != "update_steps" or not isinstance(args, dict):
@@ -177,6 +214,8 @@ __all__ = [
     "extract_edit_info",
     "extract_read_is_plan_md",
     "extract_shell_command",
+    "extract_skill_name_from_read",
     "extract_todo_count",
     "is_gemini_model",
+    "skill_names_from_shell_command",
 ]

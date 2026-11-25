@@ -253,3 +253,40 @@ def test_quoted_ide_paths_and_gemini_plan_exclusion():
     assert code_lines == 2
     assert code_excl is False
     assert code_plan is False
+
+
+def test_skill_reads_browser_subagent_and_viewer_routing(tmp_path):
+    from scripts.events import read_events_and_text as dispatch_read_events_and_text
+    from scripts.session_viewer import _provider_label, parse_session
+
+    logs_dir = tmp_path / ".gemini" / "antigravity-ide" / "brain" / "sess-sk-1" / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+    rows = [
+        {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-24T10:00:00Z", "content": "run skill"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": "2026-11-24T10:00:10Z",
+            "tool_calls": [
+                {"name": "view_file", "args": {"AbsolutePath": r'"C:\Users\u\.gemini\config\skills\pr-review\SKILL.md"'}},
+                {"name": "browser_subagent", "args": {"Task": "open page"}},
+                {"name": "run_command", "args": {"CommandLine": "cat ~/.gemini/antigravity/skills/system-design/SKILL.md"}},
+            ],
+        },
+        {"step_index": 2, "type": "VIEW_FILE", "source": "MODEL", "status": "DONE", "created_at": "2026-11-24T10:00:12Z"},
+        {"step_index": 3, "type": "BROWSER_SUBAGENT", "source": "MODEL", "status": "DONE", "created_at": "2026-11-24T10:00:15Z"},
+        {"step_index": 4, "type": "RUN_COMMAND", "source": "MODEL", "status": "DONE", "created_at": "2026-11-24T10:00:18Z"},
+    ]
+    p = logs_dir / "transcript.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    events, _ = dispatch_read_events_and_text(p)
+    tc = count_antigravity_tools(events)
+    assert tc.distinct_skills == ["pr-review", "system-design"]
+    assert tc.skill_invocations == 2
+    assert tc.agent_dispatches == 1
+    assert _provider_label(p) == "antigravity"
+    msgs = parse_session(p)
+    assert any(m.role == "user" for m in msgs)
+    assert sum(1 for m in msgs if m.role == "assistant_tool" and m.end_ts_ms is not None) == 3
