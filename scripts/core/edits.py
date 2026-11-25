@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from scripts.core.text import basename
 
-EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".cursor/", ".codex/", ".git/")
+EXCLUDED_EDIT_DIR_PARTS: tuple[str, ...] = (".claude/", ".cursor/", ".codex/", ".gemini/", ".git/")
 EXCLUDED_EDIT_BASENAMES: frozenset[str] = frozenset({"CLAUDE.md", "AGENTS.md"})
 
 # Tool names whose args carry ``old_string`` + new content

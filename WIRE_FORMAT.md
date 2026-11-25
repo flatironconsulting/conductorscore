@@ -371,7 +371,7 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 | `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
 | `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`. |
 | `is_planned`                   | boolean          | no       | True iff `len(strong_plan_signals) >= 1` OR `len(weak_plan_signals) >= 2`. Per outline § "planned". |
-| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding paths containing `.claude/`, `.cursor/`, `.codex/` or `.git/`, and basenames `CLAUDE.md` / `AGENTS.md` (see [Excluded edit paths](#excluded-edit-paths)). Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
+| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding paths containing `.claude/`, `.cursor/`, `.codex/`, `.gemini/` or `.git/`, and basenames `CLAUDE.md` / `AGENTS.md` (see [Excluded edit paths](#excluded-edit-paths)). Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
 | `total_lines_edited`           | integer          | no       | Outline approximation: `sum over Edit/Write/MultiEdit of max(line_count(new_string), line_count(old_string))`. For Write this collapses to `line_count(content)`. For MultiEdit the per-edit max is summed across the `edits` array. Excluded-path edits contribute 0. |
 | `commit_count`                 | integer          | no       | Number of commit-creating `git commit` invocations counted from the session's shell COMMAND text (Claude `Bash`; Codex `shell`/`exec_command`/`shell_command`). `--amend`, `--dry-run`, `commit-tree`, and `-h`/`--help` are excluded. Chained commands are split on `&&`/`\|\|`/`;`/newline so each real segment counts once. Transcript-only — no GitHub data is fetched; only the integer count crosses the wire (the command/message text is consumed in-memory and never serialized). |
 | `is_significant_edit_session`  | boolean          | no       | True iff `files_modified > 5` OR `total_lines_edited > 200`. Per outline § "significant edits"; gates the Coding-without-a-plan denominator. |
@@ -423,7 +423,7 @@ Edits to the following are NEVER counted toward `files_modified` or
 same rule applies to every agent (Claude, Codex, Cursor); it lives in
 `scripts/core/edits.py`:
 
-- any path containing the directory part `.claude/`, `.cursor/`, `.codex/` or `.git/`
+- any path containing the directory part `.claude/`, `.cursor/`, `.codex/`, `.gemini/` or `.git/`
   (plain substring test, so `a/.claude/x` and `.git/config` both match),
 - any path whose basename is exactly `CLAUDE.md` or `AGENTS.md`.
 

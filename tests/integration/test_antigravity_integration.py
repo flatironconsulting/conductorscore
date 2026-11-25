@@ -126,3 +126,38 @@ def test_antigravity_ide_edit_tools_no_secret_leak(tmp_path, monkeypatch):
     assert out.sessions[0].token_data_missing is True
     for forbidden in (secret_file, "SECRET_IDE_CODE_888", "ide_secret.py"):
         assert forbidden not in wire
+
+
+def test_antigravity_ide_quoted_gemini_plan_excluded_from_code_edits(tmp_path, monkeypatch):
+    ide_home = tmp_path / ".gemini" / "antigravity-ide"
+    logs_dir = ide_home / "brain" / "sess-ide-plan" / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    quoted_plan_path = f'"{ide_home / "brain" / "sess-ide-plan" / "implementation_plan.md"}"'
+    rows = [
+        {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-24T10:00:00Z", "content": "plan"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": "2026-11-24T10:01:00Z",
+            "tool_calls": [
+                {"name": "write_to_file", "args": {"TargetFile": quoted_plan_path, "CodeContent": "# Plan\n1. Do X\n2. Do Y"}},
+            ],
+        },
+    ]
+    (logs_dir / "transcript.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    monkeypatch.setenv("CONDUCTORSCORE_PROVIDERS", "antigravity")
+    monkeypatch.setenv("CONDUCTORSCORE_ANTIGRAVITY_HOME", str(ide_home))
+    monkeypatch.setenv("CONDUCTORSCORE_CLAUDE_HOME", str(tmp_path / ".claude"))
+
+    from scripts.core.timestamps import parse_iso_ts_ms
+    now_ms = (parse_iso_ts_ms("2026-11-24T10:01:00Z") or 0) + 10_000
+
+    out = extract(device_id="dev-test", client_version="0.7.18", now_ms=now_ms)
+    assert len(out.sessions) == 1
+    s = out.sessions[0]
+    assert s.is_planned is True
+    assert s.files_modified == 0
+    assert s.total_lines_edited == 0

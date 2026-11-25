@@ -50,7 +50,7 @@ Each line is a JSON object with:
 Both Antigravity agent and Antigravity IDE tool vocabularies are supported:
 
 - **Edit tools**: `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`
-  - Path keys: `Path`, `TargetFile`, `path` (hashed via SHA-256 prefix; never serialized in plaintext)
+  - Path keys: `Path`, `TargetFile`, `path` (surrounding whitespace and quotes stripped; hashed via SHA-256 prefix; never serialized in plaintext; edits under `.gemini/` are excluded from `files_modified` / `total_lines_edited` like `.claude/`)
   - Read path keys: `Path`, `AbsolutePath`, `path`
   - Line-count keys: `Content`, `CodeContent`, `Target`, `TargetContent`, `Replacement`, `ReplacementContent`, `ReplacementChunks[].ReplacementContent`, `ReplacementChunks[].TargetContent`
 - **Plan signals**: `update_steps`, `task_boundary`, `update_focus`, plus reads/writes of `implementation_plan.md`, `task.md`, or plan-shaped `.md` files

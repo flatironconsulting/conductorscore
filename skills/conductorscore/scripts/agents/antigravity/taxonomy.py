@@ -93,6 +93,14 @@ def extract_shell_command(args: object) -> str | None:
     return cmd.strip()
 
 
+def _clean_path(val: object) -> str | None:
+    """Strip surrounding whitespace and quotes from IDE/agent path strings."""
+    if not isinstance(val, str):
+        return None
+    cleaned = val.strip().strip("\"'").strip()
+    return cleaned or None
+
+
 def extract_edit_info(tool_name: str, args: object) -> tuple[str | None, int, bool, bool]:
     """Extract ``(raw_path, line_count, is_excluded, is_plan_md)`` for edit/write tools.
 
@@ -101,10 +109,9 @@ def extract_edit_info(tool_name: str, args: object) -> tuple[str | None, int, bo
     """
     if not isinstance(args, dict):
         return None, 0, False, False
-    path = args.get("Path") or args.get("TargetFile") or args.get("path")
-    if not isinstance(path, str) or not path.strip():
+    path = _clean_path(args.get("Path") or args.get("TargetFile") or args.get("path"))
+    if not path:
         return None, 0, False, False
-    path = path.strip()
 
     if tool_name in ("write_file", "write_to_file"):
         content = args.get("Content") or args.get("CodeContent") or ""
@@ -141,10 +148,9 @@ def extract_read_is_plan_md(args: object) -> bool:
     """Return True if a read tool targeted a plan-shaped ``.md`` file."""
     if not isinstance(args, dict):
         return False
-    path = args.get("Path") or args.get("AbsolutePath") or args.get("path")
-    if not isinstance(path, str) or not path.strip():
+    p = _clean_path(args.get("Path") or args.get("AbsolutePath") or args.get("path"))
+    if not p:
         return False
-    p = path.strip()
     base_name = p.replace("\\", "/").rsplit("/", 1)[-1].lower()
     return (
         is_plan_shaped_path(p) or base_name in ("implementation_plan.md", "task.md")

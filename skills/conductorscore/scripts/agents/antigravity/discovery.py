@@ -84,11 +84,14 @@ def _row_ts_ms(line: str) -> int | None:
 
 def _infer_repo_root(path_str: str) -> str:
     """Return nearest git root for a workspace path, or parent dir if non-.gemini."""
-    normalized = path_str.replace("\\", "/")
+    cleaned = path_str.strip().strip("\"'").strip()
+    if not cleaned:
+        return ""
+    normalized = cleaned.replace("\\", "/")
     if "/.gemini/" in normalized or normalized.startswith(".gemini/"):
         return ""
     try:
-        p = Path(path_str)
+        p = Path(cleaned)
         cur = p if p.is_dir() else p.parent
         for anc in (cur, *cur.parents):
             if (anc / ".git").exists():

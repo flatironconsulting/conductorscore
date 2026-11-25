@@ -230,3 +230,26 @@ def test_project_root_git_fallback_and_non_result_filtering(tmp_path, monkeypatc
     results = [e for e in events if e.kind == EventKind.TOOL_RESULT]
     assert len(results) == 1
     assert results[0].is_error is True
+
+
+def test_quoted_ide_paths_and_gemini_plan_exclusion():
+    from scripts.agents.antigravity.taxonomy import extract_edit_info, extract_read_is_plan_md
+
+    quoted_plan = r'  "C:\Users\u\.gemini\antigravity-ide\brain\s1\implementation_plan.md"  '
+    raw_path, lines, excluded, is_plan = extract_edit_info(
+        "write_to_file", {"TargetFile": quoted_plan, "CodeContent": "# Plan\nstep 1\nstep 2"}
+    )
+    assert raw_path == r"C:\Users\u\.gemini\antigravity-ide\brain\s1\implementation_plan.md"
+    assert lines == 3
+    assert excluded is True
+    assert is_plan is True
+
+    assert extract_read_is_plan_md({"AbsolutePath": '"/home/u/.gemini/antigravity-ide/brain/s1/task.md"'}) is True
+
+    raw_code, code_lines, code_excl, code_plan = extract_edit_info(
+        "replace_file_content", {"TargetFile": '"/repo/src/main.py"', "ReplacementContent": "a\nb"}
+    )
+    assert raw_code == "/repo/src/main.py"
+    assert code_lines == 2
+    assert code_excl is False
+    assert code_plan is False
