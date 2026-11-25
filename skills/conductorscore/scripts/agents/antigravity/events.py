@@ -97,7 +97,14 @@ def read_events_and_text(
             text_map[id(ev)] = text
             continue
 
-        if step_type not in ("USER_INPUT", "PLANNER_RESPONSE") and pending_tool_ids:
+        if step_type not in (
+            "USER_INPUT",
+            "PLANNER_RESPONSE",
+            "SYSTEM_MESSAGE",
+            "EPHEMERAL_MESSAGE",
+            "CONVERSATION_HISTORY",
+            "KNOWLEDGE_ARTIFACTS",
+        ) and pending_tool_ids:
             tid = pending_tool_ids.pop(0)
             events.append(
                 Event(

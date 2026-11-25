@@ -489,11 +489,12 @@ def _build_per_session(
     # v0.8 — precise per-model token split.
     tokens_by_model = _aggregate_tokens_by_model(events, provider)
 
-    # Slice 3 — Cursor-only: flag sessions whose assistant turns recorded
+    # Slice 3 / Antigravity IDE: flag sessions whose assistant turns recorded
     # zero token usage everywhere (tool-call ASSISTANT_TOOL events are
     # structurally always zero for Cursor; only ASSISTANT_TEXT bubbles
     # carry its tokenCount, and that's 0/0 at a very high rate per
-    # recon). Gated on provider == "cursor" so Claude/Codex sessions
+    # recon; Antigravity IDE builds also omit model/token fields).
+    # Gated on provider in ("cursor", "antigravity") so Claude/Codex sessions
     # NEVER set this — their PerSession.token_data_missing stays the
     # dataclass default (False), which output_schema.py suppresses on
     # the wire, so those payloads are byte-identical to before this
@@ -503,7 +504,7 @@ def _build_per_session(
         if e.kind in (EventKind.ASSISTANT_TEXT, EventKind.ASSISTANT_TOOL)
     ]
     token_data_missing = (
-        provider == "cursor"
+        provider in ("cursor", "antigravity")
         and bool(assistant_events)
         and all(
             e.input_tokens == 0

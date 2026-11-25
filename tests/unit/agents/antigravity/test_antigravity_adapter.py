@@ -190,3 +190,43 @@ def test_antigravity_ide_tools_and_home_discovery(tmp_path, monkeypatch):
     assert heads[1].stop_reason == "end_turn"
     tools = [e for e in events if e.kind == EventKind.ASSISTANT_TOOL]
     assert [t.edit_line_count for t in tools if t.edit_line_count] == [3, 2, 4]
+
+
+def test_project_root_git_fallback_and_non_result_filtering(tmp_path, monkeypatch):
+    from scripts.agents.antigravity.discovery import find_sessions
+
+    repo = tmp_path / "myrepo"
+    (repo / ".git").mkdir(parents=True)
+    src = repo / "src" / "app.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    monkeypatch.delenv("CONDUCTORSCORE_ANTIGRAVITY_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    ag_home = tmp_path / ".gemini" / "antigravity"
+    logs_dir = ag_home / "brain" / "sess-repo-1" / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+
+    rows = [
+        {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-24T10:00:00Z", "content": "edit"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": "2026-11-24T10:00:05Z",
+            "tool_calls": [{"name": "edit_file", "args": {"Path": str(src), "Target": "a", "Replacement": "b"}}],
+        },
+        {"step_index": 2, "type": "EPHEMERAL_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-24T10:00:06Z"},
+        {"step_index": 3, "type": "ERROR_MESSAGE", "source": "MODEL", "status": "ERROR", "created_at": "2026-11-24T10:00:07Z"},
+    ]
+    p = logs_dir / "transcript.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    sessions = find_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].project_root == str(repo)
+
+    events, _ = read_events_and_text(p)
+    results = [e for e in events if e.kind == EventKind.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].is_error is True

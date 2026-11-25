@@ -17,7 +17,7 @@ Transcripts are discovered at:
 <home>/brain/<session_id>/.system_generated/logs/transcript.jsonl
 ```
 
-Sessions are deduplicated by `session_id` across homes. `project_root` is extracted from the first observed `run_command` `Cwd` (or `cwd`) argument and hashed as `antigravity:<cwd>` into `project_hash` (never serialized raw). For `preflight()`, `_last_ts_only()` tail-reads the last 64 KiB of `transcript.jsonl` (falling back to a full read only if no timestamp is found in the tail).
+Sessions are deduplicated by `session_id` across homes. `project_root` is extracted from the first observed `run_command` `Cwd` (or `cwd`) argument — or, when absent, inferred from the nearest `.git` ancestor / parent directory of non-`.gemini` workspace file paths — and hashed as `antigravity:<cwd>` into `project_hash` (never serialized raw). For `preflight()`, `_last_ts_only()` tail-reads the last 64 KiB of `transcript.jsonl` (falling back to a full read only if no timestamp is found in the tail).
 
 ---
 
@@ -40,8 +40,8 @@ Each line is a JSON object with:
 ### Event Mapping (`events.py`)
 
 - `type == "USER_INPUT"` -> `EventKind.USER`, with `is_scripted_prompt=(source != "USER_EXPLICIT")`.
-- `type == "PLANNER_RESPONSE"` -> `EventKind.ASSISTANT_TEXT` (`is_message_head=True`), `cache_creation_input_tokens=max(0, input_tokens - cache_read_tokens)`, and `stop_reason="tool_use"` when `tool_calls` is non-empty (else `"end_turn"`).
-- Each tool call in `tool_calls` emits `EventKind.ASSISTANT_TOOL` with a sequential `tool_use_id` (`ag_<seq>`). The next non-`USER_INPUT`, non-`PLANNER_RESPONSE` row pairs 1-to-1 with the oldest pending `tool_use_id` as `EventKind.TOOL_RESULT` (`is_error=True` on `status == "ERROR"` or `type == "ERROR_MESSAGE"`). Any still-unpaired `pending_tool_ids` are cleared when the next `PLANNER_RESPONSE` or `USER_INPUT` arrives.
+- `type == "PLANNER_RESPONSE"` -> `EventKind.ASSISTANT_TEXT` (`is_message_head=True`), `cache_creation_input_tokens=max(0, input_tokens - cache_read_tokens)`, and `stop_reason="tool_use"` when `tool_calls` is non-empty (else `"end_turn"`). Sessions whose assistant events all report `0` tokens set `token_data_missing=True` (matching Cursor's handling of builds without token telemetry).
+- Each tool call in `tool_calls` emits `EventKind.ASSISTANT_TOOL` with a sequential `tool_use_id` (`ag_<seq>`). The next tool-result row (skipping `USER_INPUT`, `PLANNER_RESPONSE`, `SYSTEM_MESSAGE`, `EPHEMERAL_MESSAGE`, `CONVERSATION_HISTORY`, and `KNOWLEDGE_ARTIFACTS`) pairs 1-to-1 with the oldest pending `tool_use_id` as `EventKind.TOOL_RESULT` (`is_error=True` on `status == "ERROR"` or `type == "ERROR_MESSAGE"`). Any still-unpaired `pending_tool_ids` are cleared when the next `PLANNER_RESPONSE` or `USER_INPUT` arrives.
 
 ---
 

@@ -74,6 +74,7 @@ def test_antigravity_extract_and_no_secret_leak(tmp_path, monkeypatch):
     assert s.files_modified == 1
     assert s.total_lines_edited == 3
     assert s.commit_count == 1
+    assert s.token_data_missing is False
 
     for forbidden in (
         secret_prompt,
@@ -122,5 +123,6 @@ def test_antigravity_ide_edit_tools_no_secret_leak(tmp_path, monkeypatch):
     assert len(out.sessions) == 1
     assert out.sessions[0].files_modified == 2
     assert out.sessions[0].total_lines_edited == 5
+    assert out.sessions[0].token_data_missing is True
     for forbidden in (secret_file, "SECRET_IDE_CODE_888", "ide_secret.py"):
         assert forbidden not in wire

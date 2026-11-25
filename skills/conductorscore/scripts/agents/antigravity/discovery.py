@@ -82,6 +82,22 @@ def _row_ts_ms(line: str) -> int | None:
     return parse_iso_ts_ms(d.get("created_at") or d.get("timestamp"))
 
 
+def _infer_repo_root(path_str: str) -> str:
+    """Return nearest git root for a workspace path, or parent dir if non-.gemini."""
+    normalized = path_str.replace("\\", "/")
+    if "/.gemini/" in normalized or normalized.startswith(".gemini/"):
+        return ""
+    try:
+        p = Path(path_str)
+        cur = p if p.is_dir() else p.parent
+        for anc in (cur, *cur.parents):
+            if (anc / ".git").exists():
+                return str(anc)
+        return str(cur) if cur != p.anchor else ""
+    except OSError:
+        return ""
+
+
 def _scan_session_meta(jsonl_path: Path) -> tuple[int, int, str] | None:
     """Read first timestamp, last timestamp, and first observed project cwd from ``transcript.jsonl``."""
     try:
@@ -91,6 +107,7 @@ def _scan_session_meta(jsonl_path: Path) -> tuple[int, int, str] | None:
     first_ts: int | None = None
     last_ts: int | None = None
     project_root = ""
+    fallback_root = ""
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -113,14 +130,23 @@ def _scan_session_meta(jsonl_path: Path) -> tuple[int, int, str] | None:
                     if not isinstance(tc, dict):
                         continue
                     args = tc.get("args")
-                    if isinstance(args, dict):
-                        cwd = args.get("Cwd") or args.get("cwd")
-                        if isinstance(cwd, str) and cwd.strip():
-                            project_root = cwd.strip()
-                            break
+                    if not isinstance(args, dict):
+                        continue
+                    cwd = args.get("Cwd") or args.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        project_root = cwd.strip()
+                        break
+                    if not fallback_root:
+                        for pk in ("TargetFile", "AbsolutePath", "Path", "SearchPath", "DirectoryPath", "path"):
+                            pv = args.get(pk)
+                            if isinstance(pv, str) and pv.strip():
+                                inferred = _infer_repo_root(pv.strip())
+                                if inferred:
+                                    fallback_root = inferred
+                                    break
     if first_ts is None or last_ts is None:
         return None
-    return first_ts, last_ts, project_root
+    return first_ts, last_ts, (project_root or fallback_root)
 
 
 def _first_and_last_ts_ms(jsonl_path: Path) -> tuple[int, int] | None:
