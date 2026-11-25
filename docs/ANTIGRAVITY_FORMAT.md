@@ -67,6 +67,7 @@ Both Antigravity agent and Antigravity IDE tool vocabularies are supported:
 
 Across `<home>` (`~/.gemini/antigravity` / `~/.gemini/antigravity-ide`) and `~/.gemini/`:
 
-- **MCP servers**: `<home>/mcp_config.json` (`mcpServers` keys)
+- **MCP servers**: `<home>/mcp_config.json` and `~/.gemini/config/mcp_config.json` (`mcpServers` keys, deduplicated by name)
+- **Plugins**: `~/.gemini/config/plugins/*` directory count (`plugin_count`)
 - **Instructions**: `~/.gemini/GEMINI.md`, `<home>/GEMINI.md`, and `<home>/AGENTS.md` line counts
 - **Skills**: `<home>/skills/*` and `~/.gemini/config/skills/*` (excluding shared `~/.agents/skills`)

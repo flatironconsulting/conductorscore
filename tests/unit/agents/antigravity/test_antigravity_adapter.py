@@ -140,13 +140,16 @@ def test_config_scan_counts_skills_mcps_and_instructions(tmp_path):
     home = gemini / "antigravity"
     home.mkdir(parents=True)
     (gemini / "config" / "skills" / "work-on").mkdir(parents=True)
+    (gemini / "config" / "plugins" / "android-cli-plugin").mkdir(parents=True)
     (home / "skills" / "system-design").mkdir(parents=True)
     (home / "mcp_config.json").write_text(json.dumps({"mcpServers": {"github": {}, "postgres": {}}}), encoding="utf-8")
+    (gemini / "config" / "mcp_config.json").write_text(json.dumps({"mcpServers": {"github": {}, "linear": {}}}), encoding="utf-8")
     (gemini / "GEMINI.md").write_text("line1\nline2\nline3\n", encoding="utf-8")
 
     counts = scan_config(home)
-    assert counts.mcp_servers == 2
+    assert counts.mcp_servers == 3
     assert counts.custom_commands == 2
+    assert counts.plugin_count == 1
     assert counts.global_agents_md_lines == 3
 
 

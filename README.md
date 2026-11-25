@@ -148,12 +148,12 @@ Coverage matches the ConductorScore FAQ matrix (`●` = Full, `◐` = Partial, `
 | **Craft** | Redundant approvals | ● | ◐ | ◐ | ◐ |
 | **Customization** | Skills | ● | ◐ | ○ | ◐ |
 | **Customization** | MCP tools | ● | ● | ◐ | ◐ |
-| **Customization** | Plugins | ● | ◐ | ○ | ○ |
+| **Customization** | Plugins | ● | ◐ | ○ | ◐ |
 | **Efficiency** | Cost per commit | ● | ● | ○ | ◐ |
 | **Attribution** | Model attribution | ● | ● | ◐ | ◐ |
 
 Notes on Google Antigravity support:
-- **Skills (`◐`)**: Inferred structurally from `read_file` / `view_file` / `run_command` reads of `.../skills/<name>/SKILL.md` (mirroring Codex), plus global skill counts from `config.py`.
+- **Skills (`◐`) & Plugins (`◐`)**: Skills are inferred structurally from `read_file` / `view_file` / `run_command` reads of `.../skills/<name>/SKILL.md` (mirroring Codex), plus global skill counts (`config.py`); installed Antigravity plugins under `~/.gemini/config/plugins/` populate `plugin_count` (matching Codex's `◐` coverage).
 - **Agent leverage & longest run (`◐`)**: Measures main-thread interactive/background/idle time and tool spans accurately via `TOOL_RESULT` pairing plus subagent dispatches (`invoke_subagent`, `swarm`, `browser_subagent`), without separate subagent transcript trees or explicit permission-wait grants (`permission_signal = "not_available"`).
 - **Redundant approvals (`◐`) & Auto-compaction (`○`)**: Wait-gap approval proxy fires on `run_command` and edit tools, while explicit grant/denial decisions and auto-compaction boundaries are not logged on disk.
 - **Efficiency & Model attribution (`◐`)**: Full Gemini model and token accounting (with `input_miss` / `input_hit` split) on Antigravity builds that log `model` + token usage; IDE builds that omit token/model telemetry set `token_data_missing = true` so cost denominators are not understated.
