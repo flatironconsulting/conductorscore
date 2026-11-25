@@ -2,7 +2,7 @@
 
 The open-source scanner behind [conductorscore.com](https://conductorscore.com).
 
-This is the code that runs on your machine, reads your local Claude Code, Codex, and Cursor transcripts, and uploads a **numbers-only** payload to the server for scoring. It's public, auditable, and dependency-free on purpose — the whole point of ConductorScore is that you can verify what crosses the wire before you trust the score.
+This is the code that runs on your machine, reads your local Claude Code, Codex, Cursor, and Google Antigravity transcripts, and uploads a **numbers-only** payload to the server for scoring. It's public, auditable, and dependency-free on purpose — the whole point of ConductorScore is that you can verify what crosses the wire before you trust the score.
 
 ```
 ~/.claude/projects/**/*.jsonl   (your transcripts)
@@ -16,12 +16,12 @@ conductorscore.com              (scoring)
 
 ## What gets uploaded
 
-Per Claude Code, Codex, or Cursor session in the last 30 days, the client emits ~50 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
+Per Claude Code, Codex, Cursor, or Google Antigravity session in the last 30 days, the client emits ~50 fields ([`output_schema.py`](scripts/output_schema.py) is the source of truth). Every field is one of:
 
 - a **number** (counts, minute durations, token totals, line counts),
 - a **16-char SHA-256 prefix** (session id, project root — not reversible),
 - a **boolean** — including a small number of provider-specific flags, e.g. `token_data_missing` (Cursor-only in practice: set when the device couldn't read a session's token usage, so the server excludes it from cost/efficiency denominators instead of treating it as zero-cost), or
-- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, model IDs like `claude-opus-4-7` / `gpt-5-codex` / `composer-2.5`, slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), a closed `provider` enum (`claude` / `codex` / `cursor`), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
+- a **categorical label** — built-in tool names like `Bash` / `Edit`, MCP server/tool names in plaintext like `mcp__github__create_issue`, plugin command names in plaintext like `my-plugin:deploy`, model IDs like `claude-opus-4-7` / `gpt-5-codex` / `composer-2.5` (and `gemini-*` when logged), slash-command names like `/plan` (read from Claude Code's structured `<command-name>` marker, never scraped from your prose), a closed `provider` enum (`claude` / `codex` / `cursor` / `antigravity`), and plan-signal enums like `EnterPlanMode`. These are the names you configured — never their arguments, inputs, or outputs.
 
 ## What is never uploaded
 
@@ -91,12 +91,13 @@ If you're here to verify the data path before installing, these are the files th
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | [`scripts/scanner.py`](scripts/scanner.py)             | Top-level extractor. Reads JSONL, builds the payload, and hashes the session id + project root (`sha256[:16]`, no salts, not reversible). |
 | [`scripts/output_schema.py`](scripts/output_schema.py) | The exact shape of the upload payload. Every field is named here.                    |
-| [`scripts/agents/*/events.py`](scripts/agents) and [`scripts/core/`](scripts/core) | Per-agent (Claude, Codex, Cursor) transcript parsers and shared helpers — what the client reads off disk. |
+| [`scripts/agents/*/events.py`](scripts/agents) and [`scripts/core/`](scripts/core) | Per-agent (Claude, Codex, Cursor, Antigravity) transcript parsers and shared helpers — what the client reads off disk. |
 | [`scripts/scan.py`](scripts/scan.py)                   | Runs the scan and uploads the payload — the score upload (`POST /api/ingest`) is here. |
 | [`scripts/run.py`](scripts/run.py)                     | CLI orchestrator: spawns `scan.py`, polls a local status file, prints the summary.   |
 | [`scripts/device_flow.py`](scripts/device_flow.py), [`scripts/reauth.py`](scripts/reauth.py) | GitHub OAuth device-flow login — identity only, separate from the score upload. |
 | [`WIRE_FORMAT.md`](WIRE_FORMAT.md)                     | Versioned schema, including a per-version changelog.                                 |
 | [`docs/CURSOR_FORMAT.md`](docs/CURSOR_FORMAT.md)       | Field-name-level notes on the Cursor on-disk formats the Cursor parser reads.        |
+| [`docs/ANTIGRAVITY_FORMAT.md`](docs/ANTIGRAVITY_FORMAT.md) | Field-name-level notes on the Google Antigravity on-disk formats the Antigravity parser reads. |
 
 Zero runtime dependencies — Python stdlib only ([`pyproject.toml`](pyproject.toml)). The whole package is about 17k lines of Python (`scripts/`, excluding tests).
 
@@ -129,6 +130,33 @@ installed client never requests `repo` scope and never transmits any other GitHu
 credential (such as a local `gh` CLI token). Separately, web sign-in may request
 broader GitHub access so the server can count commits across repositories you can
 read. The full server-side privacy policy is at [conductorscore.com/privacy](https://conductorscore.com/privacy).
+
+## Which signals are supported for each agent?
+
+Coverage matches the ConductorScore FAQ matrix (`●` = Full, `◐` = Partial, `○` = Not yet), reflecting what each agent writes locally to disk:
+
+| Category | Signal | Claude Code | Codex | Cursor | Antigravity |
+|---|---|---|---|---|---|
+| **Leverage** | Agent leverage & longest run | ● | ● | ◐ | ◐ |
+| **Output** | Commits | ● | ● | ◐ | ● |
+| **Output** | Lines changed | ● | ● | ● | ● |
+| **Craft** | Coding without a plan | ● | ◐ | ◐ | ● |
+| **Craft** | Revert rate | ● | ● | ◐ | ● |
+| **Craft** | Repetitive prompts | ● | ● | ● | ● |
+| **Craft** | Rage quits | ● | ◐ | ◐ | ● |
+| **Craft** | Auto-compaction rate | ● | ◐ | ○ | ○ |
+| **Craft** | Redundant approvals | ● | ◐ | ◐ | ◐ |
+| **Customization** | Skills | ● | ◐ | ○ | ◐ |
+| **Customization** | MCP tools | ● | ● | ◐ | ◐ |
+| **Customization** | Plugins | ● | ◐ | ○ | ◐ |
+| **Efficiency** | Cost per commit | ● | ● | ○ | ◐ |
+| **Attribution** | Model attribution | ● | ● | ◐ | ◐ |
+
+Notes on Google Antigravity support:
+- **Skills (`◐`) & Plugins (`◐`)**: Skills are inferred structurally from `read_file` / `view_file` / `run_command` reads of `.../skills/<name>/SKILL.md` (mirroring Codex), plus global skill counts (`config.py`); installed Antigravity plugins under `~/.gemini/config/plugins/` populate `plugin_count` (matching Codex's `◐` coverage).
+- **Agent leverage & longest run (`◐`)**: Measures main-thread interactive/background/idle time and tool spans accurately via `TOOL_RESULT` pairing plus subagent dispatches (`invoke_subagent`, `swarm`, `browser_subagent`), without separate subagent transcript trees or explicit permission-wait grants (`permission_signal = "not_available"`).
+- **Redundant approvals (`◐`) & Auto-compaction (`○`)**: Wait-gap approval proxy fires on `run_command` and edit tools, while explicit grant/denial decisions and auto-compaction boundaries are not logged on disk.
+- **Efficiency & Model attribution (`◐`)**: Full Gemini model and token accounting (with `input_miss` / `input_hit` split) on Antigravity builds that log `model` + token usage; IDE builds that omit token/model telemetry set `token_data_missing = true` so cost denominators are not understated.
 
 ## License
 

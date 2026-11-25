@@ -43,6 +43,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Shared classifier — single source of truth (also drives the live card).
+from scripts.agents.antigravity.discovery import (
+    is_antigravity_transcript as _is_antigravity_transcript,
+)
+from scripts.agents.antigravity.events import (
+    read_events_and_text as _antigravity_read_events_and_text,
+)
 from scripts.agents.claude.events import (
     SubagentRecords,
     parse_transcript_records,
@@ -437,38 +443,8 @@ def parse_codex_session(jsonl_path: Path) -> list[TimelineMessage]:
     return messages
 
 
-def parse_cursor_session(locator: Path) -> list[TimelineMessage]:
-    """Parse a Cursor session locator into chronological timeline bubbles.
-
-    Unlike Claude/Codex, a Cursor session has no on-disk JSONL to line-parse
-    -- the locator (``"<db>#ide:<id>"``/``"<db>#cli:<id>"``, see
-    ``scripts.agents.cursor.store.make_locator``) points into a SQLite store
-    read via ``scripts.agents.cursor.events.read_events_and_text``. Bubbles
-    are built directly from that already-normalized ``Event`` stream instead
-    of raw rows:
-
-      * ``USER`` -> 'user' bubble. Raw text comes from the in-memory
-        ``text_map`` (id(event) -> text) the Cursor reader returns
-        side-channel -- never from the ``Event`` itself -- so redaction
-        (``_redact_messages``) replaces it with the same wire-equivalent
-        hash+count marker used for Claude/Codex, and ``--no-redact`` reveals
-        the same real text.
-      * ``ASSISTANT_TEXT`` -> 'assistant_text' bubble. The Cursor reader does
-        not capture raw assistant response text (only token counts -- see
-        ``scripts.agents.cursor.events``), so the bubble text is always
-        empty; ``is_end_turn`` still reflects ``stop_reason == "end_turn"``.
-      * ``ASSISTANT_TOOL``/``TOOL_RESULT`` -> one 'assistant_tool' bubble per
-        call, paired by ``tool_use_id`` (mirrors the Claude/Codex
-        pending_tools pairing above) so the tool's wall-time renders as a
-        duration span. Bubble text is intentionally left empty --
-        ``Event.raw_input`` is an in-process-detector-only field
-        (``repr=False``, never serialized) and must not be surfaced in the
-        viewer, matching Codex's tool bubbles (which also render no input
-        summary).
-      * ``ASSISTANT_THINKING`` -> no bubble (mirrors Claude/Codex, which
-        don't render thinking blocks either).
-    """
-    events, text_map = _cursor_read_events_and_text(locator)
+def _events_to_timeline_messages(events, text_map: dict[int, str]) -> list[TimelineMessage]:
+    """Convert normalized ``(events, text_map)`` into timeline bubbles (shared by Cursor/Antigravity)."""
     messages: list[TimelineMessage] = []
     # tool_use_id -> message index of the tool bubble awaiting its result.
     pending_tools: dict[str, int] = {}
@@ -510,24 +486,27 @@ def parse_cursor_session(locator: Path) -> list[TimelineMessage]:
     return messages
 
 
+def parse_cursor_session(locator: Path) -> list[TimelineMessage]:
+    """Parse a Cursor session locator into chronological timeline bubbles."""
+    events, text_map = _cursor_read_events_and_text(locator)
+    return _events_to_timeline_messages(events, text_map)
+
+
+def parse_antigravity_session(jsonl_path: Path) -> list[TimelineMessage]:
+    """Parse an Antigravity ``transcript.jsonl`` into chronological timeline bubbles."""
+    events, text_map = _antigravity_read_events_and_text(jsonl_path)
+    return _events_to_timeline_messages(events, text_map)
+
+
 def parse_session(jsonl_path: Path) -> list[TimelineMessage]:
     """Parse the main JSONL into chronological timeline bubbles.
 
-    Auto-detects a Cursor session LOCATOR and delegates to
-    ``parse_cursor_session``; else a Codex rollout and delegates to
-    ``parse_codex_session``; otherwise parses the Claude row vocabulary
-    below. The Cursor check MUST run first: a locator is not a real,
-    directly-openable file, so it must never reach the Codex JSONL sniff
-    (``_is_codex_jsonl``), which opens the path.
-
-    Mirrors the notebook prototype's parser, with one addition: the
-    AskUserQuestion tool_result is materialized as a USER bubble (its
-    `content` text is what the human typed into the dialog). The
-    classifier already treats it as a soft-USER event upstream, so this
-    keeps the rendered timeline consistent with the classification.
+    Auto-detects Cursor, Antigravity, Codex, or Claude transcripts.
     """
     if _is_cursor_locator(jsonl_path):
         return parse_cursor_session(jsonl_path)
+    if _is_antigravity_transcript(jsonl_path):
+        return parse_antigravity_session(jsonl_path)
     if _is_codex_jsonl(jsonl_path):
         return parse_codex_session(jsonl_path)
 
@@ -1854,7 +1833,7 @@ def _build_time_accounting_section(
     window = (min(ts), max(ts))
     segments = partition_main_thread(events, window)
     # Subagent / Workflow transcripts are a Claude layout.
-    claude = not (_is_cursor_locator(jsonl_path) or _is_codex_jsonl(jsonl_path))
+    claude = not (_is_cursor_locator(jsonl_path) or _is_antigravity_transcript(jsonl_path) or _is_codex_jsonl(jsonl_path))
     agents = account_agents(
         events,
         jsonl_path if claude else None,
@@ -2166,6 +2145,7 @@ def render_session(
 __all__ = [
     "render_session",
     "parse_session",
+    "parse_antigravity_session",
     "parse_codex_session",
     "parse_cursor_session",
     "main",
@@ -2198,17 +2178,21 @@ def _captured_transcript() -> Path | None:
 
 
 def _all_sessions_sorted() -> list:
-    """All discoverable local sessions (Claude + Codex + Cursor), newest
+    """All discoverable local sessions (Claude + Codex + Cursor + Antigravity), newest
     activity first.
 
-    Reuses the production discovery (``find_sessions`` / ``find_codex_sessions``
-    / ``find_cursor_sessions``) — the same code that finds sessions for the
-    scan.
+    Reuses the production discovery functions — the same code that finds
+    sessions for the scan.
     """
-    from scripts.events import find_codex_sessions, find_cursor_sessions, find_sessions
+    from scripts.events import (
+        find_antigravity_sessions,
+        find_codex_sessions,
+        find_cursor_sessions,
+        find_sessions,
+    )
 
     sessions = []
-    for finder in (find_sessions, find_codex_sessions, find_cursor_sessions):
+    for finder in (find_sessions, find_codex_sessions, find_cursor_sessions, find_antigravity_sessions):
         try:
             sessions.extend(finder())
         except Exception:
@@ -2219,13 +2203,13 @@ def _all_sessions_sorted() -> list:
 
 
 def _provider_label(jsonl_path: Path) -> str:
-    """``'cursor'`` | ``'codex'`` | ``'claude'`` — the provider that produced
-    ``jsonl_path``. Cursor is checked first: a locator's ``#kind:id`` suffix
-    is not a real, directly-openable file, so it must never reach the Codex
-    sniff (``_is_codex_jsonl``), which opens the path.
+    """``'cursor'`` | ``'antigravity'`` | ``'codex'`` | ``'claude'`` — the provider that produced
+    ``jsonl_path``.
     """
     if _is_cursor_locator(jsonl_path):
         return "cursor"
+    if _is_antigravity_transcript(jsonl_path):
+        return "antigravity"
     if _is_codex_jsonl(jsonl_path):
         return "codex"
     return "claude"

@@ -13,6 +13,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.agents.antigravity import events as _antigravity_events
+from scripts.agents.antigravity.discovery import (
+    antigravity_home,
+    find_sessions as find_antigravity_sessions,
+    is_antigravity_transcript,
+)
 from scripts.agents.claude.discovery import claude_home, find_sessions
 from scripts.agents.claude.events import (
     SubagentRecords,
@@ -61,6 +67,8 @@ def read_events(jsonl_path: Path) -> list[Event]:
     path = Path(jsonl_path)
     if is_cursor_locator(path):
         return _cursor_events.read_events(path)
+    if is_antigravity_transcript(path):
+        return _antigravity_events.read_events(path)
     if _codex_events.is_codex_jsonl(path):
         return _codex_events.read_events(path)
     return _claude_read_events(path)
@@ -73,14 +81,16 @@ def read_events_and_text(
     subagent_records: SubagentRecords | None = None,
 ) -> tuple[list[Event], dict[int, str]]:
     """Like ``read_events`` but also returns the in-memory raw-text map for
-    the Feature-7 detectors. Auto-detects Cursor vs Codex vs Claude (see
+    the Feature-7 detectors. Auto-detects Cursor vs Antigravity vs Codex vs Claude (see
     ``read_events``). The returned text map is a side-channel that is never
     serialized. ``include_subagent_usage`` and ``subagent_records`` reach the
-    Claude parser only (Codex and Cursor have no subagent transcripts).
+    Claude parser only (Codex, Cursor, and Antigravity have no subagent transcripts).
     """
     path = Path(jsonl_path)
     if is_cursor_locator(path):
         return _cursor_events.read_events_and_text(path)
+    if is_antigravity_transcript(path):
+        return _antigravity_events.read_events_and_text(path)
     if _codex_events.is_codex_jsonl(path):
         return _codex_events.read_events_and_text(path)
     return _claude_read_events_and_text(
@@ -94,9 +104,11 @@ __all__ = [
     "Event",
     "EventKind",
     "SessionMeta",
+    "antigravity_home",
     "claude_home",
     "codex_home",
     "cursor_home",
+    "find_antigravity_sessions",
     "find_codex_sessions",
     "find_cursor_sessions",
     "find_sessions",

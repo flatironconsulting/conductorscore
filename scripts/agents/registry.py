@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
+from scripts.agents.antigravity import AntigravityAdapter
 from scripts.agents.base import AgentAdapter, AgentId
 from scripts.agents.claude import ClaudeAdapter
 from scripts.agents.codex import CodexAdapter
@@ -34,6 +35,7 @@ _KNOWN_ADAPTERS: dict[AgentId, type] = {
     "claude": ClaudeAdapter,
     "codex": CodexAdapter,
     "cursor": CursorAdapter,
+    "antigravity": AntigravityAdapter,
 }
 
 _DEFAULT_SELECTION: list[AgentId] = ["claude"]

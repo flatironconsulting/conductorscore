@@ -371,7 +371,7 @@ All v0.1 + v0.2 + v0.3 fields remain unchanged. The following are added:
 | `strong_plan_signals`          | array of strings | no       | Insertion-order list of strong planning-signal NAMES that fired in this session. Allowed values: `"EnterPlanMode"`, `"/writing-plans skill"`, `"/brainstorming skill"`, `"TodoWrite>=3"`, `"plan_file_write"`. Each fires at most once per session. |
 | `weak_plan_signals`            | array of strings | no       | Insertion-order list of weak planning-signal NAMES that fired. Allowed values: `"structured_first_prompt"`, `"plan_md_read_early"`, `"prior_24h_plan_artifact"`. |
 | `is_planned`                   | boolean          | no       | True iff `len(strong_plan_signals) >= 1` OR `len(weak_plan_signals) >= 2`. Per outline § "planned". |
-| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding paths containing `.claude/`, `.cursor/`, `.codex/` or `.git/`, and basenames `CLAUDE.md` / `AGENTS.md` (see [Excluded edit paths](#excluded-edit-paths)). Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
+| `files_modified`               | integer          | no       | Distinct file paths touched by Edit/Write/MultiEdit tool calls this session, after excluding paths containing `.claude/`, `.cursor/`, `.codex/`, `.gemini/` or `.git/`, and basenames `CLAUDE.md` / `AGENTS.md` (see [Excluded edit paths](#excluded-edit-paths)). Deduplication is done via `sha256(file_path)[:16]` at read time so the raw path never leaves the client. |
 | `total_lines_edited`           | integer          | no       | Outline approximation: `sum over Edit/Write/MultiEdit of max(line_count(new_string), line_count(old_string))`. For Write this collapses to `line_count(content)`. For MultiEdit the per-edit max is summed across the `edits` array. Excluded-path edits contribute 0. |
 | `commit_count`                 | integer          | no       | Number of commit-creating `git commit` invocations counted from the session's shell COMMAND text (Claude `Bash`; Codex `shell`/`exec_command`/`shell_command`). `--amend`, `--dry-run`, `commit-tree`, and `-h`/`--help` are excluded. Chained commands are split on `&&`/`\|\|`/`;`/newline so each real segment counts once. Transcript-only — no GitHub data is fetched; only the integer count crosses the wire (the command/message text is consumed in-memory and never serialized). |
 | `is_significant_edit_session`  | boolean          | no       | True iff `files_modified > 5` OR `total_lines_edited > 200`. Per outline § "significant edits"; gates the Coding-without-a-plan denominator. |
@@ -423,7 +423,7 @@ Edits to the following are NEVER counted toward `files_modified` or
 same rule applies to every agent (Claude, Codex, Cursor); it lives in
 `scripts/core/edits.py`:
 
-- any path containing the directory part `.claude/`, `.cursor/`, `.codex/` or `.git/`
+- any path containing the directory part `.claude/`, `.cursor/`, `.codex/`, `.gemini/` or `.git/`
   (plain substring test, so `a/.claude/x` and `.git/config` both match),
 - any path whose basename is exactly `CLAUDE.md` or `AGENTS.md`.
 
@@ -935,13 +935,13 @@ below) — also additive, also no schema-version bump.
 
 | Field      | Type   | Default    | Notes                                                                                   |
 |------------|--------|------------|-----------------------------------------------------------------------------------------|
-| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"` \| `"cursor"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"` / `"cursor"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
+| `provider` | string | `"claude"` | The agent that produced the session. One of `"claude"` \| `"codex"` \| `"cursor"` \| `"antigravity"`. **Omitted** when it would be the default (`"claude"`); present only on non-default (`"codex"` / `"cursor"` / `"antigravity"`) sessions. The server MUST treat an absent `provider` as `"claude"`. |
 
 ### Top-level `providers_seen`
 
 | Field            | Type             | Default      | Notes                                                                                  |
 |------------------|------------------|--------------|----------------------------------------------------------------------------------------|
-| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run — a subset of `["claude","codex","cursor"]` in sorted order (e.g. `["claude"]`, `["codex"]`, `["cursor"]`, `["claude","codex"]`, `["claude","codex","cursor"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
+| `providers_seen` | array of strings | `["claude"]` | Sorted, de-duplicated list of every provider the device scanned this run — a subset of `["claude","codex","cursor","antigravity"]` in sorted order (e.g. `["claude"]`, `["codex"]`, `["cursor"]`, `["antigravity"]`, `["claude","antigravity"]`). **Omitted** when it would be exactly `["claude"]`. The server MUST treat absence as `["claude"]`. |
 
 ### Byte-equivalence guarantee
 
@@ -956,8 +956,8 @@ tests are unaffected.
 `provider` and `providers_seen` are closed-set categorical labels
 (`"claude"` / `"codex"` / `"cursor"`) — no transcript content. Codex and
 Cursor sessions follow the same privacy invariant as Claude: the project
-`cwd` is hashed into `project_hash` (namespaced `codex:<cwd>` / `cursor:<cwd>`
-to avoid cross-provider hash collisions), user prose is reduced to a hash +
+`cwd` is hashed into `project_hash` (namespaced `codex:<cwd>` / `cursor:<cwd>` /
+`antigravity:<cwd>` to avoid cross-provider hash collisions), user prose is reduced to a hash +
 token count, and shell commands / `apply_patch` file paths are never
 serialized. The Codex model id (e.g. `gpt-5-codex`) and the Cursor model id
 (e.g. `composer-2.5`) are public categoricals and ride plaintext in
@@ -1005,11 +1005,16 @@ shape.
 - `provider` defaults to `"claude"`; `providers_seen` defaults to
   `["claude"]`; `token_data_missing` defaults to `false`. The server MUST
   treat absence identically to those defaults.
-- `provider` values are a CLOSED enum (`"claude"`, `"codex"`, `"cursor"`).
+- `provider` values are a CLOSED enum (`"claude"`, `"codex"`, `"cursor"`, `"antigravity"`).
   Unknown provider strings indicate a drift the server hasn't acknowledged.
 
 ### Changelog
 
+- **2026-11-25** — Google Antigravity added as a fourth provider (additive on
+  the existing v0.14 envelope, no `schema_version` bump): `provider` /
+  `providers_seen` closed enum extended to include `"antigravity"`;
+  `project_hash` namespacing note extended with `antigravity:<cwd>`. See
+  `docs/ANTIGRAVITY_FORMAT.md`.
 - **2026-07-17** — Cursor added as a third provider: `provider` /
   `providers_seen` closed enum extended from (`"claude"` \| `"codex"`) to
   (`"claude"` \| `"codex"` \| `"cursor"`); `project_hash` namespacing note

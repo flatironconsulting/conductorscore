@@ -642,7 +642,7 @@ def _reemit_result(decision: str) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="conductorscore", add_help=False)
     parser.add_argument(
-        "--providers", choices=["all", "claude", "codex", "cursor"], default=None
+        "--providers", choices=["all", "claude", "codex", "cursor", "antigravity"], default=None
     )
     parser.add_argument("--daily", choices=["yes", "no"], default=None)
     parser.add_argument("--step", action="store_true")

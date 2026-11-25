@@ -32,7 +32,7 @@ def test_cursor_adapter_scan_config_is_all_zero_for_empty_home(monkeypatch, tmp_
 
 def test_registry_knows_cursor():
     assert parse_agent_selection("cursor") == ["cursor"]
-    assert parse_agent_selection("all") == ["claude", "codex", "cursor"]
+    assert parse_agent_selection("all") == ["claude", "codex", "cursor", "antigravity"]
     assert [a.agent_id for a in adapters_for(["claude", "cursor"])] == [
         "claude",
         "cursor",

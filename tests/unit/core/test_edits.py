@@ -12,7 +12,7 @@ from scripts.core.edits import (
 
 
 def test_constants():
-    assert EXCLUDED_EDIT_DIR_PARTS == (".claude/", ".cursor/", ".codex/", ".git/")
+    assert EXCLUDED_EDIT_DIR_PARTS == (".claude/", ".cursor/", ".codex/", ".gemini/", ".git/")
     assert EXCLUDED_EDIT_BASENAMES == frozenset({"CLAUDE.md", "AGENTS.md"})
 
 
@@ -24,6 +24,8 @@ def test_constants():
         ("/repo/.claude/settings.json", True),
         ("/repo/.cursor/rules/x.mdc", True),
         ("proj/.codex/config.toml", True),
+        ("/home/u/.gemini/antigravity/brain/s1/implementation_plan.md", True),
+        (r"C:\Users\u\.gemini\antigravity-ide\brain\s1\task.md", True),
         ("/repo/.git/config", True),
         ("/repo/CLAUDE.md", True),
         ("proj/AGENTS.md", True),

@@ -18,7 +18,7 @@ from typing import Callable, Iterable, Literal, Protocol, runtime_checkable
 from scripts.core.normalized import Event, SessionMeta
 from scripts.core.thresholds import MS_PER_DAY
 
-AgentId = Literal["claude", "codex", "cursor"]
+AgentId = Literal["claude", "codex", "cursor", "antigravity"]
 
 
 @runtime_checkable

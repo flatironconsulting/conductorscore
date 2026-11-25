@@ -67,7 +67,7 @@ from scripts.core.thresholds import APPROVAL_WAIT_MS
 # divergence from the ``commit_counter`` / ``revert_detector`` set (task-2
 # audit). Kept local rather than silently widened, to preserve behavior.
 _SHELL_TOOL_NAMES: frozenset[str] = frozenset(
-    {"Bash", "shell", "exec_command", "shell_command", "Shell"}
+    {"Bash", "shell", "exec_command", "shell_command", "Shell", "run_command"}
 )
 
 # Codex applies edits through ``apply_patch``. It carries no single

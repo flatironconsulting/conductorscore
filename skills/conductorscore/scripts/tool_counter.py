@@ -671,6 +671,47 @@ def count_cursor_tools(events) -> ToolCounts:
     )
 
 
+def count_antigravity_tools(events) -> ToolCounts:
+    """Count Antigravity tool usage and inferred SKILL.md reads from normalized ``Event``s."""
+    from scripts.agents.antigravity.taxonomy import (
+        KNOWN_TOOL_NAMES,
+        SHELL_TOOL_NAMES,
+        TASK_TOOL_NAMES,
+        skill_names_from_shell_command,
+    )
+
+    def classify(name: str) -> str:
+        if is_mcp_tool_name(name):
+            return "mcp"
+        if name in KNOWN_TOOL_NAMES:
+            return "builtin"
+        return "unknown"
+
+    def skills_from_builtin(event) -> tuple[str, ...]:
+        if getattr(event, "skill_name", None):
+            return (event.skill_name,)
+        if event.tool_name in SHELL_TOOL_NAMES and isinstance(event.raw_input, dict):
+            return skill_names_from_shell_command(event.raw_input.get("command") or "")
+        return ()
+
+    result = _count_tools_from_events(
+        events,
+        classify=classify,
+        is_dispatch=lambda name: name in TASK_TOOL_NAMES,
+        skills_from_builtin=skills_from_builtin,
+    )
+
+    return ToolCounts(
+        distinct_skills=result["skills"],
+        distinct_mcp_tools=result["mcp"],
+        distinct_builtin_tools=result["builtin"],
+        builtin_tool_invocations=result["builtin_invocations"],
+        agent_dispatches=result["agent_dispatches"],
+        skill_invocations=result["skill_invocations"],
+        skill_invocations_by_name=result["skills_by_name"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # v0.6 — Task 8.1 client: HITL-window MCP counting.
 # ---------------------------------------------------------------------------

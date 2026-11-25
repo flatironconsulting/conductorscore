@@ -17,12 +17,14 @@ from scripts.agents.claude.config import (
 # installed skills, AGENTS.md instruction lines) lives at the Codex adapter
 # edge. Re-exported here under a provider-qualified name so the scanner and
 # tests reach it through the same facade as the Claude scanner.
+from scripts.agents.antigravity.config import scan_config as scan_antigravity_config
 from scripts.agents.codex.config import scan_config as scan_codex_config
 
 __all__ = [
     "ConfigCounts",
     "count_claude_md_lines",
     "read_installed_plugins",
+    "scan_antigravity_config",
     "scan_codex_config",
     "scan_config",
 ]

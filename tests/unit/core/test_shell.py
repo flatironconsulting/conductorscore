@@ -22,12 +22,23 @@ from scripts.core.shell import (
 class TestToolNameSets:
     def test_shell_tool_names_contains_expected_cross_provider_names(self):
         assert SHELL_TOOL_NAMES == frozenset(
-            {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec"}
+            {"Bash", "shell", "exec_command", "shell_command", "Shell", "exec", "run_command"}
         )
 
     def test_edit_tool_names_contains_expected_cross_provider_names(self):
         assert EDIT_TOOL_NAMES == frozenset(
-            {"Edit", "Write", "MultiEdit", "StrReplace", "Delete"}
+            {
+                "Edit",
+                "Write",
+                "MultiEdit",
+                "StrReplace",
+                "Delete",
+                "edit_file",
+                "write_file",
+                "replace_file_content",
+                "multi_replace_file_content",
+                "write_to_file",
+            }
         )
 
     def test_both_are_frozensets(self):
